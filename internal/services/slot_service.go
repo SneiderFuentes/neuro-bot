@@ -1,0 +1,273 @@
+package services
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/neuro-bot/neuro-bot/internal/domain"
+	"github.com/neuro-bot/neuro-bot/internal/repository"
+)
+
+type SlotService struct {
+	doctorRepo   repository.DoctorRepository
+	scheduleRepo repository.ScheduleRepository
+}
+
+func NewSlotService(doctorRepo repository.DoctorRepository, scheduleRepo repository.ScheduleRepository) *SlotService {
+	return &SlotService{
+		doctorRepo:   doctorRepo,
+		scheduleRepo: scheduleRepo,
+	}
+}
+
+type SlotQuery struct {
+	CupsCode        string
+	PatientAge      int
+	IsContrasted    bool
+	IsSedated       bool
+	Espacios        int    // Consecutive slots needed
+	PreferredDoctor string // Doctor document (from prior consultation)
+	AfterDate       string // For pagination (YYYY-MM-DD)
+	MaxSlots        int    // Default 5
+	ClinicAddress   string // Procedure clinic address
+}
+
+type AvailableSlot struct {
+	Date          string `json:"date"`
+	TimeSlot      string `json:"time_slot"`
+	TimeDisplay   string `json:"time_display"`
+	DoctorName    string `json:"doctor_name"`
+	DoctorDoc     string `json:"doctor_doc"`
+	AgendaID      int    `json:"agenda_id"`
+	ClinicAddress string `json:"clinic_address"`
+	Duration      int    `json:"duration"` // Minutes per slot
+}
+
+// GetAvailableSlots searches for available appointment slots with all filters applied.
+func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([]AvailableSlot, error) {
+	if query.MaxSlots == 0 {
+		query.MaxSlots = 5
+	}
+	if query.Espacios == 0 {
+		query.Espacios = 1
+	}
+
+	// 1. Find doctors for this CUPS
+	doctors, err := s.doctorRepo.FindByCupsCode(ctx, query.CupsCode)
+	if err != nil {
+		return nil, fmt.Errorf("find doctors: %w", err)
+	}
+	if len(doctors) == 0 {
+		return nil, nil
+	}
+
+	// 2. Filter by age restrictions
+	var filteredDoctors []domain.Doctor
+	for _, doc := range doctors {
+		minAge, _, exists := GetDoctorAgeRestriction(doc.Document)
+		if exists && query.PatientAge < minAge {
+			continue
+		}
+		filteredDoctors = append(filteredDoctors, doc)
+	}
+
+	// 3. Filter by preferred doctor (from prior consultation)
+	if query.PreferredDoctor != "" {
+		var preferred []domain.Doctor
+		for _, doc := range filteredDoctors {
+			if doc.Document == query.PreferredDoctor {
+				preferred = append(preferred, doc)
+			}
+		}
+		if len(preferred) > 0 {
+			filteredDoctors = preferred
+		}
+		// If preferred doctor not in filtered list, use all doctors
+	}
+
+	if len(filteredDoctors) == 0 {
+		return nil, nil
+	}
+
+	// 4. Build doctor docs list and lookup map
+	docDocs := make([]string, len(filteredDoctors))
+	docMap := make(map[string]domain.Doctor)
+	for i, doc := range filteredDoctors {
+		docDocs[i] = doc.Document
+		docMap[doc.Document] = doc
+	}
+
+	// 5. Find future working days for all doctors
+	workingDays, err := s.scheduleRepo.FindFutureWorkingDays(ctx, docDocs)
+	if err != nil {
+		return nil, fmt.Errorf("find working days: %w", err)
+	}
+	if len(workingDays) == 0 {
+		return nil, nil
+	}
+
+	// 6. Calculate available slots per working day
+	var allSlots []AvailableSlot
+	configCache := make(map[string]*domain.ScheduleConfig)
+
+	for _, day := range workingDays {
+		// Skip if before pagination cursor
+		if query.AfterDate != "" && day.Date <= query.AfterDate {
+			continue
+		}
+
+		// Contrasted: no Saturdays
+		if query.IsContrasted {
+			dt, _ := time.Parse("2006-01-02", day.Date)
+			if dt.Weekday() == time.Saturday {
+				continue
+			}
+		}
+
+		// Get schedule config (cached per agenda+doctor)
+		cacheKey := fmt.Sprintf("%d-%s", day.AgendaID, day.DoctorDocument)
+		cfg, ok := configCache[cacheKey]
+		if !ok {
+			cfg, err = s.scheduleRepo.FindScheduleConfig(ctx, day.AgendaID, day.DoctorDocument)
+			if err != nil || cfg == nil {
+				continue
+			}
+			configCache[cacheKey] = cfg
+		}
+
+		// Get booked slots for this day+agenda
+		bookedSlots, err := s.scheduleRepo.FindBookedSlots(ctx, day.AgendaID, day.Date)
+		if err != nil {
+			continue
+		}
+		bookedSet := make(map[string]bool)
+		for _, ts := range bookedSlots {
+			bookedSet[ts] = true
+		}
+
+		doctor := docMap[day.DoctorDocument]
+		daySlots := calculateDaySlots(cfg, day, query, doctor, bookedSet)
+		allSlots = append(allSlots, daySlots...)
+
+		if len(allSlots) >= query.MaxSlots {
+			break
+		}
+	}
+
+	if len(allSlots) > query.MaxSlots {
+		allSlots = allSlots[:query.MaxSlots]
+	}
+
+	return allSlots, nil
+}
+
+// calculateDaySlots generates available slots for a specific working day.
+func calculateDaySlots(cfg *domain.ScheduleConfig, day domain.WorkingDay, query SlotQuery, doctor domain.Doctor, booked map[string]bool) []AvailableSlot {
+	dt, _ := time.Parse("2006-01-02", day.Date)
+	weekday := int(dt.Weekday()) // 0=Sunday
+
+	if !cfg.WorkDays[weekday] {
+		return nil
+	}
+
+	duration := cfg.AppointmentDuration
+	if duration <= 0 {
+		return nil
+	}
+
+	dateStr := strings.ReplaceAll(day.Date, "-", "") // YYYYMMDD
+
+	// Collect time ranges (morning + afternoon)
+	type timeRange struct {
+		start, end int // minutes from midnight
+	}
+	var ranges []timeRange
+
+	if day.MorningEnabled && cfg.MorningStart[weekday] != "" && cfg.MorningEnd[weekday] != "" {
+		start := parseHHMMToMinutes(cfg.MorningStart[weekday])
+		end := parseHHMMToMinutes(cfg.MorningEnd[weekday])
+		if start < end {
+			ranges = append(ranges, timeRange{start, end})
+		}
+	}
+
+	if day.AfternoonEnabled && cfg.AfternoonStart[weekday] != "" && cfg.AfternoonEnd[weekday] != "" {
+		start := parseHHMMToMinutes(cfg.AfternoonStart[weekday])
+		end := parseHHMMToMinutes(cfg.AfternoonEnd[weekday])
+		if start < end {
+			ranges = append(ranges, timeRange{start, end})
+		}
+	}
+
+	// Contrasted time restrictions: 7AM - 5PM only
+	if query.IsContrasted {
+		var filtered []timeRange
+		for _, r := range ranges {
+			start := r.start
+			end := r.end
+			if start < 7*60 {
+				start = 7 * 60
+			}
+			if end > 17*60 {
+				end = 17 * 60
+			}
+			if start < end {
+				filtered = append(filtered, timeRange{start, end})
+			}
+		}
+		ranges = filtered
+	}
+
+	var slots []AvailableSlot
+	for _, r := range ranges {
+		for minutes := r.start; minutes+duration <= r.end; minutes += duration {
+			timeSlot := fmt.Sprintf("%s%02d%02d", dateStr, minutes/60, minutes%60)
+
+			if booked[timeSlot] {
+				continue
+			}
+
+			// Check consecutive slot availability
+			if query.Espacios > 1 {
+				allFree := true
+				for i := 1; i < query.Espacios; i++ {
+					nextMin := minutes + (i * duration)
+					nextSlot := fmt.Sprintf("%s%02d%02d", dateStr, nextMin/60, nextMin%60)
+					if nextMin+duration > r.end || booked[nextSlot] {
+						allFree = false
+						break
+					}
+				}
+				if !allFree {
+					continue
+				}
+			}
+
+			slots = append(slots, AvailableSlot{
+				Date:          day.Date,
+				TimeSlot:      timeSlot,
+				TimeDisplay:   FormatTimeSlot(timeSlot),
+				DoctorName:    doctor.FullName,
+				DoctorDoc:     doctor.Document,
+				AgendaID:      day.AgendaID,
+				ClinicAddress: query.ClinicAddress,
+				Duration:      duration,
+			})
+		}
+	}
+
+	return slots
+}
+
+// parseHHMMToMinutes converts "HH:mm" to minutes since midnight.
+func parseHHMMToMinutes(t string) int {
+	if len(t) < 5 {
+		return 0
+	}
+	hour, _ := strconv.Atoi(t[:2])
+	minute, _ := strconv.Atoi(t[3:5])
+	return hour*60 + minute
+}

@@ -1,0 +1,134 @@
+package statemachine
+
+import (
+	"context"
+	"strings"
+
+	"github.com/neuro-bot/neuro-bot/internal/bird"
+	"github.com/neuro-bot/neuro-bot/internal/session"
+)
+
+// MenuResetInterceptor permite al usuario volver al inicio con keywords.
+// Gracias al auto-chain en Process(), el estado GREETING (automático) se ejecuta
+// de inmediato y el usuario ve el saludo + menú sin necesidad de enviar otro mensaje.
+func MenuResetInterceptor() Interceptor {
+	keywords := map[string]bool{
+		"menu": true, "menú": true, "inicio": true, "reiniciar": true, "0": true,
+	}
+
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*StateResult, bool) {
+		// No interceptar en estados terminales
+		if sess.CurrentState == StateTerminated || sess.CurrentState == StateEscalated {
+			return nil, false
+		}
+
+		// No interceptar postbacks (son respuestas a botones)
+		if msg.IsPostback {
+			return nil, false
+		}
+
+		input := strings.TrimSpace(strings.ToLower(msg.Text))
+		if !keywords[input] {
+			return nil, false
+		}
+
+		sess.RetryCount = 0
+
+		result := NewResult(StateGreeting).
+			WithEvent("menu_reset", map[string]interface{}{
+				"from_state": sess.CurrentState,
+				"keyword":    input,
+			})
+
+		// Señal especial para ClearAllContext
+		result.ClearCtx = []string{"__all__"}
+
+		return result, true
+	}
+}
+
+// UnsupportedMessageInterceptor rechaza tipos de mensaje no soportados
+func UnsupportedMessageInterceptor() Interceptor {
+	unsupported := map[string]bool{
+		"audio": true, "video": true, "location": true,
+		"contact": true, "sticker": true,
+	}
+
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*StateResult, bool) {
+		if !unsupported[msg.MessageType] {
+			return nil, false
+		}
+
+		result := NewResult(sess.CurrentState).
+			WithText("⚠️ Solo puedo procesar mensajes de texto y fotos de órdenes médicas. Por favor, envía tu respuesta como texto.").
+			WithEvent("unsupported_message", map[string]interface{}{
+				"type":  msg.MessageType,
+				"state": sess.CurrentState,
+			})
+
+		return result, true
+	}
+}
+
+// ImageOutOfContextInterceptor rechaza imágenes fuera del estado UPLOAD_MEDICAL_ORDER
+func ImageOutOfContextInterceptor() Interceptor {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*StateResult, bool) {
+		if msg.MessageType != "image" {
+			return nil, false
+		}
+
+		// Imagen SÍ es esperada en UPLOAD_MEDICAL_ORDER
+		if sess.CurrentState == StateUploadMedicalOrder {
+			return nil, false
+		}
+
+		result := NewResult(sess.CurrentState).
+			WithText("No esperaba una imagen en este momento. Si necesitas enviar una orden médica, primero selecciona la opción de agendar cita.").
+			WithEvent("image_out_of_context", map[string]interface{}{
+				"state": sess.CurrentState,
+			})
+
+		return result, true
+	}
+}
+
+// EscalationKeywordsInterceptor allows users to request a human agent from any state
+// by typing keywords like "agente", "asesor", "humano", "ayuda" (R-CHAT-04).
+func EscalationKeywordsInterceptor() Interceptor {
+	keywords := map[string]bool{
+		"agente": true, "asesor": true, "humano": true, "ayuda": true,
+	}
+
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*StateResult, bool) {
+		// No interceptar en estados terminales o ya escalados
+		if sess.CurrentState == StateTerminated || sess.CurrentState == StateEscalated ||
+			sess.CurrentState == StateEscalateToAgent {
+			return nil, false
+		}
+
+		// No interceptar postbacks
+		if msg.IsPostback {
+			return nil, false
+		}
+
+		input := strings.TrimSpace(strings.ToLower(msg.Text))
+		if !keywords[input] {
+			return nil, false
+		}
+
+		sess.RetryCount = 0
+		return NewResult(StateEscalateToAgent).
+			WithEvent("escalation_requested", map[string]interface{}{
+				"from_state": sess.CurrentState,
+				"keyword":    input,
+			}), true
+	}
+}
+
+// RegisterInterceptors registra todos los interceptores en la máquina
+func RegisterInterceptors(machine *Machine) {
+	machine.AddInterceptor(UnsupportedMessageInterceptor())
+	machine.AddInterceptor(ImageOutOfContextInterceptor())
+	machine.AddInterceptor(EscalationKeywordsInterceptor()) // Before menu reset
+	machine.AddInterceptor(MenuResetInterceptor())
+}

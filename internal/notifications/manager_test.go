@@ -1,0 +1,1589 @@
+package notifications
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/neuro-bot/neuro-bot/internal/bird"
+	"github.com/neuro-bot/neuro-bot/internal/config"
+	"github.com/neuro-bot/neuro-bot/internal/domain"
+	"github.com/neuro-bot/neuro-bot/internal/services"
+	"github.com/neuro-bot/neuro-bot/internal/session"
+)
+
+// --- minimal mock repos for notification tests ---
+
+type mockApptRepoNotif struct {
+	findByIDFn func(ctx context.Context, id string) (*domain.Appointment, error)
+	confirmFn  func(ctx context.Context, id string, channel, channelID string) error
+	cancelFn   func(ctx context.Context, id string, reason, channel, channelID string) error
+}
+
+func (m *mockApptRepoNotif) FindByID(ctx context.Context, id string) (*domain.Appointment, error) {
+	if m.findByIDFn != nil {
+		return m.findByIDFn(ctx, id)
+	}
+	return nil, nil
+}
+func (m *mockApptRepoNotif) FindUpcomingByPatient(ctx context.Context, patientID string) ([]domain.Appointment, error) {
+	return nil, nil
+}
+func (m *mockApptRepoNotif) FindByAgendaAndDate(ctx context.Context, agendaID int, date string) ([]domain.Appointment, error) {
+	return nil, nil
+}
+func (m *mockApptRepoNotif) Create(ctx context.Context, input domain.CreateAppointmentInput) (*domain.Appointment, error) {
+	return nil, nil
+}
+func (m *mockApptRepoNotif) Confirm(ctx context.Context, id string, channel, channelID string) error {
+	if m.confirmFn != nil {
+		return m.confirmFn(ctx, id, channel, channelID)
+	}
+	return nil
+}
+func (m *mockApptRepoNotif) Cancel(ctx context.Context, id string, reason, channel, channelID string) error {
+	if m.cancelFn != nil {
+		return m.cancelFn(ctx, id, reason, channel, channelID)
+	}
+	return nil
+}
+func (m *mockApptRepoNotif) ConfirmBatch(ctx context.Context, ids []string, channel, channelID string) error {
+	if m.confirmFn != nil {
+		for _, id := range ids {
+			if err := m.confirmFn(ctx, id, channel, channelID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+func (m *mockApptRepoNotif) CancelBatch(ctx context.Context, ids []string, reason, channel, channelID string) error {
+	if m.cancelFn != nil {
+		for _, id := range ids {
+			if err := m.cancelFn(ctx, id, reason, channel, channelID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+func (m *mockApptRepoNotif) HasFutureForCup(ctx context.Context, patientID, cupCode string) (bool, error) {
+	return false, nil
+}
+func (m *mockApptRepoNotif) FindLastDoctorForCups(ctx context.Context, patientID string, cups []string) (string, error) {
+	return "", nil
+}
+func (m *mockApptRepoNotif) CountMonthlyByGroup(ctx context.Context, cupsCodes []string) (int, error) {
+	return 0, nil
+}
+func (m *mockApptRepoNotif) FindPendingByDate(ctx context.Context, date string) ([]domain.Appointment, error) {
+	return nil, nil
+}
+func (m *mockApptRepoNotif) RescheduleDate(ctx context.Context, agendaID int, doctorDoc, oldDate, newDate string) (int, error) {
+	return 0, nil
+}
+
+func newTestBirdClient() (*bird.Client, *httptest.Server) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"msg-ok"}`))
+	}))
+	return bird.NewClientForTest(srv.URL), srv
+}
+
+func sampleAppt() domain.Appointment {
+	return domain.Appointment{
+		ID:         "APT001",
+		PatientID:  "PAT001",
+		DoctorID:   "DOC001",
+		DoctorName: "Dr. Garcia",
+		Date:       time.Now().AddDate(0, 0, 1),
+		TimeSlot:   "202603201000",
+		AgendaID:   1,
+		Procedures: []domain.AppointmentProcedure{
+			{CupCode: "890271", CupName: "EMG", Quantity: 1},
+		},
+	}
+}
+
+// === Original tests ===
+
+func TestNotificationManager_RegisterAndHandle(t *testing.T) {
+	m := &NotificationManager{}
+	m.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-1",
+	})
+
+	if !m.HasPending("+573001234567") {
+		t.Fatal("expected pending notification to exist")
+	}
+
+	m.HandleResponse("+573001234567", "wl_schedule", "conv-1")
+
+	if m.HasPending("+573001234567") {
+		t.Error("expected pending notification to be removed after handling")
+	}
+}
+
+func TestNotificationManager_HandleResponse_NoPending(t *testing.T) {
+	m := &NotificationManager{}
+	m.HandleResponse("+573009999999", "confirm", "conv-1")
+}
+
+func TestNotificationManager_HasPending(t *testing.T) {
+	m := &NotificationManager{}
+
+	if m.HasPending("+573001111111") {
+		t.Error("expected no pending before register")
+	}
+
+	m.RegisterPending(PendingNotification{
+		Type:  "cancellation",
+		Phone: "+573001111111",
+	})
+
+	if !m.HasPending("+573001111111") {
+		t.Error("expected pending after register")
+	}
+
+	if m.HasPending("+573002222222") {
+		t.Error("expected no pending for different phone")
+	}
+}
+
+func TestNotificationManager_PendingCount(t *testing.T) {
+	m := &NotificationManager{}
+
+	if m.PendingCount() != 0 {
+		t.Errorf("expected 0 pending, got %d", m.PendingCount())
+	}
+
+	phones := []string{"+573001111111", "+573002222222", "+573003333333"}
+	for _, phone := range phones {
+		m.RegisterPending(PendingNotification{
+			Type:  "confirmation",
+			Phone: phone,
+		})
+	}
+
+	if m.PendingCount() != 3 {
+		t.Errorf("expected 3 pending, got %d", m.PendingCount())
+	}
+}
+
+func TestNormalizePostback(t *testing.T) {
+	cases := []struct {
+		input    string
+		expected string
+	}{
+		{"confirm", "confirm"},
+		{"cancelar", "cancel"},
+		{"cancel", "cancel"},
+		{"understood", "acknowledge"},
+		{"reschedule", "reschedule"},
+		{"reprogramar", "reschedule"},
+		{"wl_schedule", "schedule"},
+		{"wl_decline", "decline"},
+		{"random_payload", "random_payload"},
+		{"", ""},
+	}
+
+	for _, tc := range cases {
+		got := normalizePostback(tc.input)
+		if got != tc.expected {
+			t.Errorf("normalizePostback(%q) = %q, want %q", tc.input, got, tc.expected)
+		}
+	}
+}
+
+// === New Batch 6 tests ===
+
+func TestHandleConfirmation_Confirm(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			appt.ID = id
+			return &appt, nil
+		},
+		confirmFn: func(ctx context.Context, id, source, chID string) error {
+			return nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+	mgr.RegisterPending(PendingNotification{
+		Type:          "confirmation",
+		Phone:         "+573001234567",
+		AppointmentID: "APT001",
+	})
+
+	mgr.HandleResponse("+573001234567", "confirm", "conv-1")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted after confirm")
+	}
+}
+
+func TestHandleConfirmation_Cancel(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cancelCalled := false
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			appt.ID = id
+			return &appt, nil
+		},
+		cancelFn: func(ctx context.Context, id, reason, source, chID string) error {
+			cancelCalled = true
+			return nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+	mgr.RegisterPending(PendingNotification{
+		Type:          "confirmation",
+		Phone:         "+573001234567",
+		AppointmentID: "APT001",
+	})
+
+	mgr.HandleResponse("+573001234567", "cancelar", "conv-1")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted after cancel")
+	}
+	if !cancelCalled {
+		t.Error("expected cancel to be called")
+	}
+}
+
+func TestHandleReschedule_Confirm(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	confirmCalled := false
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			return &appt, nil
+		},
+		confirmFn: func(ctx context.Context, id, source, chID string) error {
+			confirmCalled = true
+			return nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+	mgr.RegisterPending(PendingNotification{
+		Type:          "reschedule",
+		Phone:         "+573001234567",
+		AppointmentID: "APT001",
+	})
+
+	mgr.HandleResponse("+573001234567", "confirm", "conv-1")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted")
+	}
+	if !confirmCalled {
+		t.Error("expected confirm to be called")
+	}
+}
+
+func TestHandleReschedule_Cancel(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			return &appt, nil
+		},
+		cancelFn: func(ctx context.Context, id, reason, source, chID string) error {
+			return nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+	mgr.RegisterPending(PendingNotification{
+		Type:          "reschedule",
+		Phone:         "+573001234567",
+		AppointmentID: "APT001",
+	})
+
+	mgr.HandleResponse("+573001234567", "cancel", "conv-1")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted")
+	}
+}
+
+func TestHandleCancellation_Acknowledge(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.RegisterPending(PendingNotification{
+		Type:          "cancellation",
+		Phone:         "+573001234567",
+		AppointmentID: "APT001",
+	})
+
+	mgr.HandleResponse("+573001234567", "understood", "conv-1")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted after acknowledge")
+	}
+}
+
+func TestHandleCancellation_Reschedule(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			appt.ID = id
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+	mgr.SetWaitingListDeps(nil, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "cancellation",
+		Phone:         "+573001234567",
+		AppointmentID: "APT001",
+	})
+
+	mgr.HandleResponse("+573001234567", "reprogramar", "conv-1")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted after reschedule request")
+	}
+
+	// Verify self-reschedule was triggered (session created, enqueue called)
+	if sessRepo.createdSession == nil {
+		t.Fatal("expected session to be created for self-reschedule")
+	}
+	if sessRepo.createdSession.CurrentState != "SEARCH_SLOTS" {
+		t.Errorf("expected state SEARCH_SLOTS, got %s", sessRepo.createdSession.CurrentState)
+	}
+
+	// Verify skipCancel=true for cancellation flow
+	kvs := sessRepo.batchKVs
+	if kvs["reschedule_skip_cancel"] != "1" {
+		t.Errorf("expected reschedule_skip_cancel=1, got %s", kvs["reschedule_skip_cancel"])
+	}
+
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 1 {
+		t.Fatalf("expected 1 EnqueueVirtual call, got %d", len(enqueuer.calls))
+	}
+}
+
+func TestHandleTimeout_Confirmation_Retry(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:       "confirmation",
+		Phone:      "+573001234567",
+		RetryCount: 0,
+	})
+
+	mgr.handleTimeout("+573001234567")
+
+	if !mgr.HasPending("+573001234567") {
+		t.Error("expected pending to exist after first retry")
+	}
+	val, _ := mgr.pending.Load("+573001234567")
+	p := val.(*PendingNotification)
+	if p.RetryCount != 1 {
+		t.Errorf("expected retry count 1, got %d", p.RetryCount)
+	}
+}
+
+func TestHandleTimeout_Confirmation_MaxRetries(t *testing.T) {
+	mgr := &NotificationManager{}
+
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:       "confirmation",
+		Phone:      "+573001234567",
+		RetryCount: 2, // Already at max
+	})
+
+	mgr.handleTimeout("+573001234567")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted after max retries")
+	}
+}
+
+func TestHandleTimeout_Cancellation(t *testing.T) {
+	mgr := &NotificationManager{}
+
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:  "cancellation",
+		Phone: "+573001234567",
+	})
+
+	mgr.handleTimeout("+573001234567")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted for cancellation timeout")
+	}
+}
+
+func TestBoolToStr(t *testing.T) {
+	if boolToStr(true) != "1" {
+		t.Error("expected '1' for true")
+	}
+	if boolToStr(false) != "0" {
+		t.Error("expected '0' for false")
+	}
+}
+
+// === Waiting list mock structs ===
+
+type mockWaitingListFinder struct {
+	mu             sync.Mutex
+	findByIDFn     func(ctx context.Context, id string) (*domain.WaitingListEntry, error)
+	updateStatusFn func(ctx context.Context, id, status string) error
+	updatedID      string
+	updatedStatus  string
+}
+
+func (m *mockWaitingListFinder) FindByID(ctx context.Context, id string) (*domain.WaitingListEntry, error) {
+	if m.findByIDFn != nil {
+		return m.findByIDFn(ctx, id)
+	}
+	return nil, nil
+}
+
+func (m *mockWaitingListFinder) UpdateStatus(ctx context.Context, id, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updatedID = id
+	m.updatedStatus = status
+	if m.updateStatusFn != nil {
+		return m.updateStatusFn(ctx, id, status)
+	}
+	return nil
+}
+
+type mockSessionCreator struct {
+	mu              sync.Mutex
+	createFn        func(ctx context.Context, s *session.Session) error
+	setCtxBatchFn   func(ctx context.Context, sessionID string, kvs map[string]string) error
+	createdSession  *session.Session
+	batchSessionID  string
+	batchKVs        map[string]string
+}
+
+func (m *mockSessionCreator) Create(ctx context.Context, s *session.Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.createdSession = s
+	if m.createFn != nil {
+		return m.createFn(ctx, s)
+	}
+	return nil
+}
+
+func (m *mockSessionCreator) SetContextBatch(ctx context.Context, sessionID string, kvs map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.batchSessionID = sessionID
+	m.batchKVs = kvs
+	if m.setCtxBatchFn != nil {
+		return m.setCtxBatchFn(ctx, sessionID, kvs)
+	}
+	return nil
+}
+
+type mockVirtualEnqueuer struct {
+	mu      sync.Mutex
+	calls   []string
+}
+
+func (m *mockVirtualEnqueuer) EnqueueVirtual(phone string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, phone)
+}
+
+func sampleWaitingListEntry() *domain.WaitingListEntry {
+	return &domain.WaitingListEntry{
+		ID:             "wl-1",
+		PhoneNumber:    "+573001234567",
+		PatientID:      "PAT-100",
+		PatientDoc:     "1234567890",
+		PatientName:    "Juan Perez",
+		PatientAge:     45,
+		PatientGender:  "M",
+		PatientEntity:  "EPS-TEST",
+		CupsCode:       "890271",
+		CupsName:       "Electromiografia",
+		IsContrasted:   false,
+		IsSedated:      false,
+		Espacios:       1,
+		ProceduresJSON: `[{"code":"890271","name":"Electromiografia","qty":1}]`,
+		Status:         "notified",
+	}
+}
+
+// === Waiting list tests ===
+
+func TestSetWaitingListDeps(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	// Before setting deps: HandleResponse with waiting_list should not crash
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001111111",
+		WaitingListID: "wl-pre",
+	})
+	// This should silently do nothing (deps nil → skipped)
+	mgr.HandleResponse("+573001111111", "wl_schedule", "conv-1")
+	// Pending was consumed by HandleResponse (LoadAndDelete removes it)
+	if mgr.HasPending("+573001111111") {
+		t.Error("expected pending to be removed after HandleResponse")
+	}
+
+	// Now set deps and verify processing works
+	wlRepo := &mockWaitingListFinder{
+		findByIDFn: func(ctx context.Context, id string) (*domain.WaitingListEntry, error) {
+			return sampleWaitingListEntry(), nil
+		},
+	}
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573002222222",
+		WaitingListID: "wl-post",
+	})
+	mgr.HandleResponse("+573002222222", "wl_schedule", "conv-2")
+
+	if sessRepo.createdSession == nil {
+		t.Fatal("expected session to be created after SetWaitingListDeps")
+	}
+	if len(enqueuer.calls) != 1 {
+		t.Errorf("expected 1 EnqueueVirtual call, got %d", len(enqueuer.calls))
+	}
+}
+
+func TestHandleWaitingList_Schedule(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	entry := sampleWaitingListEntry()
+	entry.GfrCreatinine = 1.2
+	entry.GfrHeightCm = 170
+	entry.GfrWeightKg = 75.5
+	entry.GfrDiseaseType = "tipo1"
+	entry.GfrCalculated = 90.5
+	entry.IsPregnant = true
+	entry.BabyWeightCat = "normal"
+	entry.PreferredDoctorDoc = "DOC-999"
+
+	wlRepo := &mockWaitingListFinder{
+		findByIDFn: func(ctx context.Context, id string) (*domain.WaitingListEntry, error) {
+			return entry, nil
+		},
+	}
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-1",
+	})
+
+	mgr.HandleResponse("+573001234567", "wl_schedule", "conv-1")
+
+	// Verify session created
+	if sessRepo.createdSession == nil {
+		t.Fatal("expected session to be created")
+	}
+	if sessRepo.createdSession.CurrentState != "SEARCH_SLOTS" {
+		t.Errorf("expected state SEARCH_SLOTS, got %s", sessRepo.createdSession.CurrentState)
+	}
+	if sessRepo.createdSession.Status != session.StatusActive {
+		t.Errorf("expected status active, got %s", sessRepo.createdSession.Status)
+	}
+	if sessRepo.createdSession.PhoneNumber != "+573001234567" {
+		t.Errorf("expected phone +573001234567, got %s", sessRepo.createdSession.PhoneNumber)
+	}
+
+	// Verify context batch was set
+	if sessRepo.batchSessionID == "" {
+		t.Fatal("expected SetContextBatch to be called")
+	}
+	kvs := sessRepo.batchKVs
+	if kvs["patient_id"] != "PAT-100" {
+		t.Errorf("expected patient_id=PAT-100, got %s", kvs["patient_id"])
+	}
+	if kvs["patient_doc"] != "1234567890" {
+		t.Errorf("expected patient_doc=1234567890, got %s", kvs["patient_doc"])
+	}
+	if kvs["patient_name"] != "Juan Perez" {
+		t.Errorf("expected patient_name=Juan Perez, got %s", kvs["patient_name"])
+	}
+	if kvs["patient_age"] != "45" {
+		t.Errorf("expected patient_age=45, got %s", kvs["patient_age"])
+	}
+	if kvs["cups_code"] != "890271" {
+		t.Errorf("expected cups_code=890271, got %s", kvs["cups_code"])
+	}
+	if kvs["cups_name"] != "Electromiografia" {
+		t.Errorf("expected cups_name=Electromiografia, got %s", kvs["cups_name"])
+	}
+	if kvs["menu_option"] != "agendar" {
+		t.Errorf("expected menu_option=agendar, got %s", kvs["menu_option"])
+	}
+	if kvs["waiting_list_entry_id"] != "wl-1" {
+		t.Errorf("expected waiting_list_entry_id=wl-1, got %s", kvs["waiting_list_entry_id"])
+	}
+
+	// Verify GFR data
+	if kvs["gfr_creatinine"] != "1.20" {
+		t.Errorf("expected gfr_creatinine=1.20, got %s", kvs["gfr_creatinine"])
+	}
+	if kvs["gfr_height_cm"] != "170" {
+		t.Errorf("expected gfr_height_cm=170, got %s", kvs["gfr_height_cm"])
+	}
+	if kvs["gfr_weight_kg"] != "75.5" {
+		t.Errorf("expected gfr_weight_kg=75.5, got %s", kvs["gfr_weight_kg"])
+	}
+	if kvs["gfr_disease_type"] != "tipo1" {
+		t.Errorf("expected gfr_disease_type=tipo1, got %s", kvs["gfr_disease_type"])
+	}
+	if kvs["gfr_calculated"] != "90.5" {
+		t.Errorf("expected gfr_calculated=90.5, got %s", kvs["gfr_calculated"])
+	}
+
+	// Verify extras
+	if kvs["is_pregnant"] != "1" {
+		t.Errorf("expected is_pregnant=1, got %s", kvs["is_pregnant"])
+	}
+	if kvs["baby_weight_cat"] != "normal" {
+		t.Errorf("expected baby_weight_cat=normal, got %s", kvs["baby_weight_cat"])
+	}
+	if kvs["preferred_doctor_doc"] != "DOC-999" {
+		t.Errorf("expected preferred_doctor_doc=DOC-999, got %s", kvs["preferred_doctor_doc"])
+	}
+
+	// Verify EnqueueVirtual called
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 1 {
+		t.Fatalf("expected 1 EnqueueVirtual call, got %d", len(enqueuer.calls))
+	}
+	if enqueuer.calls[0] != "+573001234567" {
+		t.Errorf("expected EnqueueVirtual(+573001234567), got %s", enqueuer.calls[0])
+	}
+
+	// Verify pending removed
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be removed after schedule")
+	}
+}
+
+func TestHandleWaitingList_Schedule_NotFound(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	wlRepo := &mockWaitingListFinder{
+		findByIDFn: func(ctx context.Context, id string) (*domain.WaitingListEntry, error) {
+			return nil, nil // not found
+		},
+	}
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-missing",
+	})
+
+	mgr.HandleResponse("+573001234567", "wl_schedule", "conv-1")
+
+	// Session should NOT be created since entry was nil
+	if sessRepo.createdSession != nil {
+		t.Error("expected no session creation when entry not found")
+	}
+
+	// EnqueueVirtual should NOT be called
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 0 {
+		t.Errorf("expected 0 EnqueueVirtual calls, got %d", len(enqueuer.calls))
+	}
+}
+
+func TestHandleWaitingList_Schedule_FindByIDError(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	wlRepo := &mockWaitingListFinder{
+		findByIDFn: func(ctx context.Context, id string) (*domain.WaitingListEntry, error) {
+			return nil, fmt.Errorf("db connection error")
+		},
+	}
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-err",
+	})
+
+	mgr.HandleResponse("+573001234567", "wl_schedule", "conv-1")
+
+	if sessRepo.createdSession != nil {
+		t.Error("expected no session when FindByID errors")
+	}
+}
+
+func TestHandleWaitingList_Schedule_CreateSessionError(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	wlRepo := &mockWaitingListFinder{
+		findByIDFn: func(ctx context.Context, id string) (*domain.WaitingListEntry, error) {
+			return sampleWaitingListEntry(), nil
+		},
+	}
+	sessRepo := &mockSessionCreator{
+		createFn: func(ctx context.Context, s *session.Session) error {
+			return fmt.Errorf("session create error")
+		},
+	}
+	enqueuer := &mockVirtualEnqueuer{}
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-1",
+	})
+
+	// Should not panic
+	mgr.HandleResponse("+573001234567", "wl_schedule", "conv-1")
+
+	// EnqueueVirtual should NOT be called since session creation failed
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 0 {
+		t.Errorf("expected 0 EnqueueVirtual calls on create error, got %d", len(enqueuer.calls))
+	}
+}
+
+func TestHandleWaitingList_Schedule_SetContextBatchError(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	wlRepo := &mockWaitingListFinder{
+		findByIDFn: func(ctx context.Context, id string) (*domain.WaitingListEntry, error) {
+			return sampleWaitingListEntry(), nil
+		},
+	}
+	sessRepo := &mockSessionCreator{
+		setCtxBatchFn: func(ctx context.Context, sessionID string, kvs map[string]string) error {
+			return fmt.Errorf("batch context error")
+		},
+	}
+	enqueuer := &mockVirtualEnqueuer{}
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-1",
+	})
+
+	// Should not panic
+	mgr.HandleResponse("+573001234567", "wl_schedule", "conv-1")
+
+	// Session was created but context batch failed; EnqueueVirtual should NOT be called
+	if sessRepo.createdSession == nil {
+		t.Error("expected session to be created")
+	}
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 0 {
+		t.Errorf("expected 0 EnqueueVirtual calls on batch error, got %d", len(enqueuer.calls))
+	}
+}
+
+func TestHandleWaitingList_Decline(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	wlRepo := &mockWaitingListFinder{}
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:           "waiting_list",
+		Phone:          "+573001234567",
+		WaitingListID:  "wl-decline-1",
+		BirdMessageID:  "bird-msg-1",
+		ConversationID: "conv-decline",
+	})
+
+	mgr.HandleResponse("+573001234567", "wl_decline", "conv-decline")
+
+	// Verify UpdateStatus called with "declined"
+	wlRepo.mu.Lock()
+	defer wlRepo.mu.Unlock()
+	if wlRepo.updatedID != "wl-decline-1" {
+		t.Errorf("expected UpdateStatus id=wl-decline-1, got %s", wlRepo.updatedID)
+	}
+	if wlRepo.updatedStatus != "declined" {
+		t.Errorf("expected UpdateStatus status=declined, got %s", wlRepo.updatedStatus)
+	}
+
+	// Session should NOT be created for decline
+	if sessRepo.createdSession != nil {
+		t.Error("expected no session creation for decline")
+	}
+
+	// Pending should be removed
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be removed after decline")
+	}
+}
+
+func TestHandleWaitingListTimeout(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	wlRepo := &mockWaitingListFinder{}
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	// Directly store pending to avoid the real 6h timer
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-timeout-1",
+		Timer:         time.NewTimer(999 * time.Hour), // dummy, won't fire
+	})
+
+	// Simulate timeout
+	mgr.handleTimeout("+573001234567")
+
+	// Verify UpdateStatus called with "expired"
+	wlRepo.mu.Lock()
+	defer wlRepo.mu.Unlock()
+	if wlRepo.updatedID != "wl-timeout-1" {
+		t.Errorf("expected UpdateStatus id=wl-timeout-1, got %s", wlRepo.updatedID)
+	}
+	if wlRepo.updatedStatus != "expired" {
+		t.Errorf("expected UpdateStatus status=expired, got %s", wlRepo.updatedStatus)
+	}
+
+	// Pending should be removed
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be removed after timeout")
+	}
+}
+
+func TestHandleWaitingListTimeout_NilDeps(t *testing.T) {
+	// When waitingListRepo is nil, timeout should just delete the pending
+	mgr := &NotificationManager{}
+
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-nil-deps",
+		Timer:         time.NewTimer(999 * time.Hour),
+	})
+
+	// Should not panic
+	mgr.handleTimeout("+573001234567")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be removed even with nil deps")
+	}
+}
+
+func TestHandleResponse_WaitingList_NilDeps(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	// Do NOT call SetWaitingListDeps
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-nil",
+	})
+
+	// Should not crash; pending is consumed by LoadAndDelete but handler is skipped
+	mgr.HandleResponse("+573001234567", "wl_schedule", "conv-1")
+
+	// Pending removed by LoadAndDelete in HandleResponse
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be consumed by HandleResponse even with nil deps")
+	}
+}
+
+// === Self-reschedule tests ===
+
+func TestSelfReschedule_FromConfirmation(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			appt.ID = id
+			appt.PatientID = "PAT-200"
+			appt.Entity = "EPS-GOLD"
+			appt.DoctorID = "DOC-555"
+			appt.Observations = "Contrastada y Sedacion"
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+	mgr.SetWaitingListDeps(nil, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:           "confirmation",
+		Phone:          "+573001234567",
+		AppointmentID:  "APT-CONF-1",
+		ConversationID: "conv-conf",
+		BirdMessageID:  "bird-conf",
+	})
+
+	mgr.HandleResponse("+573001234567", "reprogramar", "conv-conf")
+
+	// Session should be created at SEARCH_SLOTS
+	if sessRepo.createdSession == nil {
+		t.Fatal("expected session to be created")
+	}
+	if sessRepo.createdSession.CurrentState != "SEARCH_SLOTS" {
+		t.Errorf("expected SEARCH_SLOTS, got %s", sessRepo.createdSession.CurrentState)
+	}
+
+	kvs := sessRepo.batchKVs
+	if kvs["patient_id"] != "PAT-200" {
+		t.Errorf("expected patient_id=PAT-200, got %s", kvs["patient_id"])
+	}
+	if kvs["patient_entity"] != "EPS-GOLD" {
+		t.Errorf("expected patient_entity=EPS-GOLD, got %s", kvs["patient_entity"])
+	}
+	if kvs["patient_age"] != "0" {
+		t.Errorf("expected patient_age=0, got %s", kvs["patient_age"])
+	}
+	if kvs["cups_code"] != "890271" {
+		t.Errorf("expected cups_code=890271, got %s", kvs["cups_code"])
+	}
+	if kvs["is_contrasted"] != "1" {
+		t.Errorf("expected is_contrasted=1, got %s", kvs["is_contrasted"])
+	}
+	if kvs["is_sedated"] != "1" {
+		t.Errorf("expected is_sedated=1, got %s", kvs["is_sedated"])
+	}
+	if kvs["preferred_doctor_doc"] != "DOC-555" {
+		t.Errorf("expected preferred_doctor_doc=DOC-555, got %s", kvs["preferred_doctor_doc"])
+	}
+	if kvs["reschedule_appt_id"] != "APT-CONF-1" {
+		t.Errorf("expected reschedule_appt_id=APT-CONF-1, got %s", kvs["reschedule_appt_id"])
+	}
+	// Confirmation flow: skipCancel=false
+	if kvs["reschedule_skip_cancel"] != "0" {
+		t.Errorf("expected reschedule_skip_cancel=0, got %s", kvs["reschedule_skip_cancel"])
+	}
+	if kvs["menu_option"] != "agendar" {
+		t.Errorf("expected menu_option=agendar, got %s", kvs["menu_option"])
+	}
+
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 1 || enqueuer.calls[0] != "+573001234567" {
+		t.Errorf("expected EnqueueVirtual(+573001234567), got %v", enqueuer.calls)
+	}
+}
+
+func TestSelfReschedule_FromRescheduleFlow(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			appt.ID = id
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+	mgr.SetWaitingListDeps(nil, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "reschedule",
+		Phone:         "+573005555555",
+		AppointmentID: "APT-RSCH-1",
+	})
+
+	mgr.HandleResponse("+573005555555", "reprogramar", "conv-rsch")
+
+	if sessRepo.createdSession == nil {
+		t.Fatal("expected session to be created")
+	}
+
+	kvs := sessRepo.batchKVs
+	// Reschedule flow: skipCancel=false (old rescheduled appt gets cancelled)
+	if kvs["reschedule_skip_cancel"] != "0" {
+		t.Errorf("expected reschedule_skip_cancel=0, got %s", kvs["reschedule_skip_cancel"])
+	}
+	if kvs["reschedule_appt_id"] != "APT-RSCH-1" {
+		t.Errorf("expected reschedule_appt_id=APT-RSCH-1, got %s", kvs["reschedule_appt_id"])
+	}
+}
+
+func TestSelfReschedule_NoProcedures(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			appt.Procedures = nil // No procedures
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{BirdTeamFallback: "team-fallback"}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+	mgr.SetWaitingListDeps(nil, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "confirmation",
+		Phone:         "+573006666666",
+		AppointmentID: "APT-NOPROC",
+	})
+
+	mgr.HandleResponse("+573006666666", "reprogramar", "conv-noproc")
+
+	// Should NOT create a session (no procedure → fallback to agent)
+	if sessRepo.createdSession != nil {
+		t.Error("expected no session creation when appointment has no procedures")
+	}
+
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 0 {
+		t.Errorf("expected 0 EnqueueVirtual calls, got %d", len(enqueuer.calls))
+	}
+}
+
+func TestSelfReschedule_MissingDeps(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+	// Do NOT call SetWaitingListDeps → sessionRepo and workerPool are nil
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "confirmation",
+		Phone:         "+573007777777",
+		AppointmentID: "APT-NODEPS",
+	})
+
+	// Should not panic, should send error message
+	mgr.HandleResponse("+573007777777", "reprogramar", "conv-nodeps")
+}
+
+func TestSelfReschedule_ApptNotFound(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			return nil, nil // Not found
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+	mgr.SetWaitingListDeps(nil, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "cancellation",
+		Phone:         "+573008888888",
+		AppointmentID: "APT-MISSING",
+	})
+
+	mgr.HandleResponse("+573008888888", "reprogramar", "conv-missing")
+
+	// Should NOT create session
+	if sessRepo.createdSession != nil {
+		t.Error("expected no session when appointment not found")
+	}
+
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 0 {
+		t.Errorf("expected 0 EnqueueVirtual calls, got %d", len(enqueuer.calls))
+	}
+}
+
+func TestSelfReschedule_BlockSize(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	// FindByAgendaAndDate returns 2 consecutive appointments → block size = 2
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			appt.ID = id
+			appt.AgendaID = 5
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+	mgr.SetWaitingListDeps(nil, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "reschedule",
+		Phone:         "+573009999999",
+		AppointmentID: "APT001",
+	})
+
+	mgr.HandleResponse("+573009999999", "reprogramar", "conv-block")
+
+	if sessRepo.createdSession == nil {
+		t.Fatal("expected session to be created")
+	}
+
+	// FindByAgendaAndDate returns nil → fallback to single appointment → espacios=1
+	kvs := sessRepo.batchKVs
+	if kvs["espacios"] != "1" {
+		t.Errorf("expected espacios=1 (single fallback), got %s", kvs["espacios"])
+	}
+}
+
+func TestSelfReschedule_CreateSessionError(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo)
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	sessRepo := &mockSessionCreator{
+		createFn: func(ctx context.Context, s *session.Session) error {
+			return fmt.Errorf("session create error")
+		},
+	}
+	enqueuer := &mockVirtualEnqueuer{}
+	mgr.SetWaitingListDeps(nil, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "confirmation",
+		Phone:         "+573001010101",
+		AppointmentID: "APT-ERR",
+	})
+
+	// Should not panic
+	mgr.HandleResponse("+573001010101", "reprogramar", "conv-err")
+
+	// EnqueueVirtual should NOT be called
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.calls) != 0 {
+		t.Errorf("expected 0 EnqueueVirtual calls on session create error, got %d", len(enqueuer.calls))
+	}
+}
+
+// === Cambio 13: CheckWaitingListForCups tests ===
+
+type mockSlotSearcher struct {
+	getSlotsFn func(ctx context.Context, query services.SlotQuery) ([]services.AvailableSlot, error)
+}
+
+func (m *mockSlotSearcher) GetAvailableSlots(ctx context.Context, query services.SlotQuery) ([]services.AvailableSlot, error) {
+	if m.getSlotsFn != nil {
+		return m.getSlotsFn(ctx, query)
+	}
+	return nil, nil
+}
+
+type mockFutureApptChecker struct {
+	hasFutureFn func(ctx context.Context, patientID, cupCode string) (bool, error)
+}
+
+func (m *mockFutureApptChecker) HasFutureForCup(ctx context.Context, patientID, cupCode string) (bool, error) {
+	if m.hasFutureFn != nil {
+		return m.hasFutureFn(ctx, patientID, cupCode)
+	}
+	return false, nil
+}
+
+type mockWLChecker struct {
+	mu              sync.Mutex
+	getWaitingFn    func(ctx context.Context, cupsCode string, limit int) ([]domain.WaitingListEntry, error)
+	markNotifiedFn  func(ctx context.Context, id string) error
+	updateStatusFn  func(ctx context.Context, id, status string) error
+	notifiedID      string
+	updatedID       string
+	updatedStatus   string
+}
+
+func (m *mockWLChecker) GetWaitingByCups(ctx context.Context, cupsCode string, limit int) ([]domain.WaitingListEntry, error) {
+	if m.getWaitingFn != nil {
+		return m.getWaitingFn(ctx, cupsCode, limit)
+	}
+	return nil, nil
+}
+
+func (m *mockWLChecker) MarkNotified(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.notifiedID = id
+	if m.markNotifiedFn != nil {
+		return m.markNotifiedFn(ctx, id)
+	}
+	return nil
+}
+
+func (m *mockWLChecker) UpdateStatus(ctx context.Context, id, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updatedID = id
+	m.updatedStatus = status
+	if m.updateStatusFn != nil {
+		return m.updateStatusFn(ctx, id, status)
+	}
+	return nil
+}
+
+func TestCheckWaitingListForCups_HappyPath(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{
+		BirdTemplateWaitingListProjectID: "proj-wl-123",
+		BirdTemplateWaitingListVersionID: "ver-wl-456",
+		BirdTemplateWaitingListLocale:    "es-CO",
+	}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	wlChecker := &mockWLChecker{
+		getWaitingFn: func(ctx context.Context, cupsCode string, limit int) ([]domain.WaitingListEntry, error) {
+			return []domain.WaitingListEntry{
+				{
+					ID:          "wl-check-1",
+					PhoneNumber: "+573005551234",
+					PatientID:   "PAT-WL-1",
+					PatientName: "Maria Lopez",
+					CupsCode:    "890271",
+					CupsName:    "Electromiografia",
+					PatientAge:  35,
+					Espacios:    1,
+				},
+			}, nil
+		},
+	}
+
+	slotSearcher := &mockSlotSearcher{
+		getSlotsFn: func(ctx context.Context, query services.SlotQuery) ([]services.AvailableSlot, error) {
+			return []services.AvailableSlot{{TimeSlot: "202603201000"}}, nil
+		},
+	}
+
+	apptChecker := &mockFutureApptChecker{
+		hasFutureFn: func(ctx context.Context, patientID, cupCode string) (bool, error) {
+			return false, nil
+		},
+	}
+
+	mgr.SetWaitingListCheckDeps(slotSearcher, apptChecker, wlChecker)
+
+	count := mgr.CheckWaitingListForCups(context.Background(), "890271")
+
+	if count != 1 {
+		t.Errorf("expected 1 notification, got %d", count)
+	}
+
+	wlChecker.mu.Lock()
+	notifiedID := wlChecker.notifiedID
+	wlChecker.mu.Unlock()
+
+	if notifiedID != "wl-check-1" {
+		t.Errorf("expected notifiedID wl-check-1, got %s", notifiedID)
+	}
+
+	if !mgr.HasPending("+573005551234") {
+		t.Error("expected pending notification for notified patient")
+	}
+}
+
+func TestCheckWaitingListForCups_NoEntries(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{
+		BirdTemplateWaitingListProjectID: "proj-wl-123",
+	}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	wlChecker := &mockWLChecker{} // Returns nil entries
+	slotSearcher := &mockSlotSearcher{}
+	apptChecker := &mockFutureApptChecker{}
+
+	mgr.SetWaitingListCheckDeps(slotSearcher, apptChecker, wlChecker)
+
+	count := mgr.CheckWaitingListForCups(context.Background(), "890271")
+	if count != 0 {
+		t.Errorf("expected 0 notifications, got %d", count)
+	}
+}
+
+func TestCheckWaitingListForCups_NoSlots(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{
+		BirdTemplateWaitingListProjectID: "proj-wl-123",
+	}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	wlChecker := &mockWLChecker{
+		getWaitingFn: func(ctx context.Context, cupsCode string, limit int) ([]domain.WaitingListEntry, error) {
+			return []domain.WaitingListEntry{{ID: "wl-no-slots", PatientID: "PAT-1", CupsCode: "890271"}}, nil
+		},
+	}
+	slotSearcher := &mockSlotSearcher{
+		getSlotsFn: func(ctx context.Context, query services.SlotQuery) ([]services.AvailableSlot, error) {
+			return nil, nil // No slots
+		},
+	}
+	apptChecker := &mockFutureApptChecker{}
+
+	mgr.SetWaitingListCheckDeps(slotSearcher, apptChecker, wlChecker)
+
+	count := mgr.CheckWaitingListForCups(context.Background(), "890271")
+	if count != 0 {
+		t.Errorf("expected 0 notifications when no slots, got %d", count)
+	}
+}
+
+func TestCheckWaitingListForCups_DuplicateFound(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{
+		BirdTemplateWaitingListProjectID: "proj-wl-123",
+	}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	wlChecker := &mockWLChecker{
+		getWaitingFn: func(ctx context.Context, cupsCode string, limit int) ([]domain.WaitingListEntry, error) {
+			return []domain.WaitingListEntry{{ID: "wl-dup", PatientID: "PAT-DUP", CupsCode: "890271"}}, nil
+		},
+	}
+	slotSearcher := &mockSlotSearcher{}
+	apptChecker := &mockFutureApptChecker{
+		hasFutureFn: func(ctx context.Context, patientID, cupCode string) (bool, error) {
+			return true, nil // Already has appointment
+		},
+	}
+
+	mgr.SetWaitingListCheckDeps(slotSearcher, apptChecker, wlChecker)
+
+	count := mgr.CheckWaitingListForCups(context.Background(), "890271")
+	if count != 0 {
+		t.Errorf("expected 0 notifications for duplicate, got %d", count)
+	}
+
+	wlChecker.mu.Lock()
+	status := wlChecker.updatedStatus
+	wlChecker.mu.Unlock()
+
+	if status != "duplicate_found" {
+		t.Errorf("expected status duplicate_found, got %s", status)
+	}
+}
+
+func TestCheckWaitingListForCups_TemplateNotConfigured(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{} // No ProjectID
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	wlChecker := &mockWLChecker{}
+	slotSearcher := &mockSlotSearcher{}
+	apptChecker := &mockFutureApptChecker{}
+
+	mgr.SetWaitingListCheckDeps(slotSearcher, apptChecker, wlChecker)
+
+	count := mgr.CheckWaitingListForCups(context.Background(), "890271")
+	if count != 0 {
+		t.Errorf("expected 0 when template not configured, got %d", count)
+	}
+}
+
+func TestCheckWaitingListForCups_NilDeps(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{
+		BirdTemplateWaitingListProjectID: "proj-wl-123",
+	}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	// No SetWaitingListCheckDeps call → deps are nil
+
+	count := mgr.CheckWaitingListForCups(context.Background(), "890271")
+	if count != 0 {
+		t.Errorf("expected 0 when deps nil, got %d", count)
+	}
+}
+
+func TestHandleWaitingList_Schedule_NoGFR(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	entry := sampleWaitingListEntry()
+	// GfrCreatinine is 0 → no GFR data should be set
+
+	wlRepo := &mockWaitingListFinder{
+		findByIDFn: func(ctx context.Context, id string) (*domain.WaitingListEntry, error) {
+			return entry, nil
+		},
+	}
+	sessRepo := &mockSessionCreator{}
+	enqueuer := &mockVirtualEnqueuer{}
+
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+	mgr.SetWaitingListDeps(wlRepo, sessRepo, enqueuer)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:          "waiting_list",
+		Phone:         "+573001234567",
+		WaitingListID: "wl-no-gfr",
+	})
+
+	mgr.HandleResponse("+573001234567", "wl_schedule", "conv-1")
+
+	kvs := sessRepo.batchKVs
+	if _, exists := kvs["gfr_creatinine"]; exists {
+		t.Error("expected no gfr_creatinine when GfrCreatinine is 0")
+	}
+	if _, exists := kvs["is_pregnant"]; exists {
+		t.Error("expected no is_pregnant when IsPregnant is false")
+	}
+	if _, exists := kvs["baby_weight_cat"]; exists {
+		t.Error("expected no baby_weight_cat when empty")
+	}
+	if _, exists := kvs["preferred_doctor_doc"]; exists {
+		t.Error("expected no preferred_doctor_doc when empty")
+	}
+}

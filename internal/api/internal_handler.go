@@ -1,0 +1,769 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/neuro-bot/neuro-bot/internal/bird"
+	"github.com/neuro-bot/neuro-bot/internal/config"
+	"github.com/neuro-bot/neuro-bot/internal/domain"
+	"github.com/neuro-bot/neuro-bot/internal/notifications"
+	"github.com/neuro-bot/neuro-bot/internal/repository"
+	localrepo "github.com/neuro-bot/neuro-bot/internal/repository/local"
+	"github.com/neuro-bot/neuro-bot/internal/services"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
+)
+
+// WorkerPoolStats provides queue stats without importing the worker package.
+type WorkerPoolStats interface {
+	QueueStats() (size, capacity int)
+}
+
+// NotificationCounter provides pending notification count.
+type NotificationCounter interface {
+	PendingCount() int
+}
+
+// EventKPIReader provides KPI and analytics queries (enables testing without DB).
+type EventKPIReader interface {
+	GetDailyKPIs(ctx context.Context, date time.Time) (*localrepo.DailyKPIs, error)
+	GetFunnel(ctx context.Context, from, to time.Time) (*localrepo.FunnelData, error)
+	GetHealthMetrics(ctx context.Context) (*localrepo.HealthMetrics, error)
+}
+
+// WaitingListReader provides waiting list queries (enables testing without DB).
+type WaitingListReader interface {
+	GetDistinctWaitingCups(ctx context.Context) ([]string, error)
+	GetWaitingByCups(ctx context.Context, cupsCode string, limit int) ([]domain.WaitingListEntry, error)
+	List(ctx context.Context, filters domain.WaitingListFilters, page, pageSize int) ([]domain.WaitingListEntry, int, error)
+}
+
+// InternalEventLogger logs events for auditing (matches tracking.EventTracker).
+type InternalEventLogger interface {
+	LogEvent(ctx context.Context, sessionID, phone, eventType string, data map[string]interface{})
+}
+
+// InternalHandler handles admin/internal API endpoints.
+type InternalHandler struct {
+	appointmentRepo repository.AppointmentRepository
+	scheduleRepo    repository.ScheduleRepository
+	waitingListRepo WaitingListReader
+	eventRepo       EventKPIReader
+	birdClient      *bird.Client
+	notifyManager   *notifications.NotificationManager
+	notifyCounter   NotificationCounter
+	workerStats     WorkerPoolStats
+	tracker         InternalEventLogger
+	cfg             *config.Config
+	startTime       time.Time
+}
+
+// NewInternalHandler creates a new internal handler.
+func NewInternalHandler(
+	appointmentRepo repository.AppointmentRepository,
+	scheduleRepo repository.ScheduleRepository,
+	waitingListRepo WaitingListReader,
+	eventRepo EventKPIReader,
+	birdClient *bird.Client,
+	notifyManager *notifications.NotificationManager,
+	notifyCounter NotificationCounter,
+	workerStats WorkerPoolStats,
+	tracker InternalEventLogger,
+	cfg *config.Config,
+	startTime time.Time,
+) *InternalHandler {
+	return &InternalHandler{
+		appointmentRepo: appointmentRepo,
+		scheduleRepo:    scheduleRepo,
+		waitingListRepo: waitingListRepo,
+		eventRepo:       eventRepo,
+		birdClient:      birdClient,
+		notifyManager:   notifyManager,
+		notifyCounter:   notifyCounter,
+		workerStats:     workerStats,
+		tracker:         tracker,
+		cfg:             cfg,
+		startTime:       startTime,
+	}
+}
+
+// --- Cancel Agenda ---
+
+// CancelAgendaRequest is the request body for cancelling an agenda.
+type CancelAgendaRequest struct {
+	AgendaID       int    `json:"agenda_id"`
+	DoctorDocument string `json:"doctor_document"`
+	Date           string `json:"date"` // YYYY-MM-DD
+	Reason         string `json:"reason"`
+	NotifyPatients bool   `json:"notify_patients"`
+}
+
+// maxReasonLength limits the length of reason/observation fields to prevent oversized DB writes.
+const maxReasonLength = 500
+
+// HandleCancelAgenda cancels all appointments for a given agenda/date and optionally notifies patients.
+func (h *InternalHandler) HandleCancelAgenda(w http.ResponseWriter, r *http.Request) {
+	var req CancelAgendaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.AgendaID == 0 || req.Date == "" {
+		http.Error(w, "agenda_id and date are required", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := time.Parse("2006-01-02", req.Date); err != nil {
+		http.Error(w, "date must be YYYY-MM-DD format", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Reason) > maxReasonLength {
+		req.Reason = req.Reason[:maxReasonLength]
+	}
+
+	ctx := r.Context()
+
+	// 1. Obtener citas afectadas
+	appointments, err := h.appointmentRepo.FindByAgendaAndDate(ctx, req.AgendaID, req.Date)
+	if err != nil {
+		slog.Error("cancel agenda: find appointments", "error", err)
+		http.Error(w, "error finding appointments", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Cancelar todas las citas en batch (1 transaccion)
+	ids := make([]string, len(appointments))
+	for i, a := range appointments {
+		ids[i] = a.ID
+	}
+	cancelled := len(ids)
+	if len(ids) > 0 {
+		if err := h.appointmentRepo.CancelBatch(ctx, ids, req.Reason, "admin_cancel_agenda", ""); err != nil {
+			slog.Error("cancel batch in agenda", "error", err)
+			cancelled = 0
+		}
+	}
+
+	// Log admin action
+	if h.tracker != nil {
+		h.tracker.LogEvent(ctx, "", "", "admin_cancel_agenda", map[string]interface{}{
+			"agenda_id":              req.AgendaID,
+			"date":                   req.Date,
+			"reason":                 req.Reason,
+			"appointments_cancelled": cancelled,
+		})
+	}
+
+	// 3. Respond immediately — notifications are sent in background
+	toNotify := 0
+	if req.NotifyPatients && h.cfg.BirdTemplateCancellationProjectID != "" {
+		patients := groupAppointmentsByPatientID(appointments)
+		toNotify = len(patients)
+
+		// Send notifications in background goroutine to avoid blocking HTTP response
+		go func() {
+			notified := 0
+			for _, group := range patients {
+				firstAppt := group[0]
+				phone := utils.ParseColombianPhone(firstAppt.PatientPhone)
+				if phone == "" {
+					continue
+				}
+
+				tmpl := bird.TemplateConfig{
+					ProjectID: h.cfg.BirdTemplateCancellationProjectID,
+					VersionID: h.cfg.BirdTemplateCancellationVersionID,
+					Locale:    h.cfg.BirdTemplateCancellationLocale,
+					Params: []bird.TemplateParam{
+						{Type: "string", Key: "patient_name", Value: firstAppt.PatientName},
+						{Type: "string", Key: "appointment_date", Value: utils.FormatFriendlyDate(firstAppt.Date)},
+						{Type: "string", Key: "appointment_time", Value: services.FormatTimeSlot(firstAppt.TimeSlot)},
+						{Type: "string", Key: "reason", Value: req.Reason},
+					},
+				}
+
+				msgID, err := h.birdClient.SendTemplate(phone, tmpl)
+				if err != nil {
+					slog.Error("send cancellation notification", "phone", phone, "error", err)
+					continue
+				}
+
+				// Look up conversationID for Bird Inbox visibility
+				convID := h.birdClient.GetCachedConversationID(phone)
+				if convID == "" {
+					convID, _ = h.birdClient.LookupConversationByPhone(phone)
+				}
+
+				h.notifyManager.RegisterPending(notifications.PendingNotification{
+					Type:           "cancellation",
+					Phone:          phone,
+					AppointmentID:  firstAppt.ID,
+					BirdMessageID:  msgID,
+					ConversationID: convID,
+				})
+
+				if h.tracker != nil {
+					h.tracker.LogEvent(context.Background(), "", phone, "notification_sent", map[string]interface{}{
+						"type":            "cancellation",
+						"appointment_id":  firstAppt.ID,
+						"bird_msg_id":     msgID,
+						"conversation_id": convID,
+					})
+				}
+
+				notified++
+				time.Sleep(2 * time.Second) // Rate limit between messages
+			}
+			slog.Info("agenda cancellation notifications sent", "notified", notified, "total", len(patients))
+		}()
+	}
+
+	slog.Info("agenda cancelled", "agenda_id", req.AgendaID, "date", req.Date,
+		"cancelled", cancelled, "to_notify", toNotify)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"cancelled": cancelled,
+		"to_notify": toNotify,
+	})
+}
+
+// --- Reschedule Agenda ---
+
+// RescheduleAgendaRequest is the request body for rescheduling an agenda.
+type RescheduleAgendaRequest struct {
+	AgendaID       int    `json:"agenda_id"`
+	DoctorDocument string `json:"doctor_document"`
+	OldDate        string `json:"old_date"`      // YYYY-MM-DD
+	NewDate        string `json:"new_date"`       // YYYY-MM-DD
+	NewAgendaID    *int   `json:"new_agenda_id"`  // nullable: if set → different-agenda reschedule
+	Reason         string `json:"reason"`
+	NotifyPatients bool   `json:"notify_patients"`
+}
+
+// HandleRescheduleAgenda handles rescheduling of an agenda with two scenarios:
+// Scenario A (new_agenda_id provided): Cancel appointments + delete old working day exception.
+// Scenario B (same agenda): Move appointments to new date + update working day exception.
+func (h *InternalHandler) HandleRescheduleAgenda(w http.ResponseWriter, r *http.Request) {
+	var req RescheduleAgendaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if req.AgendaID == 0 || req.DoctorDocument == "" || req.OldDate == "" || req.NewDate == "" {
+		http.Error(w, "agenda_id, doctor_document, old_date and new_date are required", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := time.Parse("2006-01-02", req.OldDate); err != nil {
+		http.Error(w, "old_date must be YYYY-MM-DD format", http.StatusBadRequest)
+		return
+	}
+
+	newDate, err := time.Parse("2006-01-02", req.NewDate)
+	if err != nil {
+		http.Error(w, "new_date must be YYYY-MM-DD format", http.StatusBadRequest)
+		return
+	}
+	today := time.Now().Truncate(24 * time.Hour)
+	if newDate.Before(today) {
+		http.Error(w, "new_date must be today or later", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Reason) > maxReasonLength {
+		req.Reason = req.Reason[:maxReasonLength]
+	}
+
+	ctx := r.Context()
+
+	if req.NewAgendaID != nil && *req.NewAgendaID != req.AgendaID {
+		h.handleRescheduleWithNewAgenda(ctx, w, req)
+	} else {
+		h.handleRescheduleSameAgenda(ctx, w, req)
+	}
+}
+
+// handleRescheduleWithNewAgenda — Scenario A: cancels appointments and deletes old working day exception.
+func (h *InternalHandler) handleRescheduleWithNewAgenda(ctx context.Context, w http.ResponseWriter, req RescheduleAgendaRequest) {
+	// 1. Validate new agenda exists
+	if h.scheduleRepo != nil {
+		newAgenda, err := h.scheduleRepo.FindByScheduleID(ctx, *req.NewAgendaID, "")
+		if err != nil || newAgenda == nil {
+			http.Error(w, "nueva agenda no encontrada", http.StatusNotFound)
+			return
+		}
+
+		// Validate working day exception exists for new agenda+doctor+new date
+		wdNew, err := h.scheduleRepo.FindWorkingDayException(ctx, *req.NewAgendaID, req.DoctorDocument, req.NewDate)
+		if err != nil || wdNew == nil {
+			http.Error(w, "no existe disponibilidad para ese doctor en la nueva agenda en la fecha nueva", http.StatusNotFound)
+			return
+		}
+	}
+
+	// 2. Get affected appointments (for patient info/notifications)
+	appointments, err := h.appointmentRepo.FindByAgendaAndDate(ctx, req.AgendaID, req.OldDate)
+	if err != nil {
+		slog.Error("reschedule new agenda: find appointments", "error", err)
+		http.Error(w, "error finding appointments", http.StatusInternalServerError)
+		return
+	}
+
+	// Filter by doctor
+	var doctorAppts []domain.Appointment
+	for _, a := range appointments {
+		if a.DoctorID == req.DoctorDocument {
+			doctorAppts = append(doctorAppts, a)
+		}
+	}
+
+	// 3. Cancel appointments in batch (1 transaction)
+	reason := req.Reason
+	if reason == "" {
+		reason = "Reagendamiento de agenda"
+	}
+	cancelIDs := make([]string, len(doctorAppts))
+	for i, a := range doctorAppts {
+		cancelIDs[i] = a.ID
+	}
+	cancelled := len(cancelIDs)
+	if len(cancelIDs) > 0 {
+		if err := h.appointmentRepo.CancelBatch(ctx, cancelIDs, reason, "admin_reschedule_agenda", ""); err != nil {
+			slog.Error("cancel batch in reschedule", "error", err)
+			cancelled = 0
+		}
+	}
+
+	// 4. Delete working day exception for old agenda+doctor+old date
+	wdDeleted := false
+	if h.scheduleRepo != nil {
+		wdDeleted, _ = h.scheduleRepo.DeleteWorkingDayException(ctx, req.AgendaID, req.DoctorDocument, req.OldDate)
+	}
+
+	// 5. Notify patients — query from NEW agenda/date (like Laravel).
+	//    If no appointments exist on the new agenda/date, no notifications are sent.
+	var newAppts []domain.Appointment
+	if req.NotifyPatients {
+		allNew, _ := h.appointmentRepo.FindByAgendaAndDate(ctx, *req.NewAgendaID, req.NewDate)
+		for _, a := range allNew {
+			if a.DoctorID == req.DoctorDocument {
+				newAppts = append(newAppts, a)
+			}
+		}
+	}
+	toNotify := h.sendRescheduleNotifications(newAppts, req)
+
+	if h.tracker != nil {
+		h.tracker.LogEvent(ctx, "", "", "admin_reschedule_agenda", map[string]interface{}{
+			"agenda_id":              req.AgendaID,
+			"old_date":               req.OldDate,
+			"new_date":               req.NewDate,
+			"scenario":               "new_agenda",
+			"new_agenda_id":          *req.NewAgendaID,
+			"appointments_cancelled": cancelled,
+			"patients_to_notify":     toNotify,
+		})
+	}
+
+	slog.Info("agenda rescheduled (new agenda)", "old_agenda", req.AgendaID, "new_agenda", *req.NewAgendaID,
+		"old_date", req.OldDate, "new_date", req.NewDate, "cancelled", cancelled,
+		"wd_deleted", wdDeleted, "to_notify", toNotify)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"cancelled": cancelled,
+		"to_notify": toNotify,
+	})
+}
+
+// handleRescheduleSameAgenda — Scenario B: moves appointments to new date and updates working day exception.
+func (h *InternalHandler) handleRescheduleSameAgenda(ctx context.Context, w http.ResponseWriter, req RescheduleAgendaRequest) {
+	// 1. Validate working day exception exists for current date
+	if h.scheduleRepo != nil {
+		wd, err := h.scheduleRepo.FindWorkingDayException(ctx, req.AgendaID, req.DoctorDocument, req.OldDate)
+		if err != nil || wd == nil {
+			http.Error(w, "no existe registro de excepcion de dias para esa agenda, doctor y fecha", http.StatusNotFound)
+			return
+		}
+	}
+
+	// 2. Update working day exception date
+	wdUpdated := false
+	if h.scheduleRepo != nil {
+		wdUpdated, _ = h.scheduleRepo.UpdateWorkingDayExceptionDate(ctx, req.AgendaID, req.DoctorDocument, req.OldDate, req.NewDate)
+	}
+
+	// 3. Move appointments to new date (preserving time slots)
+	updated, err := h.appointmentRepo.RescheduleDate(ctx, req.AgendaID, req.DoctorDocument, req.OldDate, req.NewDate)
+	if err != nil {
+		slog.Error("reschedule same agenda: move appointments", "error", err)
+		http.Error(w, "error moving appointments", http.StatusInternalServerError)
+		return
+	}
+
+	// 4. Get affected appointments for notifications (now on new date)
+	appointments, _ := h.appointmentRepo.FindByAgendaAndDate(ctx, req.AgendaID, req.NewDate)
+	var doctorAppts []domain.Appointment
+	for _, a := range appointments {
+		if a.DoctorID == req.DoctorDocument {
+			doctorAppts = append(doctorAppts, a)
+		}
+	}
+
+	// 5. Notify patients
+	toNotify := h.sendRescheduleNotifications(doctorAppts, req)
+
+	if h.tracker != nil {
+		h.tracker.LogEvent(ctx, "", "", "admin_reschedule_agenda", map[string]interface{}{
+			"agenda_id":             req.AgendaID,
+			"old_date":              req.OldDate,
+			"new_date":              req.NewDate,
+			"scenario":              "same_agenda",
+			"appointments_updated":  updated,
+			"patients_to_notify":    toNotify,
+		})
+	}
+
+	slog.Info("agenda rescheduled (same agenda)", "agenda_id", req.AgendaID,
+		"old_date", req.OldDate, "new_date", req.NewDate, "updated", updated,
+		"wd_updated", wdUpdated, "to_notify", toNotify)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"updated": updated,
+		"to_notify": toNotify,
+	})
+}
+
+// sendRescheduleNotifications sends reschedule WhatsApp templates to affected patients in the background.
+func (h *InternalHandler) sendRescheduleNotifications(appointments []domain.Appointment, req RescheduleAgendaRequest) int {
+	if !req.NotifyPatients || h.cfg.BirdTemplateRescheduleProjectID == "" || len(appointments) == 0 {
+		return 0
+	}
+
+	patients := groupAppointmentsByPatientID(appointments)
+	toNotify := len(patients)
+
+	go func() {
+		notified := 0
+		for _, group := range patients {
+			firstAppt := group[0]
+			phone := utils.ParseColombianPhone(firstAppt.PatientPhone)
+			if phone == "" {
+				continue
+			}
+
+			tmpl := bird.TemplateConfig{
+				ProjectID: h.cfg.BirdTemplateRescheduleProjectID,
+				VersionID: h.cfg.BirdTemplateRescheduleVersionID,
+				Locale:    h.cfg.BirdTemplateRescheduleLocale,
+				Params: []bird.TemplateParam{
+					{Type: "string", Key: "patient_name", Value: firstAppt.PatientName},
+					{Type: "string", Key: "appointment_date_cancel", Value: utils.FormatFriendlyDateStr(req.OldDate)},
+					{Type: "string", Key: "appointment_time_cancel", Value: services.FormatTimeSlot(firstAppt.TimeSlot)},
+					{Type: "string", Key: "appointment_date_new", Value: utils.FormatFriendlyDateStr(req.NewDate)},
+					{Type: "string", Key: "appointment_time_new", Value: services.FormatTimeSlot(firstAppt.TimeSlot)},
+				},
+			}
+
+			msgID, err := h.birdClient.SendTemplate(phone, tmpl)
+			if err != nil {
+				slog.Error("send reschedule notification", "phone", phone, "error", err)
+				continue
+			}
+
+			// Look up conversationID for Bird Inbox visibility
+			convID := h.birdClient.GetCachedConversationID(phone)
+			if convID == "" {
+				convID, _ = h.birdClient.LookupConversationByPhone(phone)
+			}
+
+			h.notifyManager.RegisterPending(notifications.PendingNotification{
+				Type:           "reschedule",
+				Phone:          phone,
+				AppointmentID:  firstAppt.ID,
+				BirdMessageID:  msgID,
+				ConversationID: convID,
+			})
+
+			if h.tracker != nil {
+				h.tracker.LogEvent(context.Background(), "", phone, "notification_sent", map[string]interface{}{
+					"type":            "reschedule",
+					"appointment_id":  firstAppt.ID,
+					"bird_msg_id":     msgID,
+					"conversation_id": convID,
+				})
+			}
+
+			notified++
+			time.Sleep(2 * time.Second) // Rate limit
+		}
+		slog.Info("reschedule notifications sent", "notified", notified, "total", len(patients))
+	}()
+
+	return toNotify
+}
+
+// --- Waiting List Admin ---
+
+// HandleWaitingListCheck triggers a manual waiting list status check.
+func (h *InternalHandler) HandleWaitingListCheck(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CupsCode string `json:"cups_code"`
+		DryRun   bool   `json:"dry_run"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	ctx := r.Context()
+
+	var cupsCodes []string
+	if req.CupsCode != "" {
+		cupsCodes = []string{req.CupsCode}
+	} else {
+		var err error
+		cupsCodes, err = h.waitingListRepo.GetDistinctWaitingCups(ctx)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	type cupsInfo struct {
+		CupsCode string `json:"cups_code"`
+		Waiting  int    `json:"waiting"`
+	}
+	var results []cupsInfo
+	for _, code := range cupsCodes {
+		entries, err := h.waitingListRepo.GetWaitingByCups(ctx, code, 100)
+		if err != nil {
+			continue
+		}
+		results = append(results, cupsInfo{CupsCode: code, Waiting: len(entries)})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "ok",
+		"dry_run": req.DryRun,
+		"cups":    results,
+		"total":   len(cupsCodes),
+	})
+}
+
+// HandleWaitingListGet returns paginated waiting list entries.
+func (h *InternalHandler) HandleWaitingListGet(w http.ResponseWriter, r *http.Request) {
+	filters := domain.WaitingListFilters{
+		Status:   r.URL.Query().Get("status"),
+		CupsCode: r.URL.Query().Get("cups_code"),
+	}
+
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page == 0 {
+		page = 1
+	}
+	pageSize := 20
+
+	entries, total, err := h.waitingListRepo.List(r.Context(), filters, page, pageSize)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"entries": entries,
+		"total":   total,
+		"page":    page,
+		"pages":   (total + pageSize - 1) / pageSize,
+	})
+}
+
+// --- KPI Endpoints ---
+
+// HandleDailyKPIs returns aggregated KPI metrics for a single day.
+func (h *InternalHandler) HandleDailyKPIs(w http.ResponseWriter, r *http.Request) {
+	dateStr := r.URL.Query().Get("date")
+	if dateStr == "" {
+		dateStr = time.Now().Format("2006-01-02")
+	}
+
+	date, err := time.Parse("2006-01-02", dateStr)
+	if err != nil {
+		http.Error(w, "invalid date format, use YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+
+	kpis, err := h.eventRepo.GetDailyKPIs(r.Context(), date)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(kpis)
+}
+
+// HandleWeeklyKPIs returns aggregated KPI metrics for an ISO week.
+func (h *InternalHandler) HandleWeeklyKPIs(w http.ResponseWriter, r *http.Request) {
+	weekStr := r.URL.Query().Get("week")
+	if weekStr == "" {
+		year, week := time.Now().ISOWeek()
+		weekStr = fmt.Sprintf("%d-W%02d", year, week)
+	}
+
+	// Parse ISO week: YYYY-Wnn
+	parts := strings.SplitN(weekStr, "-W", 2)
+	if len(parts) != 2 {
+		http.Error(w, "invalid week format, use YYYY-Wnn (e.g. 2026-W08)", http.StatusBadRequest)
+		return
+	}
+
+	year, err := strconv.Atoi(parts[0])
+	if err != nil {
+		http.Error(w, "invalid year in week", http.StatusBadRequest)
+		return
+	}
+	weekNum, err := strconv.Atoi(parts[1])
+	if err != nil || weekNum < 1 || weekNum > 53 {
+		http.Error(w, "invalid week number", http.StatusBadRequest)
+		return
+	}
+
+	// Find Monday of the ISO week
+	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, time.Local)
+	_, jan4Week := jan4.ISOWeek()
+	monday := jan4.AddDate(0, 0, (weekNum-jan4Week)*7-int(jan4.Weekday()-time.Monday))
+
+	ctx := r.Context()
+
+	// Aggregate 7 days
+	aggregate := &localrepo.DailyKPIs{Date: weekStr}
+	for i := 0; i < 7; i++ {
+		day := monday.AddDate(0, 0, i)
+		daily, err := h.eventRepo.GetDailyKPIs(ctx, day)
+		if err != nil {
+			continue
+		}
+		aggregate.TotalSessions += daily.TotalSessions
+		aggregate.CompletedSessions += daily.CompletedSessions
+		aggregate.AbandonedSessions += daily.AbandonedSessions
+		aggregate.EscalatedSessions += daily.EscalatedSessions
+		aggregate.AppointmentsCreated += daily.AppointmentsCreated
+		aggregate.AppointmentsConfirmed += daily.AppointmentsConfirmed
+		aggregate.AppointmentsCancelled += daily.AppointmentsCancelled
+		aggregate.PatientsRegistered += daily.PatientsRegistered
+		aggregate.OCRAttempts += daily.OCRAttempts
+		aggregate.OCRSuccesses += daily.OCRSuccesses
+		aggregate.GFRCalculations += daily.GFRCalculations
+		aggregate.GFRBlocked += daily.GFRBlocked
+		aggregate.OutOfHoursAttempts += daily.OutOfHoursAttempts
+		aggregate.MaxRetriesReached += daily.MaxRetriesReached
+		aggregate.ProactivesSent += daily.ProactivesSent
+		aggregate.ProactivesConfirmed += daily.ProactivesConfirmed
+		aggregate.ProactivesCancelled += daily.ProactivesCancelled
+		aggregate.ProactivesNoResponse += daily.ProactivesNoResponse
+		aggregate.IVRCallsSent += daily.IVRCallsSent
+		aggregate.WaitingListJoined += daily.WaitingListJoined
+		aggregate.WaitingListScheduled += daily.WaitingListScheduled
+		aggregate.AdminAgendasCancelled += daily.AdminAgendasCancelled
+		aggregate.AdminAgendasRescheduled += daily.AdminAgendasRescheduled
+		aggregate.RescheduleConfirmed += daily.RescheduleConfirmed
+		aggregate.RescheduleCancelled += daily.RescheduleCancelled
+		aggregate.CancelAcknowledged += daily.CancelAcknowledged
+		aggregate.CancelRescheduleRequested += daily.CancelRescheduleRequested
+		aggregate.RescheduleSelfService += daily.RescheduleSelfService
+		aggregate.AvgSessionDuration += daily.AvgSessionDuration
+	}
+
+	// Average the session duration across days that had data
+	daysWithData := 0
+	for i := 0; i < 7; i++ {
+		day := monday.AddDate(0, 0, i)
+		daily, err := h.eventRepo.GetDailyKPIs(ctx, day)
+		if err == nil && daily.TotalSessions > 0 {
+			daysWithData++
+		}
+	}
+	if daysWithData > 0 {
+		aggregate.AvgSessionDuration /= float64(daysWithData)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(aggregate)
+}
+
+// HandleFunnel returns conversion funnel data for a date range.
+func (h *InternalHandler) HandleFunnel(w http.ResponseWriter, r *http.Request) {
+	fromStr := r.URL.Query().Get("from")
+	toStr := r.URL.Query().Get("to")
+
+	if fromStr == "" || toStr == "" {
+		http.Error(w, "'from' and 'to' query params required (YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+
+	from, err := time.Parse("2006-01-02", fromStr)
+	if err != nil {
+		http.Error(w, "invalid 'from' date", http.StatusBadRequest)
+		return
+	}
+
+	to, err := time.Parse("2006-01-02", toStr)
+	if err != nil {
+		http.Error(w, "invalid 'to' date", http.StatusBadRequest)
+		return
+	}
+
+	funnel, err := h.eventRepo.GetFunnel(r.Context(), from, to)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(funnel)
+}
+
+// HandleHealthKPIs returns system health and runtime metrics.
+func (h *InternalHandler) HandleHealthKPIs(w http.ResponseWriter, r *http.Request) {
+	metrics, err := h.eventRepo.GetHealthMetrics(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	metrics.UptimeSeconds = int64(time.Since(h.startTime).Seconds())
+
+	if h.workerStats != nil {
+		metrics.WorkerQueueSize, metrics.WorkerQueueCap = h.workerStats.QueueStats()
+	}
+	if h.notifyCounter != nil {
+		metrics.PendingNotifications = h.notifyCounter.PendingCount()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
+// --- Helpers ---
+
+func groupAppointmentsByPatientID(appointments []domain.Appointment) map[string][]domain.Appointment {
+	groups := make(map[string][]domain.Appointment)
+	for _, appt := range appointments {
+		groups[appt.PatientID] = append(groups[appt.PatientID], appt)
+	}
+	return groups
+}

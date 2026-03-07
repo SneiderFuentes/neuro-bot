@@ -1,0 +1,154 @@
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: neuro_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:${PORT:-8080}/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - botnet
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "7"
+    environment:
+      - TZ=America/Bogota
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '1.0'
+        reservations:
+          memory: 32M
+
+  db:
+    image: mysql:8.0
+    container_name: neuro_bot_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-secret}
+      MYSQL_DATABASE: ${DB_DATABASE:-neuro_bot}
+      MYSQL_USER: ${DB_USER:-botuser}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-botpass}
+      TZ: America/Bogota
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --tls-version=TLSv1.2
+      --mysqlx=0
+      --innodb-buffer-pool-size=64M
+      --max-connections=50
+      --table-open-cache=200
+      --sort-buffer-size=256K
+    ports:
+      - "${DB_PORT:-13308}:3306"
+    volumes:
+      - botdbdata:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$${MYSQL_ROOT_PASSWORD} || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - botnet
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "7"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '1.0'
+        reservations:
+          memory: 128M
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: neuro_bot_ngrok
+    restart: unless-stopped
+    depends_on:
+      bot:
+        condition: service_healthy
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+      TZ: America/Bogota
+    command:
+      - "http"
+      - "bot:${PORT:-8080}"
+      - "--hostname=${NGROK_HOSTNAME:-app.colibrixa.com}"
+      - "--log=stdout"
+    ports:
+      - "14041:4040"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:4040/api/tunnels | grep -q tunnels"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    networks:
+      - botnet
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "7"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: '0.5'
+
+  watcher:
+    build: ./watcher
+    container_name: neuro_bot_watcher
+    restart: unless-stopped
+    environment:
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TG_CHAT_IDS: ${TG_CHAT_IDS:-}
+      IGNORE_CONTAINERS: "neuro_bot_watcher"
+      VERBOSE: "0"
+      TZ: America/Bogota
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -v grep | grep -q healthwatch"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - botnet
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "7"
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+          cpus: '0.25'
+
+volumes:
+  botdbdata:
+
+networks:
+  botnet:

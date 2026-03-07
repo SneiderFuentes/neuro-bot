@@ -1,0 +1,662 @@
+package session
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+)
+
+// mockRepo is a test-local mock implementing SessionRepo.
+type mockRepo struct {
+	findActiveByPhoneFn func(ctx context.Context, phone string) (*Session, error)
+	createFn            func(ctx context.Context, s *Session) error
+	saveFn              func(ctx context.Context, s *Session) error
+	updateStatusFn      func(ctx context.Context, sessionID, status string) error
+	renewExpiryFn       func(ctx context.Context, sessionID string, expiresAt time.Time) error
+	setContextFn        func(ctx context.Context, sessionID, key, value string) error
+	setContextBatchFn   func(ctx context.Context, sessionID string, kvs map[string]string) error
+	getContextFn        func(ctx context.Context, sessionID, key string) (string, error)
+	getAllContextFn      func(ctx context.Context, sessionID string) (map[string]string, error)
+	clearContextFn      func(ctx context.Context, sessionID string, keys ...string) error
+	clearAllContextFn   func(ctx context.Context, sessionID string) error
+	markEscalatedFn     func(ctx context.Context, sessionID, teamID string) error
+	resumeSessionFn     func(ctx context.Context, sessionID, newState string, timeoutMinutes int) error
+}
+
+func (r *mockRepo) FindActiveByPhone(ctx context.Context, phone string) (*Session, error) {
+	if r.findActiveByPhoneFn != nil {
+		return r.findActiveByPhoneFn(ctx, phone)
+	}
+	return nil, nil
+}
+func (r *mockRepo) Create(ctx context.Context, s *Session) error {
+	if r.createFn != nil {
+		return r.createFn(ctx, s)
+	}
+	return nil
+}
+func (r *mockRepo) Save(ctx context.Context, s *Session) error {
+	if r.saveFn != nil {
+		return r.saveFn(ctx, s)
+	}
+	return nil
+}
+func (r *mockRepo) UpdateStatus(ctx context.Context, sessionID, status string) error {
+	if r.updateStatusFn != nil {
+		return r.updateStatusFn(ctx, sessionID, status)
+	}
+	return nil
+}
+func (r *mockRepo) RenewExpiry(ctx context.Context, sessionID string, expiresAt time.Time) error {
+	if r.renewExpiryFn != nil {
+		return r.renewExpiryFn(ctx, sessionID, expiresAt)
+	}
+	return nil
+}
+func (r *mockRepo) FindInactiveSessions(ctx context.Context, idleMinutes int) ([]InactiveSession, error) {
+	return nil, nil
+}
+func (r *mockRepo) FindExpiredEscalatedSessions(ctx context.Context) ([]ExpiredEscalatedSession, error) {
+	return nil, nil
+}
+func (r *mockRepo) MarkAbandoned(ctx context.Context, sessionID string) error {
+	return nil
+}
+func (r *mockRepo) SetContext(ctx context.Context, sessionID, key, value string) error {
+	if r.setContextFn != nil {
+		return r.setContextFn(ctx, sessionID, key, value)
+	}
+	return nil
+}
+func (r *mockRepo) SetContextBatch(ctx context.Context, sessionID string, kvs map[string]string) error {
+	if r.setContextBatchFn != nil {
+		return r.setContextBatchFn(ctx, sessionID, kvs)
+	}
+	return nil
+}
+func (r *mockRepo) GetContext(ctx context.Context, sessionID, key string) (string, error) {
+	if r.getContextFn != nil {
+		return r.getContextFn(ctx, sessionID, key)
+	}
+	return "", nil
+}
+func (r *mockRepo) GetAllContext(ctx context.Context, sessionID string) (map[string]string, error) {
+	if r.getAllContextFn != nil {
+		return r.getAllContextFn(ctx, sessionID)
+	}
+	return make(map[string]string), nil
+}
+func (r *mockRepo) ClearContext(ctx context.Context, sessionID string, keys ...string) error {
+	if r.clearContextFn != nil {
+		return r.clearContextFn(ctx, sessionID, keys...)
+	}
+	return nil
+}
+func (r *mockRepo) ClearAllContext(ctx context.Context, sessionID string) error {
+	if r.clearAllContextFn != nil {
+		return r.clearAllContextFn(ctx, sessionID)
+	}
+	return nil
+}
+func (r *mockRepo) MarkEscalated(ctx context.Context, sessionID, teamID string) error {
+	if r.markEscalatedFn != nil {
+		return r.markEscalatedFn(ctx, sessionID, teamID)
+	}
+	return nil
+}
+func (r *mockRepo) ResumeSession(ctx context.Context, sessionID, newState string, timeoutMinutes int) error {
+	if r.resumeSessionFn != nil {
+		return r.resumeSessionFn(ctx, sessionID, newState, timeoutMinutes)
+	}
+	return nil
+}
+
+func newTestSession() *Session {
+	return &Session{
+		ID:           "sess-1",
+		PhoneNumber:  "+573001234567",
+		CurrentState: "CHECK_BUSINESS_HOURS",
+		Status:       StatusActive,
+		Context:      make(map[string]string),
+		CreatedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(2 * time.Hour),
+	}
+}
+
+func TestFindOrCreate_NewSession(t *testing.T) {
+	repo := &mockRepo{}
+	mgr := NewSessionManager(repo, 120)
+
+	sess, isNew, err := mgr.FindOrCreate(context.Background(), "+573001234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isNew {
+		t.Error("expected isNew=true")
+	}
+	if sess.PhoneNumber != "+573001234567" {
+		t.Errorf("expected phone, got %s", sess.PhoneNumber)
+	}
+	if sess.CurrentState != "CHECK_BUSINESS_HOURS" {
+		t.Errorf("expected CHECK_BUSINESS_HOURS, got %s", sess.CurrentState)
+	}
+}
+
+func TestFindOrCreate_ExistingSession(t *testing.T) {
+	existing := newTestSession()
+	existing.ID = "existing-id"
+	repo := &mockRepo{
+		findActiveByPhoneFn: func(ctx context.Context, phone string) (*Session, error) {
+			return existing, nil
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+
+	sess, isNew, err := mgr.FindOrCreate(context.Background(), "+573001234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isNew {
+		t.Error("expected isNew=false")
+	}
+	if sess.ID != "existing-id" {
+		t.Errorf("expected existing-id, got %s", sess.ID)
+	}
+}
+
+func TestFindOrCreate_Error(t *testing.T) {
+	repo := &mockRepo{
+		findActiveByPhoneFn: func(ctx context.Context, phone string) (*Session, error) {
+			return nil, fmt.Errorf("db error")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+
+	_, _, err := mgr.FindOrCreate(context.Background(), "+573001234567")
+	if err == nil {
+		t.Error("expected error")
+	}
+}
+
+func TestRenewTimeout(t *testing.T) {
+	renewed := false
+	repo := &mockRepo{
+		renewExpiryFn: func(ctx context.Context, sessionID string, expiresAt time.Time) error {
+			renewed = true
+			return nil
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+	oldExpiry := sess.ExpiresAt
+
+	err := mgr.RenewTimeout(context.Background(), sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !renewed {
+		t.Error("expected repo.RenewExpiry to be called")
+	}
+	if !sess.ExpiresAt.After(oldExpiry) {
+		t.Error("expected ExpiresAt to be extended")
+	}
+}
+
+func TestSaveState_WithContext(t *testing.T) {
+	savedState := ""
+	batchCalled := false
+	repo := &mockRepo{
+		saveFn: func(ctx context.Context, s *Session) error {
+			savedState = s.CurrentState
+			return nil
+		},
+		setContextBatchFn: func(ctx context.Context, sessionID string, kvs map[string]string) error {
+			batchCalled = true
+			return nil
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.SaveState(context.Background(), sess, "MAIN_MENU",
+		map[string]string{"key1": "val1"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedState != "MAIN_MENU" {
+		t.Errorf("expected MAIN_MENU, got %s", savedState)
+	}
+	if !batchCalled {
+		t.Error("expected SetContextBatch to be called")
+	}
+	if sess.Context["key1"] != "val1" {
+		t.Error("expected in-memory context update")
+	}
+}
+
+func TestSaveState_WithClearCtx(t *testing.T) {
+	clearCalled := false
+	repo := &mockRepo{
+		clearContextFn: func(ctx context.Context, sessionID string, keys ...string) error {
+			clearCalled = true
+			return nil
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+	sess.Context["old_key"] = "old_val"
+
+	err := mgr.SaveState(context.Background(), sess, "NEXT", nil, []string{"old_key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !clearCalled {
+		t.Error("expected ClearContext to be called")
+	}
+	if _, exists := sess.Context["old_key"]; exists {
+		t.Error("expected old_key to be deleted from memory")
+	}
+}
+
+func TestSetContext(t *testing.T) {
+	repo := &mockRepo{}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.SetContext(context.Background(), sess, "foo", "bar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Context["foo"] != "bar" {
+		t.Error("expected in-memory update")
+	}
+}
+
+func TestSetContextBatch(t *testing.T) {
+	repo := &mockRepo{}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.SetContextBatch(context.Background(), sess, map[string]string{"a": "1", "b": "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Context["a"] != "1" || sess.Context["b"] != "2" {
+		t.Error("expected batch update in memory")
+	}
+}
+
+func TestClearAllContext(t *testing.T) {
+	repo := &mockRepo{}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+	sess.Context["x"] = "y"
+
+	err := mgr.ClearAllContext(context.Background(), sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.Context) != 0 {
+		t.Error("expected empty context after ClearAll")
+	}
+}
+
+func TestComplete(t *testing.T) {
+	statusSaved := ""
+	repo := &mockRepo{
+		updateStatusFn: func(ctx context.Context, sessionID, status string) error {
+			statusSaved = status
+			return nil
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.Complete(context.Background(), sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Status != StatusCompleted {
+		t.Errorf("expected completed, got %s", sess.Status)
+	}
+	if statusSaved != StatusCompleted {
+		t.Errorf("expected repo to receive completed, got %s", statusSaved)
+	}
+}
+
+func TestEscalate(t *testing.T) {
+	repo := &mockRepo{}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.Escalate(context.Background(), sess, "team-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Status != StatusEscalated {
+		t.Errorf("expected escalated, got %s", sess.Status)
+	}
+	if sess.EscalatedTeam != "team-test" {
+		t.Errorf("expected team-test, got %s", sess.EscalatedTeam)
+	}
+	if sess.EscalatedAt == nil {
+		t.Error("expected EscalatedAt to be set")
+	}
+}
+
+func TestFindOrCreate_GetAllContextError(t *testing.T) {
+	existing := newTestSession()
+	existing.ID = "existing-id"
+	repo := &mockRepo{
+		findActiveByPhoneFn: func(ctx context.Context, phone string) (*Session, error) {
+			return existing, nil
+		},
+		getAllContextFn: func(ctx context.Context, sessionID string) (map[string]string, error) {
+			return nil, fmt.Errorf("ctx load error")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+
+	_, _, err := mgr.FindOrCreate(context.Background(), "+573001234567")
+	if err == nil {
+		t.Fatal("expected error when GetAllContext fails")
+	}
+	if err.Error() != "ctx load error" {
+		t.Errorf("expected 'ctx load error', got %q", err.Error())
+	}
+}
+
+func TestFindOrCreate_CreateError(t *testing.T) {
+	repo := &mockRepo{
+		findActiveByPhoneFn: func(ctx context.Context, phone string) (*Session, error) {
+			return nil, nil // no existing session
+		},
+		createFn: func(ctx context.Context, s *Session) error {
+			return fmt.Errorf("create failed")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+
+	_, _, err := mgr.FindOrCreate(context.Background(), "+573001234567")
+	if err == nil {
+		t.Fatal("expected error when Create fails")
+	}
+	if err.Error() != "create failed" {
+		t.Errorf("expected 'create failed', got %q", err.Error())
+	}
+}
+
+func TestSaveState_SaveError(t *testing.T) {
+	repo := &mockRepo{
+		saveFn: func(ctx context.Context, s *Session) error {
+			return fmt.Errorf("save failed")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.SaveState(context.Background(), sess, "NEXT", nil, nil)
+	if err == nil {
+		t.Fatal("expected error when Save fails")
+	}
+	if err.Error() != "save failed" {
+		t.Errorf("expected 'save failed', got %q", err.Error())
+	}
+}
+
+func TestSaveState_SetContextBatchError(t *testing.T) {
+	repo := &mockRepo{
+		saveFn: func(ctx context.Context, s *Session) error {
+			return nil // Save succeeds
+		},
+		setContextBatchFn: func(ctx context.Context, sessionID string, kvs map[string]string) error {
+			return fmt.Errorf("batch failed")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.SaveState(context.Background(), sess, "NEXT",
+		map[string]string{"key": "val"}, nil)
+	if err == nil {
+		t.Fatal("expected error when SetContextBatch fails")
+	}
+	if err.Error() != "batch failed" {
+		t.Errorf("expected 'batch failed', got %q", err.Error())
+	}
+}
+
+func TestSaveState_ClearContextError(t *testing.T) {
+	repo := &mockRepo{
+		saveFn: func(ctx context.Context, s *Session) error {
+			return nil
+		},
+		clearContextFn: func(ctx context.Context, sessionID string, keys ...string) error {
+			return fmt.Errorf("clear failed")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+	sess.Context["old"] = "val"
+
+	err := mgr.SaveState(context.Background(), sess, "NEXT", nil, []string{"old"})
+	if err == nil {
+		t.Fatal("expected error when ClearContext fails")
+	}
+	if err.Error() != "clear failed" {
+		t.Errorf("expected 'clear failed', got %q", err.Error())
+	}
+}
+
+func TestSaveState_BothUpdateAndClear(t *testing.T) {
+	batchCalled := false
+	clearCalled := false
+	repo := &mockRepo{
+		saveFn: func(ctx context.Context, s *Session) error {
+			return nil
+		},
+		setContextBatchFn: func(ctx context.Context, sessionID string, kvs map[string]string) error {
+			batchCalled = true
+			if kvs["new_key"] != "new_val" {
+				return fmt.Errorf("unexpected batch kvs: %v", kvs)
+			}
+			return nil
+		},
+		clearContextFn: func(ctx context.Context, sessionID string, keys ...string) error {
+			clearCalled = true
+			if len(keys) != 1 || keys[0] != "old_key" {
+				return fmt.Errorf("unexpected clear keys: %v", keys)
+			}
+			return nil
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+	sess.Context["old_key"] = "old_val"
+
+	err := mgr.SaveState(context.Background(), sess, "NEXT",
+		map[string]string{"new_key": "new_val"}, []string{"old_key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batchCalled {
+		t.Error("expected SetContextBatch to be called")
+	}
+	if !clearCalled {
+		t.Error("expected ClearContext to be called")
+	}
+	if sess.Context["new_key"] != "new_val" {
+		t.Error("expected new_key in memory")
+	}
+	if _, exists := sess.Context["old_key"]; exists {
+		t.Error("expected old_key to be deleted from memory")
+	}
+}
+
+func TestSaveState_EmptyMaps(t *testing.T) {
+	batchCalled := false
+	clearCalled := false
+	repo := &mockRepo{
+		saveFn: func(ctx context.Context, s *Session) error {
+			return nil
+		},
+		setContextBatchFn: func(ctx context.Context, sessionID string, kvs map[string]string) error {
+			batchCalled = true
+			return nil
+		},
+		clearContextFn: func(ctx context.Context, sessionID string, keys ...string) error {
+			clearCalled = true
+			return nil
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	// Pass empty maps — neither batch nor clear should be called
+	err := mgr.SaveState(context.Background(), sess, "NEXT",
+		map[string]string{}, []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batchCalled {
+		t.Error("SetContextBatch should NOT be called for empty updateCtx")
+	}
+	if clearCalled {
+		t.Error("ClearContext should NOT be called for empty clearCtx")
+	}
+}
+
+func TestSetContext_RepoError(t *testing.T) {
+	repo := &mockRepo{
+		setContextFn: func(ctx context.Context, sessionID, key, value string) error {
+			return fmt.Errorf("set ctx error")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.SetContext(context.Background(), sess, "foo", "bar")
+	if err == nil {
+		t.Fatal("expected error when SetContext repo fails")
+	}
+	// Memory should NOT be updated when repo fails
+	if sess.Context["foo"] == "bar" {
+		t.Error("expected in-memory context NOT to be updated on repo error")
+	}
+}
+
+func TestSetContextBatch_RepoError(t *testing.T) {
+	repo := &mockRepo{
+		setContextBatchFn: func(ctx context.Context, sessionID string, kvs map[string]string) error {
+			return fmt.Errorf("batch error")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.SetContextBatch(context.Background(), sess,
+		map[string]string{"a": "1", "b": "2"})
+	if err == nil {
+		t.Fatal("expected error when SetContextBatch repo fails")
+	}
+	// Memory should NOT be updated
+	if sess.Context["a"] == "1" {
+		t.Error("expected in-memory context NOT to be updated on repo error")
+	}
+}
+
+func TestClearAllContext_RepoError(t *testing.T) {
+	repo := &mockRepo{
+		clearAllContextFn: func(ctx context.Context, sessionID string) error {
+			return fmt.Errorf("clear all error")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+	sess.Context["x"] = "y"
+
+	err := mgr.ClearAllContext(context.Background(), sess)
+	if err == nil {
+		t.Fatal("expected error when ClearAllContext repo fails")
+	}
+	// Memory should NOT be cleared on error
+	if len(sess.Context) == 0 {
+		t.Error("expected context NOT to be cleared on repo error")
+	}
+}
+
+func TestComplete_RepoError(t *testing.T) {
+	repo := &mockRepo{
+		updateStatusFn: func(ctx context.Context, sessionID, status string) error {
+			return fmt.Errorf("update status error")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.Complete(context.Background(), sess)
+	if err == nil {
+		t.Fatal("expected error when UpdateStatus fails")
+	}
+	// Note: status is already set in memory before repo call
+	if sess.Status != StatusCompleted {
+		t.Errorf("expected status set in memory even on error, got %s", sess.Status)
+	}
+}
+
+func TestEscalate_RepoError(t *testing.T) {
+	repo := &mockRepo{
+		markEscalatedFn: func(ctx context.Context, sessionID, teamID string) error {
+			return fmt.Errorf("mark escalated error")
+		},
+	}
+	mgr := NewSessionManager(repo, 120)
+	sess := newTestSession()
+
+	err := mgr.Escalate(context.Background(), sess, "team-test")
+	if err == nil {
+		t.Fatal("expected error when MarkEscalated fails")
+	}
+	// Status is already set in memory before repo call
+	if sess.Status != StatusEscalated {
+		t.Errorf("expected status set in memory even on error, got %s", sess.Status)
+	}
+}
+
+func TestPhoneMutex_Returns(t *testing.T) {
+	repo := &mockRepo{}
+	mgr := NewSessionManager(repo, 120)
+
+	pm := mgr.PhoneMutex()
+	if pm == nil {
+		t.Fatal("expected non-nil PhoneMutex")
+	}
+}
+
+func TestStartInactivityChecker_ContextCancellation(t *testing.T) {
+	repo := &mockRepo{}
+	mgr := NewSessionManager(repo, 120)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		mgr.StartInactivityChecker(ctx, InactivityDeps{
+			Reminder1Min: 5,
+			Reminder2Min: 15,
+			CloseMin:     30,
+		})
+		close(done)
+	}()
+
+	// Cancel immediately
+	cancel()
+
+	// Wait for goroutine to exit
+	select {
+	case <-done:
+		// goroutine exited — success
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartInactivityChecker goroutine did not exit after context cancellation")
+	}
+}

@@ -1,0 +1,433 @@
+package services
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type OCRService struct {
+	apiKey      string
+	model       string // gpt-4o-mini
+	apiURL      string // default: https://api.openai.com/v1/chat/completions
+	client      *http.Client
+	cupsContext string // CUPS reference table injected into the prompt
+}
+
+func NewOCRService(apiKey, model, cupsContext string) *OCRService {
+	return &OCRService{
+		apiKey:      apiKey,
+		model:       model,
+		apiURL:      "https://api.openai.com/v1/chat/completions",
+		client:      &http.Client{Timeout: 60 * time.Second},
+		cupsContext: cupsContext,
+	}
+}
+
+// NewOCRServiceForTest creates an OCRService pointing at a custom URL (for httptest).
+func NewOCRServiceForTest(apiURL string) *OCRService {
+	return &OCRService{
+		apiURL: apiURL,
+		model:  "test-model",
+		client: &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+type OCRResult struct {
+	Success  bool
+	Cups     []CUPSEntry
+	Entity   string
+	Notes    string
+	Error    string
+	Document string // Documento del paciente extraído (solo dígitos)
+}
+
+type CUPSEntry struct {
+	Code      string `json:"cups_code"`
+	Name      string `json:"cups_name"`
+	Quantity  int    `json:"quantity"`
+	IsSedated bool   `json:"is_sedated"`
+}
+
+type CUPSGroup struct {
+	ServiceType string      `json:"service"`
+	Cups        []CUPSEntry `json:"cups"`
+	Espacios    int         `json:"espacios"`
+}
+
+// BuildCupsContext constructs the CUPS reference table string from a list of procedures.
+// Call this once at startup and pass the result to NewOCRService.
+func BuildCupsContext(codes []struct{ Code, Name string }) string {
+	var sb strings.Builder
+	for _, p := range codes {
+		fmt.Fprintf(&sb, "- CUPS: %s, Descripción: %s\n", p.Code, p.Name)
+	}
+	return sb.String()
+}
+
+const ocrSystemPrompt = `Eres un extractor de datos de órdenes médicas colombianas. Devuelve SIEMPRE y SOLO un JSON válido (sin texto extra, sin bloques de código markdown).
+
+FORMATO DE SALIDA:
+{
+  "documento": "<solo_digitos|null>",
+  "cups": [
+    {
+      "cups_code": "<4-6_digitos>",
+      "cups_name": "<descripcion_exacta_de_la_orden>",
+      "quantity": <int>,
+      "is_sedated": <boolean>
+    }
+  ],
+  "entity": "<nombre_EPS_o_entidad|null>",
+  "notes": "<observaciones_relevantes>"
+}
+
+REGLAS GENERALES:
+- Devuelve SOLO JSON válido, sin texto adicional.
+- Usa el texto tal como aparece en la orden; no inventes ni normalices descripciones salvo correcciones OCR mínimas.
+- Si un dato no está visible, usa null (o 1 en quantity si no hay número).
+
+DOCUMENTO DEL PACIENTE (solo dígitos):
+- Extrae el número de identificación y deja SOLO dígitos.
+- Elimina prefijos y texto como: CC, TI, CE, RC, N°, No., guiones y espacios.
+- Ejemplos: "CC - 19262024" → "19262024"; "TI: 102-345" → "102345".
+- Si no es visible, usa null.
+
+PROCEDIMIENTOS — PROCESO DE DECISIÓN (OBLIGATORIO):
+1) PRIORIDAD ABSOLUTA: CÓDIGO EN LA ORDEN
+   - Si en la fila del procedimiento existe un número de 4 a 6 dígitos, ese ES el cups_code.
+   - Si el código trae sufijo no numérico (ej: "891509-1"), usa solo los dígitos: "891509".
+   - Copia la descripción tal cual de la orden en cups_name.
+
+2) SOLO SI NO HAY CÓDIGO EN LA ORDEN:
+   - Compara la descripción de la orden con la LISTA DE REFERENCIA (al final).
+   - Elige el CUPS con la coincidencia más fuerte y específica.
+   - cups_name se mantiene como la leída en la orden (no reemplazar por la de la lista).
+
+3) SI NO HAY CÓDIGO NI COINCIDENCIA:
+   - Pon cups_code vacío ("") y cups_name con la descripción leída en la orden.
+
+DATOS POR PROCEDIMIENTO:
+- quantity: entero; si la orden no trae número, usa 1.
+- is_sedated: busca en descripción y observaciones del procedimiento:
+  "sedación", "sedacion", "bajo sedación", "bajo anestesia", "con anestesia", "anestesia general"
+  Si encuentra alguna: true para ESE procedimiento. Si no: false.
+
+DETECCIÓN DE ENTIDAD:
+- Extraer del logo o texto el nombre de la EPS/entidad.
+- Si detectas "Capital Salud" o "capitalsalud": entity = "Capital Salud".
+
+REGLAS CAPITAL SALUD (solo si se detecta logo/texto "Capital Salud"):
+- Documento: está en la línea "TRABAJADOR:" o "PACIENTE:".
+  Buscar tipo-doc (CC|TI|CE|RC|AS|CD|CN|MS|NI|NU|NV|PA|PE|PT) seguido del número.
+  Devolver SOLO dígitos, longitud 6-12. Nunca usar números del encabezado sin tipo-doc.
+- Ignorar datos del pie de página (firmas, "VÁLIDO HASTA", "AUTORIZA", timestamps).
+- EDAD: "xx MES/MESES" → considerar edad 0; "xx AÑO/AÑOS" → xx.
+
+SIN TABLA DE PROCEDIMIENTOS:
+- Si la imagen no es una orden médica o no tiene tabla de procedimientos:
+  Responder: {"cups": [], "error": "no_table_detected"}
+- Si la imagen está borrosa o es ilegible:
+  Responder: {"cups": [], "error": "imagen_borrosa"}
+
+Recuerda: SOLO JSON válido como salida.`
+
+// buildSystemPrompt constructs the system prompt with optional CUPS reference table.
+func (s *OCRService) buildSystemPrompt() string {
+	systemPrompt := ocrSystemPrompt
+	if s.cupsContext != "" {
+		systemPrompt += "\n\nLISTA DE REFERENCIA DE PROCEDIMIENTOS (usar para matching cuando no hay código visible):\n" + s.cupsContext
+	}
+	return systemPrompt
+}
+
+// callOpenAI sends a request to OpenAI and parses the OCR-style response.
+// Shared by AnalyzeImage and AnalyzeText.
+func (s *OCRService) callOpenAI(ctx context.Context, messages []map[string]interface{}) (*OCRResult, error) {
+	reqBody := map[string]interface{}{
+		"model":       s.model,
+		"messages":    messages,
+		"max_tokens":  1200,
+		"temperature": 0,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", s.apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("openai request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("openai api error", "status", resp.StatusCode, "body", string(respBody))
+		return nil, fmt.Errorf("openai api status %d", resp.StatusCode)
+	}
+
+	// Parsear respuesta de OpenAI
+	var apiResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, fmt.Errorf("unmarshal api response: %w", err)
+	}
+
+	if len(apiResp.Choices) == 0 {
+		return &OCRResult{Success: false, Error: "sin respuesta de OpenAI"}, nil
+	}
+
+	content := apiResp.Choices[0].Message.Content
+
+	// Extraer JSON del contenido (puede venir con markdown ```json ... ```)
+	jsonStr := extractJSON(content)
+
+	var parsed struct {
+		Cups     []CUPSEntry `json:"cups"`
+		Entity   string      `json:"entity"`
+		Notes    string      `json:"notes"`
+		Error    string      `json:"error"`
+		Document *string     `json:"documento"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
+		slog.Warn("ocr json parse failed", "content", content, "error", err)
+		return &OCRResult{Success: false, Error: "no se pudo interpretar la respuesta"}, nil
+	}
+
+	if parsed.Error != "" {
+		return &OCRResult{Success: false, Error: parsed.Error, Entity: parsed.Entity}, nil
+	}
+
+	// Asegurar quantity >= 1
+	for i := range parsed.Cups {
+		if parsed.Cups[i].Quantity < 1 {
+			parsed.Cups[i].Quantity = 1
+		}
+	}
+
+	doc := ""
+	if parsed.Document != nil {
+		doc = *parsed.Document
+	}
+
+	return &OCRResult{
+		Success:  len(parsed.Cups) > 0,
+		Cups:     parsed.Cups,
+		Entity:   parsed.Entity,
+		Notes:    parsed.Notes,
+		Document: doc,
+	}, nil
+}
+
+// AnalyzeImage envía una imagen a OpenAI Vision y extrae CUPS + documento
+func (s *OCRService) AnalyzeImage(ctx context.Context, imageURL string) (*OCRResult, error) {
+	systemPrompt := s.buildSystemPrompt()
+	messages := []map[string]interface{}{
+		{"role": "system", "content": systemPrompt},
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": "Analiza esta orden médica y extrae los datos según las reglas indicadas."},
+				{"type": "image_url", "image_url": map[string]string{"url": imageURL}},
+			},
+		},
+	}
+	return s.callOpenAI(ctx, messages)
+}
+
+// AnalyzeText processes a text description of a medical order (from agent)
+// and extracts CUPS data in the same format as AnalyzeImage.
+func (s *OCRService) AnalyzeText(ctx context.Context, description string) (*OCRResult, error) {
+	systemPrompt := s.buildSystemPrompt()
+	messages := []map[string]interface{}{
+		{"role": "system", "content": systemPrompt},
+		{
+			"role": "user",
+			"content": "Un agente humano describe la orden médica de un paciente. " +
+				"Extrae los datos como si leyeras la orden físicamente:\n\n" + description,
+		},
+	}
+	return s.callOpenAI(ctx, messages)
+}
+
+// GroupByService agrupa CUPS por tipo de servicio usando OpenAI con reglas institucionales.
+// TODO: Cuando la tabla cups_procedimientos tenga `servicio` y `espacios_requeridos` poblados,
+// migrar a GroupByServiceFromDB (procedure_grouper.go) para agrupación determinista sin IA.
+func (s *OCRService) GroupByService(ctx context.Context, cups []CUPSEntry) ([]CUPSGroup, error) {
+	if len(cups) == 0 {
+		return []CUPSGroup{{ServiceType: "General", Cups: cups, Espacios: 1}}, nil
+	}
+
+	// Formatear lista de procedimientos
+	var procList strings.Builder
+	for _, c := range cups {
+		if c.Code != "" {
+			fmt.Fprintf(&procList, "- %s: %s (cantidad: %d)\n", c.Code, c.Name, c.Quantity)
+		} else {
+			fmt.Fprintf(&procList, "- %s (cantidad: %d)\n", c.Name, c.Quantity)
+		}
+	}
+
+	prompt := fmt.Sprintf(`Eres un asistente de agendamiento médico. Agrupa estos procedimientos por servicio y estima espacios (slots de tiempo) por cita.
+
+PROCEDIMIENTOS:
+%s
+SERVICIOS Y REGLAS DE ESPACIOS:
+
+1) FISIATRÍA (EMG/Neuroconducción):
+   - Códigos EMG: 29120, 930810, 892302, 892301, 930820, 930860, 893601, 930801, 29101
+   - Códigos NC: 29103, 891509, 29102
+   - TODOS van en 1 sola cita. Si hay EMG sin NC, agregar 891509 con cantidad = total_EMG × 4.
+   - Espacios: ≤3 EMG → 1, ≥4 EMG → 2.
+
+2) RESONANCIA MAGNÉTICA (códigos 883xxx):
+   - Estudio simple de 1 zona = 1 espacio.
+   - Cerebro, columna, articulaciones grandes = 2 espacios.
+   - Contrastada = agregar 1 espacio al base.
+   - Combo abdomen (883401) + pelvis (883440) = 3 espacios total.
+   - Bilateral (mismo estudio 2 lados) = espacios × 2.
+
+3) TOMOGRAFÍA (códigos 871xxx, 879xxx):
+   - Simple = 1 espacio, contrastada = 2 espacios.
+   - 879910 (Reconstrucción 3D) = override: toda la cita = 3 espacios.
+
+4) RADIOGRAFÍA (códigos 870xxx, 873-878xxx):
+   - Todos los estudios en 1 cita. Default = 1 espacio por estudio. Sumar total.
+
+5) ECOGRAFÍA (códigos 881xxx, 882xxx):
+   - Default = 1 espacio. Obstétrica de detalle = 2 espacios.
+   - Vascular de miembros = 1 espacio por unidad.
+
+6) NEUROLOGÍA (890274, 890374, 053105):
+   - Consultas = 1 espacio por unidad. 053105 (bloqueo) = 1 fijo.
+
+7) OTRO (cualquier código no listado arriba):
+   - 1 espacio por procedimiento.
+
+FORMATO DE SALIDA (SOLO JSON, sin texto extra):
+[{"service": "nombre_servicio", "cups": [{"cups_code": "codigo", "cups_name": "nombre", "quantity": N}], "espacios": N}]
+
+No mezcles procedimientos de diferentes servicios en un mismo grupo.`, procList.String())
+
+	reqBody := map[string]interface{}{
+		"model": s.model,
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": prompt},
+		},
+		"max_tokens":  1500,
+		"temperature": 0,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", s.apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("openai group api status %d", resp.StatusCode)
+	}
+
+	var apiResp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return nil, err
+	}
+
+	if len(apiResp.Choices) == 0 {
+		return nil, fmt.Errorf("sin respuesta de OpenAI para agrupación")
+	}
+
+	jsonStr := extractJSON(apiResp.Choices[0].Message.Content)
+
+	var groups []CUPSGroup
+	if err := json.Unmarshal([]byte(jsonStr), &groups); err != nil {
+		slog.Warn("group json parse failed", "content", jsonStr, "error", err)
+		return nil, err
+	}
+
+	// Asegurar espacios >= 1
+	for i := range groups {
+		if groups[i].Espacios < 1 {
+			groups[i].Espacios = 1
+		}
+	}
+
+	return groups, nil
+}
+
+// extractJSON extrae el JSON de una respuesta que puede contener markdown
+func extractJSON(content string) string {
+	content = strings.TrimSpace(content)
+
+	// Intentar extraer de bloque ```json ... ```
+	if idx := strings.Index(content, "```json"); idx >= 0 {
+		start := idx + 7
+		end := strings.Index(content[start:], "```")
+		if end >= 0 {
+			return strings.TrimSpace(content[start : start+end])
+		}
+	}
+
+	// Intentar extraer de bloque ``` ... ```
+	if idx := strings.Index(content, "```"); idx >= 0 {
+		start := idx + 3
+		// Saltar posible newline después de ```
+		if start < len(content) && content[start] == '\n' {
+			start++
+		}
+		end := strings.Index(content[start:], "```")
+		if end >= 0 {
+			return strings.TrimSpace(content[start : start+end])
+		}
+	}
+
+	// Ya es JSON directo
+	return content
+}

@@ -1,0 +1,600 @@
+package handlers
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/neuro-bot/neuro-bot/internal/bird"
+	"github.com/neuro-bot/neuro-bot/internal/services"
+	"github.com/neuro-bot/neuro-bot/internal/session"
+	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
+	"github.com/neuro-bot/neuro-bot/internal/statemachine/validators"
+)
+
+// RegisterMedicalValidationHandlers registra los handlers de validaciones médicas (Fase 9).
+func RegisterMedicalValidationHandlers(m *sm.Machine, gfrSvc *services.GFRService, apptSvc *services.AppointmentService) {
+	m.Register(sm.StateCheckSpecialCups, checkSpecialCupsHandler())
+	m.Register(sm.StateAskGestationalWeeks, askGestationalWeeksHandler())
+	m.Register(sm.StateAskContrasted, askContrastedHandler())
+	m.Register(sm.StateAskPregnancy, askPregnancyHandler())
+	m.Register(sm.StatePregnancyBlock, pregnancyBlockHandler())
+	m.Register(sm.StateAskBabyWeight, askBabyWeightHandler())
+	m.Register(sm.StateGfrCreatinine, gfrCreatinineHandler())
+	m.Register(sm.StateGfrDisease, gfrDiseaseHandler())
+	m.Register(sm.StateGfrHeight, gfrHeightHandler())
+	m.RegisterWithConfig(sm.StateGfrWeight, sm.HandlerConfig{
+		InputType:    sm.InputText,
+		TextValidate: validators.FloatRange(10, 300),
+		ErrorMsg:     "Peso no válido. Ingresa tu peso en kilogramos (ejemplo: 70).",
+		Handler:      gfrWeightHandler(),
+	})
+	m.Register(sm.StateGfrResult, gfrResultHandler(gfrSvc))
+	m.Register(sm.StateGfrNotEligible, gfrNotEligibleHandler())
+	m.Register(sm.StateAskSedation, askSedationHandler())
+	m.Register(sm.StateCheckExisting, checkExistingHandler(apptSvc))
+	m.Register(sm.StateAppointmentExists, appointmentExistsHandler())
+	m.Register(sm.StateCheckPriorConsult, checkPriorConsultHandler(apptSvc))
+	m.Register(sm.StateCheckSoatLimit, checkSoatLimitHandler(apptSvc))
+	m.Register(sm.StateCheckAgeRestriction, checkAgeRestrictionHandler())
+}
+
+// --- Helpers ---
+
+// isContrastable determina si un CUPS puede ser contrastado (resonancias, tomografías).
+func isContrastable(cupsCode string) bool {
+	return strings.HasPrefix(cupsCode, "883") || strings.HasPrefix(cupsCode, "871")
+}
+
+// isSedatable determina si un CUPS puede requerir sedación (resonancias).
+func isSedatable(cupsCode string) bool {
+	return strings.HasPrefix(cupsCode, "883")
+}
+
+// --- Handlers ---
+
+// ASK_CONTRASTED (automático) — pregunta si requiere contraste.
+// Si el CUPS no es contrastable, auto-chains to next state.
+// If contrastable, shows buttons and returns self (auto-chain stops on same state).
+func askContrastedHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		cupsCode := sess.GetContext("cups_code")
+
+		// CUPS no contrastable → saltar (auto-chain continues)
+		if !isContrastable(cupsCode) {
+			return sm.NewResult(sm.StateAskSedation).
+				WithContext("is_contrasted", "0").
+				WithEvent("contrast_skipped", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		// First entry: show prompt without burning a retry
+		if sess.GetContext("_prompted_contrast") == "" {
+			return sm.NewResult(sess.CurrentState).
+				WithContext("_prompted_contrast", "1").
+				WithButtons("Tu examen requiere *medio de contraste*?\n\n(Esto debe indicarlo tu orden médica)",
+					sm.Button{Text: "Sí, con contraste", Payload: "contrast_yes"},
+					sm.Button{Text: "No, sin contraste", Payload: "contrast_no"},
+				), nil
+		}
+
+		result, selected := sm.ValidateButtonResponse(sess, msg, "contrast_yes", "contrast_no")
+		if result != nil {
+			result.Messages = append(result.Messages, &sm.ButtonMessage{
+				Text: "Tu examen requiere *medio de contraste*?\n\n(Esto debe indicarlo tu orden médica)",
+				Buttons: []sm.Button{
+					{Text: "Sí, con contraste", Payload: "contrast_yes"},
+					{Text: "No, sin contraste", Payload: "contrast_no"},
+				},
+			})
+			return result, nil
+		}
+
+		switch selected {
+		case "contrast_yes":
+			gender := sess.GetContext("patient_gender")
+			age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+
+			r := sm.NewResult("").
+				WithContext("is_contrasted", "1").
+				WithClearCtx("_prompted_contrast").
+				WithEvent("contrast_selected", map[string]interface{}{"contrasted": true})
+
+			if gender == "F" && age >= 1 {
+				// Mujer >= 1 año → preguntar embarazo
+				r.NextState = sm.StateAskPregnancy
+			} else if age < 1 {
+				// Bebé (any gender) → preguntar peso
+				r.NextState = sm.StateAskBabyWeight
+			} else {
+				// Hombre >= 1 → directo a creatinina
+				r.NextState = sm.StateGfrCreatinine
+				r.WithText("Para el examen con contraste necesitamos verificar tu función renal.\n\nEscriba el valor de Creatinina sérica en miligramos por decilitro de sangre. (Ejemplo: si es 0.96 mg, escribir 0.96)")
+			}
+
+			return r, nil
+
+		case "contrast_no":
+			return sm.NewResult(sm.StateAskSedation).
+				WithContext("is_contrasted", "0").
+				WithClearCtx("_prompted_contrast").
+				WithEvent("contrast_selected", map[string]interface{}{"contrasted": false}), nil
+		}
+
+		return nil, fmt.Errorf("unreachable: selected=%s", selected)
+	}
+}
+
+// ASK_PREGNANCY (automático) — solo para mujeres >= 1 año con contraste.
+// Auto-skips for males and babies (< 1 year cannot be pregnant).
+func askPregnancyHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		gender := sess.GetContext("patient_gender")
+		age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+
+		// Auto-skip: males or babies cannot be pregnant
+		if gender != "F" || age < 1 {
+			nextState := sm.StateGfrCreatinine
+			r := sm.NewResult(nextState).
+				WithContext("is_pregnant", "0")
+			if age < 1 {
+				nextState = sm.StateAskBabyWeight
+				r.NextState = nextState
+			} else {
+				r.WithText("Para el examen con contraste necesitamos verificar tu función renal.\n\nEscriba el valor de Creatinina sérica en miligramos por decilitro de sangre. (Ejemplo: si es 0.96 mg, escribir 0.96)")
+			}
+			return r, nil
+		}
+
+		// First entry: show prompt
+		if sess.GetContext("_prompted_pregnancy") == "" {
+			return sm.NewResult(sess.CurrentState).
+				WithContext("_prompted_pregnancy", "1").
+				WithButtons("¿Estás embarazada?",
+					sm.Button{Text: "Sí", Payload: "pregnant_yes"},
+					sm.Button{Text: "No", Payload: "pregnant_no"},
+				), nil
+		}
+
+		result, selected := sm.ValidateButtonResponse(sess, msg, "pregnant_yes", "pregnant_no")
+		if result != nil {
+			result.Messages = append(result.Messages, &sm.ButtonMessage{
+				Text: "¿Estás embarazada?",
+				Buttons: []sm.Button{
+					{Text: "Sí", Payload: "pregnant_yes"},
+					{Text: "No", Payload: "pregnant_no"},
+				},
+			})
+			return result, nil
+		}
+
+		switch selected {
+		case "pregnant_yes":
+			return sm.NewResult(sm.StatePregnancyBlock).
+				WithContext("is_pregnant", "1").
+				WithClearCtx("_prompted_pregnancy").
+				WithEvent("pregnant_selected", map[string]interface{}{"pregnant": true}), nil
+		case "pregnant_no":
+			r := sm.NewResult(sm.StateGfrCreatinine).
+				WithContext("is_pregnant", "0").
+				WithClearCtx("_prompted_pregnancy").
+				WithText("Para el examen con contraste necesitamos verificar tu función renal.\n\nEscriba el valor de Creatinina sérica en miligramos por decilitro de sangre. (Ejemplo: si es 0.96 mg, escribir 0.96)").
+				WithEvent("pregnant_selected", map[string]interface{}{"pregnant": false})
+			return r, nil
+		}
+
+		return nil, fmt.Errorf("unreachable: selected=%s", selected)
+	}
+}
+
+// PREGNANCY_BLOCK (automático) — bloquea embarazada + contraste.
+func pregnancyBlockHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		return sm.NewResult(sm.StatePostActionMenu).
+			WithText("Por seguridad, no es posible realizar exámenes con *medio de contraste* durante el embarazo.\n\nConsulta con tu médico tratante para alternativas.").
+			WithEvent("pregnant_blocked", nil), nil
+	}
+}
+
+// ASK_BABY_WEIGHT (interactivo) — solo si edad < 1 y contrastado.
+// Afecta el factor k en la fórmula de Schwartz.
+func askBabyWeightHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		result, selected := sm.ValidateButtonResponse(sess, msg, "baby_low", "baby_normal")
+		if result != nil {
+			result.Messages = append(result.Messages, &sm.ButtonMessage{
+				Text: "¿Cuál fue el peso del bebé al nacer?",
+				Buttons: []sm.Button{
+					{Text: "Bajo peso", Payload: "baby_low"},
+					{Text: "Peso normal", Payload: "baby_normal"},
+				},
+			})
+			return result, nil
+		}
+
+		cat := "normal"
+		if selected == "baby_low" {
+			cat = "bajo"
+		}
+
+		return sm.NewResult(sm.StateGfrCreatinine).
+			WithContext("baby_weight_cat", cat).
+			WithText("Ingresa el valor de *creatinina* del bebé en mg/dL.\n\nEjemplo: 0.4").
+			WithEvent("baby_weight_selected", map[string]interface{}{"category": cat}), nil
+	}
+}
+
+// GFR_CREATININE (interactivo) — pide valor de creatinina.
+func gfrCreatinineHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		input := strings.TrimSpace(msg.Text)
+
+		value, err := strconv.ParseFloat(strings.Replace(input, ",", ".", 1), 64)
+		if err != nil || value <= 0 || value > 30 {
+			retryResult := sm.ValidateWithRetry(sess, "", func(string) bool { return false },
+				"Valor de creatinina no válido. Escriba el valor de Creatinina sérica en miligramos por decilitro de sangre. (Ejemplo: si es 0.96 mg, escribir 0.96)")
+			return retryResult, nil
+		}
+
+		age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+
+		r := sm.NewResult("").
+			WithContext("gfr_creatinine", fmt.Sprintf("%.2f", value))
+
+		switch {
+		case age <= 14:
+			// Schwartz necesita altura
+			r.NextState = sm.StateGfrHeight
+			r.WithText("Escribe la altura del paciente en centímetros. (Ejemplo: si mide 1.70cm, escribir 170)")
+		case age < 40:
+			// 15-39: preguntar enfermedad
+			r.NextState = sm.StateGfrDisease
+		default:
+			// >= 40: Cockcroft-Gault necesita peso
+			r.NextState = sm.StateGfrWeight
+			r.WithContext("gfr_disease_type", "disease_none")
+			r.WithText("Ingresa tu *peso* en kilogramos.\n\nEjemplo: 70")
+		}
+
+		return r, nil
+	}
+}
+
+// GFR_DISEASE (interactivo) — pregunta enfermedad (solo 15-39 años).
+func gfrDiseaseHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		result, selected := sm.ValidateButtonResponse(sess, msg, "disease_none", "disease_renal", "disease_diabetica")
+		if result != nil {
+			result.Messages = append(result.Messages, &sm.ButtonMessage{
+				Text: "¿Padeces alguna de estas condiciones?",
+				Buttons: []sm.Button{
+					{Text: "Ninguna", Payload: "disease_none"},
+					{Text: "Enfermedad renal", Payload: "disease_renal"},
+					{Text: "Diabetes", Payload: "disease_diabetica"},
+				},
+			})
+			return result, nil
+		}
+
+		r := sm.NewResult("").
+			WithContext("gfr_disease_type", selected)
+
+		if selected == "disease_none" {
+			// CKD-EPI no necesita peso ni altura → calcular
+			r.NextState = sm.StateGfrResult
+		} else {
+			// Cockcroft-Gault necesita peso
+			r.NextState = sm.StateGfrWeight
+			r.WithText("Ingresa tu *peso* en kilogramos.\n\nEjemplo: 70")
+		}
+
+		return r.WithEvent("disease_selected", map[string]interface{}{"type": selected}), nil
+	}
+}
+
+// GFR_HEIGHT (interactivo) — pide estatura en cm.
+func gfrHeightHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		input := strings.TrimSpace(msg.Text)
+		value, err := strconv.ParseFloat(strings.Replace(input, ",", ".", 1), 64)
+		if err != nil || value < 30 || value > 250 {
+			retryResult := sm.ValidateWithRetry(sess, "", func(string) bool { return false },
+				"Estatura no válida. Escribe la altura del paciente en centímetros. (Ejemplo: si mide 1.70cm, escribir 170)")
+			return retryResult, nil
+		}
+
+		age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+
+		r := sm.NewResult("").
+			WithContext("gfr_height_cm", fmt.Sprintf("%.0f", value))
+
+		if age <= 14 {
+			// Schwartz: solo necesita creatinina + altura → calcular
+			r.NextState = sm.StateGfrResult
+		} else {
+			// Necesita peso también
+			r.NextState = sm.StateGfrWeight
+			r.WithText("Ingresa tu *peso* en kilogramos.\n\nEjemplo: 70")
+		}
+
+		return r, nil
+	}
+}
+
+// GFR_WEIGHT — solo lógica de negocio (validación declarativa en RegisterWithConfig).
+func gfrWeightHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		input := strings.TrimSpace(msg.Text)
+		value, _ := strconv.ParseFloat(strings.Replace(input, ",", ".", 1), 64)
+		return sm.NewResult(sm.StateGfrResult).
+			WithContext("gfr_weight_kg", fmt.Sprintf("%.1f", value)), nil
+	}
+}
+
+// GFR_RESULT (automático) — calcula GFR y decide si procede.
+func gfrResultHandler(gfrSvc *services.GFRService) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+		gender := sess.GetContext("patient_gender")
+		diseaseType := sess.GetContext("gfr_disease_type")
+		babyWeightCat := sess.GetContext("baby_weight_cat")
+		creatinine, _ := strconv.ParseFloat(sess.GetContext("gfr_creatinine"), 64)
+		heightCm, _ := strconv.ParseFloat(sess.GetContext("gfr_height_cm"), 64)
+		weightKg, _ := strconv.ParseFloat(sess.GetContext("gfr_weight_kg"), 64)
+
+		result := gfrSvc.Calculate(age, gender, diseaseType, babyWeightCat, creatinine, heightCm, weightKg)
+
+		r := sm.NewResult("").
+			WithContext("gfr_calculated", fmt.Sprintf("%.1f", result.Value)).
+			WithText(result.Message).
+			WithEvent("gfr_calculated", map[string]interface{}{
+				"value":    result.Value,
+				"formula":  result.Formula,
+				"eligible": result.Eligible,
+			})
+
+		if !result.Eligible {
+			r.NextState = sm.StateGfrNotEligible
+		} else {
+			r.NextState = sm.StateAskSedation
+		}
+
+		return r, nil
+	}
+}
+
+// GFR_NOT_ELIGIBLE (automático) — GFR < 30, bloquea contraste.
+func gfrNotEligibleHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		return sm.NewResult(sm.StatePostActionMenu).
+			WithEvent("gfr_not_eligible", map[string]interface{}{
+				"gfr_value": sess.GetContext("gfr_calculated"),
+			}), nil
+	}
+}
+
+// ASK_SEDATION (automático) — pregunta si requiere sedación.
+// Si el CUPS no es sedatable, auto-chains to CHECK_EXISTING.
+// Si el OCR ya detectó sedación en la orden, se auto-completa.
+func askSedationHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		cupsCode := sess.GetContext("cups_code")
+
+		// CUPS no sedatable → saltar (auto-chain continues)
+		if !isSedatable(cupsCode) {
+			return sm.NewResult(sm.StateCheckExisting).
+				WithContext("is_sedated", "0").
+				WithEvent("sedation_skipped", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		// Si el OCR ya detectó sedación en la orden, auto-completar
+		if sess.GetContext("ocr_is_sedated") == "1" {
+			return sm.NewResult(sm.StateCheckExisting).
+				WithContext("is_sedated", "1").
+				WithClearCtx("ocr_is_sedated").
+				WithText("Tu orden indica que el examen requiere *sedación*. Lo tendremos en cuenta.").
+				WithEvent("sedation_auto_detected", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		// First entry: show prompt
+		if sess.GetContext("_prompted_sedation") == "" {
+			return sm.NewResult(sess.CurrentState).
+				WithContext("_prompted_sedation", "1").
+				WithButtons("Tu examen requiere *sedación*?\n\n(Esto lo indica tu médico, generalmente para niños o pacientes con claustrofobia)",
+					sm.Button{Text: "Sí, con sedación", Payload: "sedated_yes"},
+					sm.Button{Text: "No, sin sedación", Payload: "sedated_no"},
+				), nil
+		}
+
+		result, selected := sm.ValidateButtonResponse(sess, msg, "sedated_yes", "sedated_no")
+		if result != nil {
+			result.Messages = append(result.Messages, &sm.ButtonMessage{
+				Text: "Tu examen requiere *sedación*?\n\n(Esto lo indica tu médico, generalmente para niños o pacientes con claustrofobia)",
+				Buttons: []sm.Button{
+					{Text: "Sí, con sedación", Payload: "sedated_yes"},
+					{Text: "No, sin sedación", Payload: "sedated_no"},
+				},
+			})
+			return result, nil
+		}
+
+		isSedated := "0"
+		if selected == "sedated_yes" {
+			isSedated = "1"
+		}
+
+		return sm.NewResult(sm.StateCheckExisting).
+			WithContext("is_sedated", isSedated).
+			WithClearCtx("_prompted_sedation").
+			WithEvent("sedation_selected", map[string]interface{}{"sedated": selected == "sedated_yes"}), nil
+	}
+}
+
+// CHECK_EXISTING (automático) — verifica si ya tiene cita futura para el mismo CUPS.
+func checkExistingHandler(apptSvc *services.AppointmentService) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		patientID := sess.GetContext("patient_id")
+		cupsCode := sess.GetContext("cups_code")
+
+		hasExisting, err := apptSvc.HasExistingAppointment(ctx, patientID, cupsCode)
+		if err != nil {
+			// Si falla, no bloquear
+			return sm.NewResult(sm.StateCheckPriorConsult), nil
+		}
+
+		if hasExisting {
+			return sm.NewResult(sm.StateAppointmentExists).
+				WithEvent("existing_appointment_found", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		return sm.NewResult(sm.StateCheckPriorConsult), nil
+	}
+}
+
+// APPOINTMENT_EXISTS (automático) — informa que ya tiene cita y va al menú.
+func appointmentExistsHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		cupsName := sess.GetContext("cups_name")
+		return sm.NewResult(sm.StatePostActionMenu).
+			WithText(fmt.Sprintf("Ya tienes una cita pendiente para *%s*.\n\nSi necesitas reprogramarla, consulta tus citas desde el menú principal.", cupsName)).
+			WithEvent("appointment_exists_blocked", nil), nil
+	}
+}
+
+// CHECK_PRIOR_CONSULTATION (automático) — verifica consulta previa requerida.
+func checkPriorConsultHandler(apptSvc *services.AppointmentService) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		cupsCode := sess.GetContext("cups_code")
+		patientID := sess.GetContext("patient_id")
+
+		blocked, message, err := apptSvc.CheckPriorConsultation(ctx, cupsCode, patientID)
+		if err != nil {
+			// No bloquear si falla la verificación
+			return sm.NewResult(sm.StateCheckSoatLimit), nil
+		}
+
+		if blocked {
+			return sm.NewResult(sm.StatePostActionMenu).
+				WithText(message).
+				WithEvent("prior_consultation_required", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		return sm.NewResult(sm.StateCheckSoatLimit), nil
+	}
+}
+
+// CHECK_SOAT_LIMIT (automático) — verifica límite mensual SOAT (solo SAN01/SAN02).
+func checkSoatLimitHandler(apptSvc *services.AppointmentService) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		cupsCode := sess.GetContext("cups_code")
+		entity := sess.GetContext("patient_entity")
+
+		blocked, message, err := apptSvc.CheckSOATLimit(ctx, cupsCode, entity)
+		if err != nil {
+			// No bloquear si falla
+			return sm.NewResult(sm.StateCheckAgeRestriction), nil
+		}
+
+		if blocked {
+			return sm.NewResult(sm.StatePostActionMenu).
+				WithText(message).
+				WithEvent("soat_limit_reached", map[string]interface{}{
+					"cups_code": cupsCode,
+					"entity":    entity,
+				}), nil
+		}
+
+		return sm.NewResult(sm.StateCheckAgeRestriction), nil
+	}
+}
+
+// CHECK_AGE_RESTRICTION (automático) — registra que pasó todas las validaciones.
+// Las restricciones de edad por doctor se aplican al filtrar slots (Fase 10).
+func checkAgeRestrictionHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		return sm.NewResult(sm.StateSearchSlots).
+			WithEvent("validations_complete", nil), nil
+	}
+}
+
+// --- Special CUPS Routing ---
+
+// Pregnancy ultrasound CUPS codes (ecografía obstétrica)
+var pregnancyUltrasoundCups = map[string]bool{
+	"881437": true, // Ecografía obstétrica con perfil biofísico
+	"881436": true, // Ecografía obstétrica detallada
+}
+
+// Sleep study CUPS codes (polisomnografía / estudios del sueño)
+var sleepStudyCups = map[string]bool{
+	"891901": true,
+	"891402": true,
+	"891704": true,
+	"891703": true,
+}
+
+// isPregnancyUltrasound checks if CUPS is a pregnancy ultrasound.
+func isPregnancyUltrasound(cupsCode string) bool {
+	return pregnancyUltrasoundCups[cupsCode]
+}
+
+// isSleepStudy checks if CUPS requires routing to an agent.
+func isSleepStudy(cupsCode string) bool {
+	return sleepStudyCups[cupsCode]
+}
+
+// isPETCT checks if CUPS is a PET/CT that requires routing to an agent.
+func isPETCT(cupsCode string) bool {
+	return strings.HasPrefix(cupsCode, "879") // PET/CT codes start with 879
+}
+
+// CHECK_SPECIAL_CUPS (automático) — verifica CUPS especiales antes de validaciones médicas.
+func checkSpecialCupsHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		cupsCode := sess.GetContext("cups_code")
+
+		// Pregnancy ultrasound → ask gestational weeks
+		if isPregnancyUltrasound(cupsCode) {
+			return sm.NewResult(sm.StateAskGestationalWeeks).
+				WithText("Para la ecografía obstétrica, por favor indica las *semanas de gestación* (número).\n\nEjemplo: 20").
+				WithEvent("special_cups_pregnancy_ultrasound", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		// Sleep study → escalate to agent (requires special scheduling)
+		if isSleepStudy(cupsCode) {
+			return sm.NewResult(sm.StateEscalateToAgent).
+				WithText("Los *estudios del sueño* requieren una coordinación especial. Te comunicaremos con un agente para programar tu cita.").
+				WithEvent("special_cups_sleep_study", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		// PET/CT → escalate to agent
+		if isPETCT(cupsCode) {
+			return sm.NewResult(sm.StateEscalateToAgent).
+				WithText("Los exámenes de *PET/CT* requieren coordinación especial con el servicio de medicina nuclear. Te comunicaremos con un agente.").
+				WithEvent("special_cups_pet_ct", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		// Normal CUPS → proceed to contrast check
+		return sm.NewResult(sm.StateAskContrasted), nil
+	}
+}
+
+// ASK_GESTATIONAL_WEEKS (interactivo) — pide semanas de gestación para ecografía obstétrica.
+func askGestationalWeeksHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		input := strings.TrimSpace(msg.Text)
+
+		weeks, err := strconv.Atoi(input)
+		if err != nil || weeks < 1 || weeks > 42 {
+			retryResult := sm.ValidateWithRetry(sess, input, func(s string) bool {
+				w, e := strconv.Atoi(s)
+				return e == nil && w >= 1 && w <= 42
+			}, "Ingresa un número válido de semanas de gestación (1 a 42).")
+			return retryResult, nil
+		}
+
+		return sm.NewResult(sm.StateAskContrasted).
+			WithContext("gestational_weeks", fmt.Sprintf("%d", weeks)).
+			WithEvent("gestational_weeks_entered", map[string]interface{}{"weeks": weeks}), nil
+	}
+}

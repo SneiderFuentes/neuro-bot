@@ -1,0 +1,7 @@
+.env
+neuro-bot
+*.exe
+vendor/
+.idea/
+.vscode/
+*.log
