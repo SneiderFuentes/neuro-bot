@@ -703,6 +703,13 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 		slog.Error("save state error", "phone", phone, "error", err)
 	}
 
+	// Close Bird Inbox feed item when session completes (bot-driven termination)
+	if sess.Status == session.StatusCompleted && convID != "" {
+		if err := p.birdClient.UnassignFeedItem(convID, true); err != nil {
+			slog.Warn("close feed item on completion failed", "phone", phone, "conversation_id", convID, "error", err)
+		}
+	}
+
 	// Log events
 	if p.tracker != nil && len(result.Events) > 0 {
 		p.tracker.LogBatch(ctx, sess.ID, phone, result.Events)
