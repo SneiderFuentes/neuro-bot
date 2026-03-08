@@ -545,26 +545,27 @@ func (c *Client) UnassignFeedItem(conversationID string, closed bool) error {
 	return nil
 }
 
-// CloseConversation sets a conversation's status to "closed" in Bird Inbox.
-// PATCH /workspaces/{workspaceId}/conversations/{conversationId} { "status": "closed" }
-// This makes the conversation appear as closed in the Inbox UI.
-func (c *Client) CloseConversation(conversationID string) error {
+// CloseFeedItems searches for all feed items tied to a conversation and closes
+// the open ones. This is the correct way to mark a ticket as "Cerrado" in Bird
+// Inbox (Collaborations API → search/feed-items → PATCH closed:true).
+// It finds items across ALL feeds (channel, team, agent) so it works regardless
+// of which feed the agents are viewing.
+func (c *Client) CloseFeedItems(conversationID string) error {
 	if conversationID == "" {
 		return nil
 	}
 
-	url := fmt.Sprintf("%s/workspaces/%s/conversations/%s",
-		c.conversationsBase(), c.workspaceID, conversationID)
+	// 1. Search feed items by conversationId
+	searchURL := fmt.Sprintf("%s/workspaces/%s/search/feed-items",
+		c.conversationsBase(), c.workspaceID)
 
-	payload := map[string]interface{}{
-		"status": "closed",
-	}
+	searchPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationIds": []string{conversationID},
+	})
 
-	jsonBody, _ := json.Marshal(payload)
-
-	req, err := http.NewRequest("PATCH", url, bytes.NewReader(jsonBody))
+	req, err := http.NewRequest("POST", searchURL, bytes.NewReader(searchPayload))
 	if err != nil {
-		slog.Warn("close_conversation_request_failed", "error", err, "conversation_id", conversationID)
+		slog.Warn("close_feed_items_search_request_failed", "error", err, "conversation_id", conversationID)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -572,21 +573,80 @@ func (c *Client) CloseConversation(conversationID string) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		slog.Warn("close_conversation_failed", "error", err, "conversation_id", conversationID)
+		slog.Warn("close_feed_items_search_failed", "error", err, "conversation_id", conversationID)
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		slog.Warn("close_conversation_error",
+		slog.Warn("close_feed_items_search_error",
 			"status", resp.StatusCode,
 			"body", string(respBody),
 			"conversation_id", conversationID)
-		return fmt.Errorf("close conversation: status %d", resp.StatusCode)
+		return fmt.Errorf("search feed items: status %d", resp.StatusCode)
 	}
 
-	slog.Info("conversation_closed", "conversation_id", conversationID)
+	var result struct {
+		Results []struct {
+			ID     string `json:"id"`
+			FeedID string `json:"feedId"`
+			Closed bool   `json:"closed"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		slog.Warn("close_feed_items_decode_error", "error", err, "conversation_id", conversationID)
+		return err
+	}
+
+	// 2. Close each open feed item
+	closed := 0
+	for _, item := range result.Results {
+		if item.Closed {
+			continue
+		}
+
+		patchURL := fmt.Sprintf("%s/workspaces/%s/feeds/%s/items/%s",
+			c.conversationsBase(), c.workspaceID, item.FeedID, item.ID)
+
+		patchBody, _ := json.Marshal(map[string]interface{}{"closed": true})
+
+		patchReq, err := http.NewRequest("PATCH", patchURL, bytes.NewReader(patchBody))
+		if err != nil {
+			slog.Warn("close_feed_item_request_failed", "error", err, "item_id", item.ID, "feed_id", item.FeedID)
+			continue
+		}
+		patchReq.Header.Set("Content-Type", "application/json")
+		patchReq.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
+
+		patchResp, err := c.httpClient.Do(patchReq)
+		if err != nil {
+			slog.Warn("close_feed_item_failed", "error", err, "item_id", item.ID, "feed_id", item.FeedID)
+			continue
+		}
+		patchResp.Body.Close()
+
+		if patchResp.StatusCode >= 400 {
+			slog.Warn("close_feed_item_error",
+				"status", patchResp.StatusCode,
+				"item_id", item.ID,
+				"feed_id", item.FeedID,
+				"conversation_id", conversationID)
+		} else {
+			closed++
+			slog.Info("feed_item_closed",
+				"item_id", item.ID,
+				"feed_id", item.FeedID,
+				"conversation_id", conversationID)
+		}
+	}
+
+	if closed == 0 && len(result.Results) > 0 {
+		slog.Debug("no_open_feed_items_to_close",
+			"conversation_id", conversationID,
+			"total_items", len(result.Results))
+	}
+
 	return nil
 }
 

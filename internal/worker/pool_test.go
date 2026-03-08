@@ -147,7 +147,7 @@ func (m *mockMessageSender) SendInternalText(conversationID, text string) (strin
 func (m *mockMessageSender) UnassignFeedItem(conversationID string, closed bool) error {
 	return nil
 }
-func (m *mockMessageSender) CloseConversation(conversationID string) error {
+func (m *mockMessageSender) CloseFeedItems(conversationID string) error {
 	return nil
 }
 func (m *mockMessageSender) GetCachedConversationID(phone string) string {

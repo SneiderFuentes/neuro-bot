@@ -48,7 +48,7 @@ type MessageSender interface {
 	SendList(phone, conversationID, body, title string, sections []bird.ListSection) (string, error)
 	SendInternalText(conversationID, text string) (string, error)
 	UnassignFeedItem(conversationID string, closed bool) error
-	CloseConversation(conversationID string) error
+	CloseFeedItems(conversationID string) error
 	GetCachedConversationID(phone string) string
 	LookupConversationByPhone(phone string) (string, error)
 }
@@ -566,8 +566,9 @@ func (p *MessageWorkerPool) handleAgentClose(ctx context.Context, sess *session.
 	closingConvID := sess.ConversationID
 	go func() {
 		time.Sleep(3 * time.Second)
-		p.birdClient.UnassignFeedItem(closingConvID, true)
-		p.birdClient.CloseConversation(closingConvID)
+		if err := p.birdClient.CloseFeedItems(closingConvID); err != nil {
+			slog.Warn("close feed items on agent close failed", "conversation_id", closingConvID, "error", err)
+		}
 	}()
 
 	if p.tracker != nil {
@@ -709,16 +710,15 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 		slog.Error("save state error", "phone", phone, "error", err)
 	}
 
-	// Close conversation in Bird Inbox when session completes (bot-driven termination).
+	// Close feed items in Bird Inbox when session completes (bot-driven termination).
 	// Delay 3s so Bird finishes processing the outbound message delivery before we close,
 	// otherwise the delivery confirmation can reopen the conversation.
 	if sess.Status == session.StatusCompleted && convID != "" {
 		closingConvID := convID
 		go func() {
 			time.Sleep(3 * time.Second)
-			p.birdClient.UnassignFeedItem(closingConvID, true)
-			if err := p.birdClient.CloseConversation(closingConvID); err != nil {
-				slog.Warn("close conversation on completion failed", "phone", phone, "conversation_id", closingConvID, "error", err)
+			if err := p.birdClient.CloseFeedItems(closingConvID); err != nil {
+				slog.Warn("close feed items on completion failed", "phone", phone, "conversation_id", closingConvID, "error", err)
 			}
 		}()
 	}
