@@ -15,6 +15,7 @@ const (
 	StateUpdateContactInfo  = "UPDATE_CONTACT_INFO"
 	StateShowResults        = "SHOW_RESULTS"
 	StateShowLocations      = "SHOW_LOCATIONS"
+	StateShowHelp           = "SHOW_HELP"
 )
 
 // === Entity Management ===
@@ -154,6 +155,7 @@ var stateTypes = map[string]StateType{
 	StateUpdateContactInfo:  StateTypeAutomatic,
 	StateShowResults:        StateTypeAutomatic,
 	StateShowLocations:      StateTypeAutomatic,
+	StateShowHelp:           StateTypeAutomatic,
 
 	// Entity Management
 	StateCheckEntity:     StateTypeAutomatic,

@@ -248,6 +248,25 @@ func TestMainMenu_Agendar(t *testing.T) {
 	}
 }
 
+func TestMainMenu_Ayuda(t *testing.T) {
+	m := sm.NewMachine()
+	RegisterGreetingHandlers(m, sampleConfig(), nil)
+
+	sess := testSess(sm.StateMainMenu)
+	result, err := m.Process(context.Background(), sess, postbackM("ayuda"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SHOW_HELP is automatic → auto-chains to MAIN_MENU
+	if result.NextState != sm.StateMainMenu {
+		t.Errorf("expected MAIN_MENU (auto-chained from SHOW_HELP), got %s", result.NextState)
+	}
+	// Should have help messages (2 text + 1 list)
+	if len(result.Messages) < 3 {
+		t.Errorf("expected at least 3 messages (2 help text + menu list), got %d", len(result.Messages))
+	}
+}
+
 func TestMainMenu_InvalidInput(t *testing.T) {
 	m := sm.NewMachine()
 	RegisterGreetingHandlers(m, sampleConfig(), nil)

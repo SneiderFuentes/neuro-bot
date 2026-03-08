@@ -23,24 +23,13 @@ func RegisterGreetingHandlers(m *sm.Machine, cfg *config.Config, locationRepo Lo
 	m.Register(sm.StateGreeting, greetingHandler(cfg))
 	m.RegisterWithConfig(sm.StateMainMenu, sm.HandlerConfig{
 		InputType: sm.InputButton,
-		Options:   []string{"consultar", "agendar", "resultados", "ubicacion"},
+		Options:   []string{"consultar", "agendar", "resultados", "ubicacion", "ayuda"},
 		RetryPrompt: func(sess *session.Session, result *sm.StateResult) {
-			result.Messages = append(result.Messages, &sm.ListMessage{
-				Body:  "En que puedo ayudarte hoy?",
-				Title: "Ver opciones",
-				Sections: []sm.ListSection{{
-					Title: "Menu principal",
-					Rows: []sm.ListRow{
-						{ID: "agendar", Title: "Agendar cita", Description: "Si buscas una cita como particular o cuentas con una orden de tu IPS"},
-						{ID: "consultar", Title: "Citas Programadas", Description: "Si tienes citas programadas"},
-						{ID: "resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
-						{ID: "ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
-					},
-				}},
-			})
+			result.Messages = append(result.Messages, buildMainMenuList())
 		},
 		Handler: mainMenuHandler(),
 	})
+	m.Register(sm.StateShowHelp, showHelpHandler())
 }
 
 // CHECK_BUSINESS_HOURS (automático)
@@ -75,8 +64,8 @@ func checkBusinessHoursHandler(cfg *config.Config) sm.StateHandler {
 	}
 }
 
-// OUT_OF_HOURS (automático) — muestra bienvenida fuera de horario con menú interactivo (2 opciones).
-// Bird V2: list with Consultar Resultados + Ubicacion (no agendar/consultar citas fuera de horario).
+// OUT_OF_HOURS (automático) — muestra bienvenida fuera de horario con menú interactivo (3 opciones).
+// Bird V2: list with Consultar Resultados + Ubicacion + Ayuda (no agendar/consultar citas fuera de horario).
 func outOfHoursHandler(cfg *config.Config) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		welcomeText := fmt.Sprintf("Soy %s, tu asistente virtual de *%s*.\n\n"+
@@ -93,6 +82,7 @@ func outOfHoursHandler(cfg *config.Config) sm.StateHandler {
 					Rows: []sm.ListRow{
 						{ID: "ooh_resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
 						{ID: "ooh_ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
+						{ID: "ooh_ayuda", Title: "Como usar el bot", Description: "Guia rapida de como interactuar conmigo"},
 					},
 				}).
 			WithEvent("out_of_hours_menu_shown", nil), nil
@@ -100,10 +90,10 @@ func outOfHoursHandler(cfg *config.Config) sm.StateHandler {
 }
 
 // OUT_OF_HOURS_MENU (interactivo) — procesa selección del menú fuera de horario.
-// Muestra resultados o ubicaciones y termina la conversación.
+// Muestra resultados, ubicaciones o ayuda y termina la conversación (excepto ayuda que vuelve al menú OOH).
 func outOfHoursMenuHandler(cfg *config.Config, locationRepo LocationReader) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		result, selected := sm.ValidateButtonResponse(sess, msg, "ooh_resultados", "ooh_ubicacion")
+		result, selected := sm.ValidateButtonResponse(sess, msg, "ooh_resultados", "ooh_ubicacion", "ooh_ayuda")
 		if result != nil {
 			result.Messages = append(result.Messages, &sm.ListMessage{
 				Body:  "En que puedo ayudarte hoy?",
@@ -113,6 +103,7 @@ func outOfHoursMenuHandler(cfg *config.Config, locationRepo LocationReader) sm.S
 					Rows: []sm.ListRow{
 						{ID: "ooh_resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
 						{ID: "ooh_ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
+						{ID: "ooh_ayuda", Title: "Como usar el bot", Description: "Guia rapida de como interactuar conmigo"},
 					},
 				}},
 			})
@@ -138,6 +129,11 @@ func outOfHoursMenuHandler(cfg *config.Config, locationRepo LocationReader) sm.S
 			return sm.NewResult(sm.StateTerminated).
 				WithText(text).
 				WithEvent("ooh_locations_shown", nil), nil
+
+		case "ooh_ayuda":
+			return sm.NewResult(sm.StateShowHelp).
+				WithContext("help_source", "ooh").
+				WithEvent("ooh_help_selected", nil), nil
 		}
 
 		return nil, fmt.Errorf("unreachable: selected=%s", selected)
@@ -168,7 +164,7 @@ func buildLocationsText(ctx context.Context, locationRepo LocationReader) string
 	return "Actualmente no tenemos sedes configuradas. Comunicate con un agente para mas informacion."
 }
 
-// GREETING (automático) — envía bienvenida + lista del menú (4 opciones Bird V2)
+// GREETING (automático) — envía bienvenida + lista del menú (5 opciones Bird V2)
 func greetingHandler(cfg *config.Config) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		welcomeText := fmt.Sprintf("Soy *%s*, tu asistente virtual de *%s*.\n\n"+
@@ -178,18 +174,11 @@ func greetingHandler(cfg *config.Config) sm.StateHandler {
 			"Podras ejercer tus derechos de acceso, rectificacion o supresion en cualquier momento.",
 			cfg.BotName, cfg.CenterName)
 
-		return sm.NewResult(sm.StateMainMenu).
-			WithList(welcomeText+"\n\nEn que puedo ayudarte hoy?", "Ver opciones",
-				sm.ListSection{
-					Title: "Menu principal",
-					Rows: []sm.ListRow{
-						{ID: "agendar", Title: "Agendar cita", Description: "Si buscas una cita como particular o cuentas con una orden de tu IPS"},
-						{ID: "consultar", Title: "Citas Programadas", Description: "Si tienes citas programadas"},
-						{ID: "resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
-						{ID: "ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
-					},
-				}).
-			WithEvent("greeting_sent", nil), nil
+		r := sm.NewResult(sm.StateMainMenu).
+			WithText(welcomeText).
+			WithEvent("greeting_sent", nil)
+		r.Messages = append(r.Messages, buildMainMenuList())
+		return r, nil
 	}
 }
 
@@ -220,9 +209,30 @@ func mainMenuHandler() sm.StateHandler {
 		case "ubicacion":
 			return sm.NewResult(sm.StateShowLocations).
 				WithEvent("menu_selected", map[string]interface{}{"option": "ubicacion"}), nil
+		case "ayuda":
+			return sm.NewResult(sm.StateShowHelp).
+				WithEvent("menu_selected", map[string]interface{}{"option": "ayuda"}), nil
 		}
 
 		return nil, fmt.Errorf("unreachable: selected=%s", selected)
+	}
+}
+
+// buildMainMenuList creates the main menu list message with 5 options.
+func buildMainMenuList() *sm.ListMessage {
+	return &sm.ListMessage{
+		Body:  "En que puedo ayudarte hoy?",
+		Title: "Ver opciones",
+		Sections: []sm.ListSection{{
+			Title: "Menu principal",
+			Rows: []sm.ListRow{
+				{ID: "agendar", Title: "Agendar cita", Description: "Si buscas una cita como particular o cuentas con una orden de tu IPS"},
+				{ID: "consultar", Title: "Citas Programadas", Description: "Si tienes citas programadas"},
+				{ID: "resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
+				{ID: "ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
+				{ID: "ayuda", Title: "Como usar el bot", Description: "Guia rapida de como interactuar conmigo"},
+			},
+		}},
 	}
 }
 
@@ -237,4 +247,65 @@ func buildEntityTypeRows() []sm.ListRow {
 		}
 	}
 	return rows
+}
+
+// SHOW_HELP (automático) — muestra guia de uso del bot y vuelve al menu correspondiente.
+// Si viene del menú fuera de horario (help_source=ooh), vuelve a OUT_OF_HOURS_MENU.
+// Si viene del menú principal, vuelve a MAIN_MENU.
+func showHelpHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		msg1 := "📋 *GUIA RAPIDA DEL BOT*\n\n" +
+			"Soy tu asistente virtual para gestionar citas medicas por WhatsApp. " +
+			"Esto es lo que puedo hacer:\n\n" +
+			"*1. Agendar cita*\n" +
+			"Seleccionas tu tipo de entidad (EPS, particular, etc.), " +
+			"ingresas tu documento, y envias una foto de tu orden medica. " +
+			"Yo la leo automaticamente y te muestro los horarios disponibles.\n\n" +
+			"*2. Consultar citas*\n" +
+			"Ingresas tu documento y te muestro tus citas programadas. " +
+			"Puedes confirmarlas o cancelarlas.\n\n" +
+			"*3. Consultar resultados*\n" +
+			"Te comparto el enlace para descargar tus resultados medicos.\n\n" +
+			"*4. Ubicacion*\n" +
+			"Te muestro las direcciones de nuestras sedes con enlace a Google Maps."
+
+		msg2 := "💡 *TIPS PARA USAR EL BOT*\n\n" +
+			"• *Documento:* Ingresa solo numeros, sin puntos ni espacios\n" +
+			"• *Orden medica:* Envia una foto clara donde se lean bien los procedimientos\n" +
+			"• *Seleccionar opciones:* Cuando te muestre una lista, toca el boton para ver las opciones\n" +
+			"• *Horarios:* Te mostrare los horarios disponibles mas cercanos. Si no hay, puedes quedar en lista de espera\n\n" +
+			"Si en algun momento necesitas ayuda humana, el bot te conectara con un agente.\n\n" +
+			"*Horario de atencion:*\n" +
+			"Lunes a viernes: 7:00 AM - 6:00 PM\n" +
+			"Sabados: 7:00 AM - 12:00 PM"
+
+		// Si viene del menú fuera de horario, volver allá
+		if sess.GetContext("help_source") == "ooh" {
+			r := sm.NewResult(sm.StateOutOfHoursMenu).
+				WithText(msg1).
+				WithText(msg2).
+				WithClearCtx("help_source").
+				WithEvent("help_shown", nil)
+			r.Messages = append(r.Messages, &sm.ListMessage{
+				Body:  "En que puedo ayudarte hoy?",
+				Title: "Ver opciones",
+				Sections: []sm.ListSection{{
+					Title: "Opciones disponibles",
+					Rows: []sm.ListRow{
+						{ID: "ooh_resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
+						{ID: "ooh_ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
+						{ID: "ooh_ayuda", Title: "Como usar el bot", Description: "Guia rapida de como interactuar conmigo"},
+					},
+				}},
+			})
+			return r, nil
+		}
+
+		r := sm.NewResult(sm.StateMainMenu).
+			WithText(msg1).
+			WithText(msg2).
+			WithEvent("help_shown", nil)
+		r.Messages = append(r.Messages, buildMainMenuList())
+		return r, nil
+	}
 }
