@@ -545,6 +545,51 @@ func (c *Client) UnassignFeedItem(conversationID string, closed bool) error {
 	return nil
 }
 
+// CloseConversation sets a conversation's status to "closed" in Bird Inbox.
+// PATCH /workspaces/{workspaceId}/conversations/{conversationId} { "status": "closed" }
+// This makes the conversation appear as closed in the Inbox UI.
+func (c *Client) CloseConversation(conversationID string) error {
+	if conversationID == "" {
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/workspaces/%s/conversations/%s",
+		c.conversationsBase(), c.workspaceID, conversationID)
+
+	payload := map[string]interface{}{
+		"status": "closed",
+	}
+
+	jsonBody, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("PATCH", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		slog.Warn("close_conversation_request_failed", "error", err, "conversation_id", conversationID)
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		slog.Warn("close_conversation_failed", "error", err, "conversation_id", conversationID)
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		slog.Warn("close_conversation_error",
+			"status", resp.StatusCode,
+			"body", string(respBody),
+			"conversation_id", conversationID)
+		return fmt.Errorf("close conversation: status %d", resp.StatusCode)
+	}
+
+	slog.Info("conversation_closed", "conversation_id", conversationID)
+	return nil
+}
+
 // pickLeastLoadedAgent filters agents by teamID and available activity,
 // then returns the one with the lowest workload (rootItemAssignedCount).
 func pickLeastLoadedAgent(agents []AgentInfo, teamID string) *AgentInfo {

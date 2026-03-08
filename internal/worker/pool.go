@@ -48,6 +48,7 @@ type MessageSender interface {
 	SendList(phone, conversationID, body, title string, sections []bird.ListSection) (string, error)
 	SendInternalText(conversationID, text string) (string, error)
 	UnassignFeedItem(conversationID string, closed bool) error
+	CloseConversation(conversationID string) error
 	GetCachedConversationID(phone string) string
 	LookupConversationByPhone(phone string) (string, error)
 }
@@ -559,8 +560,9 @@ func (p *MessageWorkerPool) handleAgentClose(ctx context.Context, sess *session.
 		return
 	}
 
-	// Unassign agent + close feed item in Bird Inbox
+	// Unassign agent + close feed item + close conversation in Bird Inbox
 	p.birdClient.UnassignFeedItem(sess.ConversationID, true)
+	p.birdClient.CloseConversation(sess.ConversationID)
 
 	p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID, "Tu consulta ha sido resuelta. Gracias por comunicarte con nosotros!")
 
@@ -703,10 +705,11 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 		slog.Error("save state error", "phone", phone, "error", err)
 	}
 
-	// Close Bird Inbox feed item when session completes (bot-driven termination)
+	// Close conversation in Bird Inbox when session completes (bot-driven termination)
 	if sess.Status == session.StatusCompleted && convID != "" {
-		if err := p.birdClient.UnassignFeedItem(convID, true); err != nil {
-			slog.Warn("close feed item on completion failed", "phone", phone, "conversation_id", convID, "error", err)
+		p.birdClient.UnassignFeedItem(convID, true)
+		if err := p.birdClient.CloseConversation(convID); err != nil {
+			slog.Warn("close conversation on completion failed", "phone", phone, "conversation_id", convID, "error", err)
 		}
 	}
 

@@ -33,6 +33,7 @@ type SessionRepo interface {
 type InactivityBirdClient interface {
 	SendText(to, conversationID, text string) (string, error)
 	UnassignFeedItem(conversationID string, closed bool) error
+	CloseConversation(conversationID string) error
 }
 
 // EventLogger defines the event tracking method needed by the inactivity checker.
@@ -255,6 +256,7 @@ func (m *SessionManager) checkInactiveSessions(ctx context.Context, deps Inactiv
 			}
 			if s.ConversationID != "" {
 				deps.BirdClient.UnassignFeedItem(s.ConversationID, true)
+				deps.BirdClient.CloseConversation(s.ConversationID)
 			}
 			if deps.Tracker != nil {
 				deps.Tracker.LogEvent(ctx, s.ID, s.PhoneNumber, "session_closed_inactivity", map[string]interface{}{
@@ -300,6 +302,7 @@ func (m *SessionManager) checkExpiredEscalations(ctx context.Context, deps Inact
 		}
 		if s.ConversationID != "" {
 			deps.BirdClient.UnassignFeedItem(s.ConversationID, true)
+			deps.BirdClient.CloseConversation(s.ConversationID)
 		}
 		if deps.Tracker != nil {
 			deps.Tracker.LogEvent(ctx, s.ID, s.PhoneNumber, "escalation_expired", nil)
