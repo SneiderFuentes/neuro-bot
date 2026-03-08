@@ -560,11 +560,15 @@ func (p *MessageWorkerPool) handleAgentClose(ctx context.Context, sess *session.
 		return
 	}
 
-	// Unassign agent + close feed item + close conversation in Bird Inbox
-	p.birdClient.UnassignFeedItem(sess.ConversationID, true)
-	p.birdClient.CloseConversation(sess.ConversationID)
-
 	p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID, "Tu consulta ha sido resuelta. Gracias por comunicarte con nosotros!")
+
+	// Delay close so Bird finishes processing the outbound message delivery
+	closingConvID := sess.ConversationID
+	go func() {
+		time.Sleep(3 * time.Second)
+		p.birdClient.UnassignFeedItem(closingConvID, true)
+		p.birdClient.CloseConversation(closingConvID)
+	}()
 
 	if p.tracker != nil {
 		p.tracker.LogEvent(ctx, sess.ID, cmd.Phone, "escalation_closed", nil)
@@ -705,12 +709,18 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 		slog.Error("save state error", "phone", phone, "error", err)
 	}
 
-	// Close conversation in Bird Inbox when session completes (bot-driven termination)
+	// Close conversation in Bird Inbox when session completes (bot-driven termination).
+	// Delay 3s so Bird finishes processing the outbound message delivery before we close,
+	// otherwise the delivery confirmation can reopen the conversation.
 	if sess.Status == session.StatusCompleted && convID != "" {
-		p.birdClient.UnassignFeedItem(convID, true)
-		if err := p.birdClient.CloseConversation(convID); err != nil {
-			slog.Warn("close conversation on completion failed", "phone", phone, "conversation_id", convID, "error", err)
-		}
+		closingConvID := convID
+		go func() {
+			time.Sleep(3 * time.Second)
+			p.birdClient.UnassignFeedItem(closingConvID, true)
+			if err := p.birdClient.CloseConversation(closingConvID); err != nil {
+				slog.Warn("close conversation on completion failed", "phone", phone, "conversation_id", closingConvID, "error", err)
+			}
+		}()
 	}
 
 	// Log events
