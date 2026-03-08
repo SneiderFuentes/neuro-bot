@@ -62,6 +62,11 @@ type OCRAnalyzer interface {
 	AnalyzeText(ctx context.Context, description string) (*services.OCRResult, error)
 }
 
+// InboxMarker marks messages as processed in the inbox (WAL pattern).
+type InboxMarker interface {
+	MarkDone(ctx context.Context, id string) error
+}
+
 type MessageWorkerPool struct {
 	queue          chan bird.InboundMessage
 	agentCmds      chan AgentCommand
@@ -77,6 +82,7 @@ type MessageWorkerPool struct {
 	machine        MessageProcessor
 	tracker        *tracking.EventTracker
 	ocrService     OCRAnalyzer
+	inboxRepo      InboxMarker // WAL crash recovery (optional)
 }
 
 func NewMessageWorkerPool(workers, queueSize int) *MessageWorkerPool {
@@ -111,6 +117,11 @@ func (p *MessageWorkerPool) SetOCRService(svc OCRAnalyzer) {
 	p.ocrService = svc
 }
 
+// SetInboxRepo sets the inbox repo for WAL crash recovery.
+func (p *MessageWorkerPool) SetInboxRepo(repo InboxMarker) {
+	p.inboxRepo = repo
+}
+
 // QueueStats returns the current queue size and capacity.
 func (p *MessageWorkerPool) QueueStats() (size, capacity int) {
 	return len(p.queue), cap(p.queue)
@@ -134,13 +145,38 @@ func (p *MessageWorkerPool) Start(ctx context.Context) {
 	slog.Info("worker pool started", "workers", p.workers, "queue_size", cap(p.queue))
 }
 
-// Stop waits for all workers and overflow goroutines to finish.
-// Call after cancelling the context passed to Start.
+// Stop waits for all workers and overflow goroutines to finish,
+// then drains remaining queued messages (up to 15s) before returning.
 func (p *MessageWorkerPool) Stop() {
 	p.wg.Wait()
-	dropped := len(p.queue)
-	if dropped > 0 {
-		slog.Warn("worker pool stopped, messages dropped from queue", "dropped", dropped)
+
+	// Drain remaining queued messages with a deadline
+	remaining := len(p.queue)
+	if remaining == 0 {
+		return
+	}
+
+	slog.Info("draining queued messages before shutdown", "count", remaining)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer drainCancel()
+
+	drained := 0
+	for {
+		select {
+		case msg := <-p.queue:
+			p.processMessage(drainCtx, msg)
+			drained++
+		case <-drainCtx.Done():
+			dropped := len(p.queue)
+			if dropped > 0 {
+				slog.Warn("shutdown drain timeout, messages remaining", "dropped", dropped)
+			}
+			return
+		default:
+			// Queue is empty
+			slog.Info("shutdown drain complete", "drained", drained)
+			return
+		}
 	}
 }
 
@@ -201,6 +237,15 @@ func (p *MessageWorkerPool) worker(ctx context.Context, id int) {
 }
 
 func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.InboundMessage) {
+	// WAL: mark message as done after processing (crash recovery)
+	if p.inboxRepo != nil && msg.ID != "" && !strings.HasPrefix(msg.ID, "virtual-") && !strings.HasPrefix(msg.ID, "agent-") {
+		defer func() {
+			if err := p.inboxRepo.MarkDone(parentCtx, msg.ID); err != nil {
+				slog.Error("inbox mark done failed", "id", msg.ID, "error", err)
+			}
+		}()
+	}
+
 	// 1. Crear contexto con timeout de 30s para adquisición del lock
 	lockCtx, lockCancel := context.WithTimeout(parentCtx, phoneLockTimeout)
 	defer lockCancel()

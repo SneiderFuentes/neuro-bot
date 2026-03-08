@@ -75,3 +75,8 @@ func (s *PatientService) Create(ctx context.Context, input domain.CreatePatientI
 func (s *PatientService) UpdateEntity(ctx context.Context, patientID, entityCode string) error {
 	return s.repo.UpdateEntity(ctx, patientID, entityCode)
 }
+
+// UpdateContactInfo actualiza teléfono y email de un paciente en la BD externa
+func (s *PatientService) UpdateContactInfo(ctx context.Context, patientID, phone, email string) error {
+	return s.repo.UpdateContactInfo(ctx, patientID, phone, email)
+}

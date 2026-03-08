@@ -147,6 +147,9 @@ services:
           memory: 32M
           cpus: '0.25'
 
+# ⚠ DANGER: Never use "docker compose down -v" — it DELETES the botdbdata volume
+# and ALL local database data (sessions, inbox WAL, scheduler runs, etc.).
+# Safe commands: docker compose down | up --build | restart | stop
 volumes:
   botdbdata:
 

@@ -14,7 +14,8 @@ import (
 // --- Mock PatientRepository ---
 
 type mockPatientRepo struct {
-	findByDocumentFn func(ctx context.Context, doc string) (*domain.Patient, error)
+	findByDocumentFn    func(ctx context.Context, doc string) (*domain.Patient, error)
+	updateContactInfoFn func(ctx context.Context, patientID, phone, email string) error
 }
 
 func (m *mockPatientRepo) FindByDocument(ctx context.Context, doc string) (*domain.Patient, error) {
@@ -30,6 +31,12 @@ func (m *mockPatientRepo) Create(ctx context.Context, input domain.CreatePatient
 	return "", nil
 }
 func (m *mockPatientRepo) UpdateEntity(ctx context.Context, patientID, entityCode string) error {
+	return nil
+}
+func (m *mockPatientRepo) UpdateContactInfo(ctx context.Context, patientID, phone, email string) error {
+	if m.updateContactInfoFn != nil {
+		return m.updateContactInfoFn(ctx, patientID, phone, email)
+	}
 	return nil
 }
 
@@ -211,7 +218,7 @@ func TestPatientLookup_DBError(t *testing.T) {
 
 // ==================== ConfirmIdentity ====================
 
-func TestConfirmIdentity_Yes_Consultar(t *testing.T) {
+func TestConfirmIdentity_Yes_GoesToContactInfo(t *testing.T) {
 	m := sm.NewMachine()
 	m.Register(sm.StateConfirmIdentity, confirmIdentityHandler())
 
@@ -223,12 +230,13 @@ func TestConfirmIdentity_Yes_Consultar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateFetchAppointments {
-		t.Errorf("expected FETCH_APPOINTMENTS, got %s", result.NextState)
+	// Always routes to SHOW_CONTACT_INFO first (regardless of menu_option)
+	if result.NextState != sm.StateShowContactInfo {
+		t.Errorf("expected SHOW_CONTACT_INFO, got %s", result.NextState)
 	}
 }
 
-func TestConfirmIdentity_Yes_Agendar(t *testing.T) {
+func TestConfirmIdentity_Yes_Agendar_GoesToContactInfo(t *testing.T) {
 	m := sm.NewMachine()
 	m.Register(sm.StateConfirmIdentity, confirmIdentityHandler())
 
@@ -240,9 +248,9 @@ func TestConfirmIdentity_Yes_Agendar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Bird V2: entity already selected before document → skip entity check, go to medical order
-	if result.NextState != sm.StateAskMedicalOrder {
-		t.Errorf("expected ASK_MEDICAL_ORDER, got %s", result.NextState)
+	// Always routes to SHOW_CONTACT_INFO first
+	if result.NextState != sm.StateShowContactInfo {
+		t.Errorf("expected SHOW_CONTACT_INFO, got %s", result.NextState)
 	}
 }
 
@@ -283,13 +291,300 @@ func TestConfirmIdentity_Yes_DefaultMenu(t *testing.T) {
 
 	sess := testSess(sm.StateConfirmIdentity)
 	sess.Context["patient_id"] = "PAT001"
-	// No menu_option set → defaults to POST_ACTION_MENU
+	// No menu_option set → still goes to SHOW_CONTACT_INFO
 
 	result, err := m.Process(context.Background(), sess, postbackM("identity_yes"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU (default), got %s", result.NextState)
+	if result.NextState != sm.StateShowContactInfo {
+		t.Errorf("expected SHOW_CONTACT_INFO, got %s", result.NextState)
+	}
+}
+
+// ==================== ShowContactInfo ====================
+
+func TestShowContactInfo_BothPresent(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateShowContactInfo, showContactInfoHandler())
+
+	sess := testSess(sm.StateShowContactInfo)
+	sess.Context["patient_phone"] = "3103343616"
+	sess.Context["patient_email"] = "juan@email.com"
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateConfirmContactInfo {
+		t.Errorf("expected CONFIRM_CONTACT_INFO, got %s", result.NextState)
+	}
+}
+
+func TestShowContactInfo_PhoneMissing(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateShowContactInfo, showContactInfoHandler())
+
+	sess := testSess(sm.StateShowContactInfo)
+	sess.Context["patient_phone"] = ""
+	sess.Context["patient_email"] = "juan@email.com"
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateAskUpdatePhone {
+		t.Errorf("expected ASK_UPDATE_PHONE, got %s", result.NextState)
+	}
+}
+
+func TestShowContactInfo_EmailMissing(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateShowContactInfo, showContactInfoHandler())
+
+	sess := testSess(sm.StateShowContactInfo)
+	sess.Context["patient_phone"] = "3103343616"
+	sess.Context["patient_email"] = ""
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateAskUpdateEmail {
+		t.Errorf("expected ASK_UPDATE_EMAIL, got %s", result.NextState)
+	}
+	if result.UpdateCtx["contact_new_phone"] != "+573103343616" {
+		t.Errorf("expected parsed phone in contact_new_phone, got %q", result.UpdateCtx["contact_new_phone"])
+	}
+}
+
+func TestShowContactInfo_InvalidPhone(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateShowContactInfo, showContactInfoHandler())
+
+	sess := testSess(sm.StateShowContactInfo)
+	sess.Context["patient_phone"] = "123" // not a valid colombian phone
+	sess.Context["patient_email"] = "juan@email.com"
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateAskUpdatePhone {
+		t.Errorf("expected ASK_UPDATE_PHONE for invalid phone, got %s", result.NextState)
+	}
+}
+
+func TestShowContactInfo_NullEmail(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateShowContactInfo, showContactInfoHandler())
+
+	sess := testSess(sm.StateShowContactInfo)
+	sess.Context["patient_phone"] = "3103343616"
+	sess.Context["patient_email"] = "null"
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateAskUpdateEmail {
+		t.Errorf("expected ASK_UPDATE_EMAIL for null email, got %s", result.NextState)
+	}
+}
+
+// ==================== ConfirmContactInfo ====================
+
+func TestConfirmContactInfo_Ok_Consultar(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateConfirmContactInfo, confirmContactInfoHandler(nil))
+
+	sess := testSess(sm.StateConfirmContactInfo)
+	sess.Context["menu_option"] = "consultar"
+
+	result, err := m.Process(context.Background(), sess, postbackM("contact_ok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateFetchAppointments {
+		t.Errorf("expected FETCH_APPOINTMENTS, got %s", result.NextState)
+	}
+}
+
+func TestConfirmContactInfo_Ok_Agendar(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateConfirmContactInfo, confirmContactInfoHandler(nil))
+
+	sess := testSess(sm.StateConfirmContactInfo)
+	sess.Context["menu_option"] = "agendar"
+
+	result, err := m.Process(context.Background(), sess, postbackM("contact_ok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateAskMedicalOrder {
+		t.Errorf("expected ASK_MEDICAL_ORDER, got %s", result.NextState)
+	}
+}
+
+func TestConfirmContactInfo_Update(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateConfirmContactInfo, confirmContactInfoHandler(nil))
+
+	sess := testSess(sm.StateConfirmContactInfo)
+	result, err := m.Process(context.Background(), sess, postbackM("contact_update"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateAskUpdatePhone {
+		t.Errorf("expected ASK_UPDATE_PHONE, got %s", result.NextState)
+	}
+}
+
+// ==================== AskUpdatePhone ====================
+
+func TestAskUpdatePhone_Valid(t *testing.T) {
+	m := sm.NewMachine()
+	RegisterIdentificationHandlers(m, services.NewPatientService(&mockPatientRepo{}))
+
+	sess := testSess(sm.StateAskUpdatePhone)
+	result, err := m.Process(context.Background(), sess, textM("3209302716"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateAskUpdateEmail {
+		t.Errorf("expected ASK_UPDATE_EMAIL, got %s", result.NextState)
+	}
+	if result.UpdateCtx["contact_new_phone"] != "+573209302716" {
+		t.Errorf("expected +573209302716, got %q", result.UpdateCtx["contact_new_phone"])
+	}
+}
+
+func TestAskUpdatePhone_Invalid(t *testing.T) {
+	m := sm.NewMachine()
+	RegisterIdentificationHandlers(m, services.NewPatientService(&mockPatientRepo{}))
+
+	sess := testSess(sm.StateAskUpdatePhone)
+	result, err := m.Process(context.Background(), sess, textM("123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should stay on same state (retry via RegisterWithConfig validation)
+	if result.NextState != sm.StateAskUpdatePhone {
+		t.Errorf("expected ASK_UPDATE_PHONE (retry), got %s", result.NextState)
+	}
+}
+
+// ==================== AskUpdateEmail ====================
+
+func TestAskUpdateEmail_Valid(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateAskUpdateEmail, askUpdateEmailHandler())
+
+	sess := testSess(sm.StateAskUpdateEmail)
+	result, err := m.Process(context.Background(), sess, textM("nuevo@email.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateUpdateContactInfo {
+		t.Errorf("expected UPDATE_CONTACT_INFO, got %s", result.NextState)
+	}
+	if result.UpdateCtx["contact_new_email"] != "nuevo@email.com" {
+		t.Errorf("expected email saved, got %q", result.UpdateCtx["contact_new_email"])
+	}
+}
+
+func TestAskUpdateEmail_NA(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateAskUpdateEmail, askUpdateEmailHandler())
+
+	sess := testSess(sm.StateAskUpdateEmail)
+	result, err := m.Process(context.Background(), sess, textM("NA"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateUpdateContactInfo {
+		t.Errorf("expected UPDATE_CONTACT_INFO, got %s", result.NextState)
+	}
+	if v, ok := result.UpdateCtx["contact_new_email"]; !ok || v != "" {
+		t.Errorf("expected empty email for NA, got %q", v)
+	}
+}
+
+func TestAskUpdateEmail_Invalid(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateAskUpdateEmail, askUpdateEmailHandler())
+
+	sess := testSess(sm.StateAskUpdateEmail)
+	result, err := m.Process(context.Background(), sess, textM("notanemail"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should retry on same state
+	if result.NextState != sm.StateAskUpdateEmail {
+		t.Errorf("expected ASK_UPDATE_EMAIL (retry), got %s", result.NextState)
+	}
+}
+
+// ==================== UpdateContactInfo ====================
+
+func TestUpdateContactInfo_Success(t *testing.T) {
+	var updatedPhone, updatedEmail string
+	repo := &mockPatientRepo{
+		updateContactInfoFn: func(ctx context.Context, patientID, phone, email string) error {
+			updatedPhone = phone
+			updatedEmail = email
+			return nil
+		},
+	}
+	svc := services.NewPatientService(repo)
+
+	m := sm.NewMachine()
+	m.Register(sm.StateUpdateContactInfo, updateContactInfoHandler(svc))
+
+	sess := testSess(sm.StateUpdateContactInfo)
+	sess.Context["patient_id"] = "PAT001"
+	sess.Context["contact_new_phone"] = "+573209302716"
+	sess.Context["contact_new_email"] = "nuevo@email.com"
+	sess.Context["menu_option"] = "consultar"
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateFetchAppointments {
+		t.Errorf("expected FETCH_APPOINTMENTS, got %s", result.NextState)
+	}
+	if updatedPhone != "+573209302716" {
+		t.Errorf("expected phone +573209302716, got %q", updatedPhone)
+	}
+	if updatedEmail != "nuevo@email.com" {
+		t.Errorf("expected email nuevo@email.com, got %q", updatedEmail)
+	}
+}
+
+func TestUpdateContactInfo_DBError_ContinuesFlow(t *testing.T) {
+	repo := &mockPatientRepo{
+		updateContactInfoFn: func(ctx context.Context, patientID, phone, email string) error {
+			return fmt.Errorf("connection refused")
+		},
+	}
+	svc := services.NewPatientService(repo)
+
+	m := sm.NewMachine()
+	m.Register(sm.StateUpdateContactInfo, updateContactInfoHandler(svc))
+
+	sess := testSess(sm.StateUpdateContactInfo)
+	sess.Context["patient_id"] = "PAT001"
+	sess.Context["contact_new_phone"] = "+573209302716"
+	sess.Context["contact_new_email"] = "nuevo@email.com"
+	sess.Context["menu_option"] = "agendar"
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should continue flow even on error
+	if result.NextState != sm.StateAskMedicalOrder {
+		t.Errorf("expected ASK_MEDICAL_ORDER (continue on error), got %s", result.NextState)
 	}
 }

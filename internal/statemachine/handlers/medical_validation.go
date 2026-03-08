@@ -483,25 +483,18 @@ func checkPriorConsultHandler(apptSvc *services.AppointmentService) sm.StateHand
 	}
 }
 
-// CHECK_SOAT_LIMIT (automático) — verifica límite mensual SOAT (solo SAN01/SAN02).
+// CHECK_SOAT_LIMIT (automático) — marca flag para filtro mensual SOAT en búsqueda de slots.
+// Ya no bloquea aquí; el filtro se aplica en SEARCH_SLOTS via MonthFilter.
 func checkSoatLimitHandler(apptSvc *services.AppointmentService) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		cupsCode := sess.GetContext("cups_code")
 		entity := sess.GetContext("patient_entity")
 
-		blocked, message, err := apptSvc.CheckSOATLimit(ctx, cupsCode, entity)
-		if err != nil {
-			// No bloquear si falla
-			return sm.NewResult(sm.StateCheckAgeRestriction), nil
-		}
-
-		if blocked {
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithText(message).
-				WithEvent("soat_limit_reached", map[string]interface{}{
-					"cups_code": cupsCode,
-					"entity":    entity,
-				}), nil
+		if entity == "SAN01" {
+			if _, _, found := services.IsSOATGroupCups(cupsCode); found {
+				return sm.NewResult(sm.StateCheckAgeRestriction).
+					WithContext("soat_limit_check", "1"), nil
+			}
 		}
 
 		return sm.NewResult(sm.StateCheckAgeRestriction), nil

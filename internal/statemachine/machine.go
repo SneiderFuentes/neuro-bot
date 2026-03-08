@@ -117,6 +117,11 @@ func (m *Machine) Process(ctx context.Context, sess *session.Session, msg bird.I
 		prevCtx := result.UpdateCtx
 		prevClear := result.ClearCtx
 
+		// Aplicar contexto pendiente a la sesión para que el auto handler pueda leerlo
+		for k, v := range prevCtx {
+			sess.SetContext(k, v)
+		}
+
 		autoResult, err := autoHandler(ctx, sess, msg)
 		if err != nil {
 			return nil, fmt.Errorf("auto handler %s: %w", result.NextState, err)

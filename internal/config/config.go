@@ -93,10 +93,27 @@ type Config struct {
 	// Testing
 	TestingAlwaysOpen bool // Bypasses business hours check when true
 	MaxRetries        int  // Max invalid response attempts before fallback menu
+
+	// CUPS group limits
+	CupsGroupLimitsEnabled   bool // Monthly CUPS group limits for SAN01
+	TeamRoutingEnabled       bool // Route to specialty teams (Grupo A/B); false → all to Call Center
+
+	// Confirmation escalation chain
+	ConfirmFollowup1Hours  int // First follow-up after WA template (hours)
+	ConfirmFollowup2Hours  int // Second follow-up after first (hours)
+	ConfirmPostIVRMinutes  int // Agent escalation after IVR (minutes)
+
+	// Testing whitelist — only these phones can interact with the bot (empty = all allowed)
+	TestingWhitelistPhones []string
 }
 
 func Load() *Config {
-	godotenv.Load() // no falla si no existe .env
+	// APP_ENV=testing carga .env.testing primero, luego .env como fallback
+	if os.Getenv("APP_ENV") == "testing" {
+		godotenv.Load(".env.testing", ".env")
+	} else {
+		godotenv.Load() // default: .env
+	}
 
 	cfg := &Config{
 		// App
@@ -182,6 +199,18 @@ func Load() *Config {
 		// Testing
 		TestingAlwaysOpen: getEnv("TESTING_ALWAYS_OPEN", "") == "true",
 		MaxRetries:        getEnvInt("MAX_RETRIES", 4),
+
+		// CUPS group limits
+		CupsGroupLimitsEnabled: getEnv("CUPS_GROUP_LIMITS_ENABLED", "true") == "true",
+		TeamRoutingEnabled:     getEnv("TEAM_ROUTING_ENABLED", "true") == "true",
+
+		// Confirmation escalation
+		ConfirmFollowup1Hours:  getEnvInt("CONFIRMATION_FOLLOWUP_1_HOURS", 3),
+		ConfirmFollowup2Hours:  getEnvInt("CONFIRMATION_FOLLOWUP_2_HOURS", 3),
+		ConfirmPostIVRMinutes:  getEnvInt("CONFIRMATION_POST_IVR_MINUTES", 30),
+
+		// Testing whitelist
+		TestingWhitelistPhones: parsePhoneList(os.Getenv("TESTING_WHITELIST_PHONES")),
 	}
 
 	cfg.validate()
@@ -222,9 +251,41 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+func parsePhoneList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var phones []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			phones = append(phones, p)
+		}
+	}
+	return phones
+}
+
+// IsPhoneWhitelisted returns true if the phone is allowed to interact with the bot.
+// When the whitelist is empty, all phones are allowed.
+func (c *Config) IsPhoneWhitelisted(phone string) bool {
+	if len(c.TestingWhitelistPhones) == 0 {
+		return true
+	}
+	for _, p := range c.TestingWhitelistPhones {
+		if p == phone {
+			return true
+		}
+	}
+	return false
+}
+
 // ResolveTeamForCups returns the Bird team ID based on the CUPS procedure code.
 // Falls back to BirdTeamFallback (Call Center) for unknown codes.
+// When TeamRoutingEnabled is false, always returns Call Center.
 func (c *Config) ResolveTeamForCups(cupsCode string) string {
+	if !c.TeamRoutingEnabled {
+		return c.BirdTeamFallback
+	}
 	if len(cupsCode) < 3 {
 		return c.BirdTeamFallback
 	}

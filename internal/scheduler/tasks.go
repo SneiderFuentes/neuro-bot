@@ -30,15 +30,22 @@ type EventLogger interface {
 	LogEvent(ctx context.Context, sessionID, phone, eventType string, data map[string]interface{})
 }
 
+// InboxCleaner cleans up processed inbox messages.
+type InboxCleaner interface {
+	DeleteOlderThan(ctx context.Context, hours int) (int64, error)
+}
+
 // Tasks holds dependencies for all scheduler tasks.
 type Tasks struct {
 	AppointmentRepo repository.AppointmentRepository
+	AppointmentSvc  *services.AppointmentService // SOAT month filter for WL check
 	BirdClient      *bird.Client
 	NotifyManager   *notifications.NotificationManager
 	WaitingListRepo WaitingListRepo
 	SlotService     *services.SlotService
 	Cfg             *config.Config
 	Tracker         EventLogger
+	InboxRepo       InboxCleaner // WAL cleanup (optional)
 }
 
 // RegisterAll registers the 4 scheduled tasks.
@@ -117,6 +124,11 @@ func (t *Tasks) sendWhatsAppReminders(ctx context.Context) error {
 			continue
 		}
 
+		if !t.Cfg.IsPhoneWhitelisted(phone) {
+			skipped++
+			continue
+		}
+
 		// Build procedure names
 		var procedures []string
 		for _, appt := range group {
@@ -185,58 +197,71 @@ func (t *Tasks) sendWhatsAppReminders(ctx context.Context) error {
 }
 
 // === Task 15:00: Voice Reminders (IVR) ===
+//
+// Cambio 14: Uses escalation chain instead of broken !HasPending filter.
+// Calls patients who completed WA follow-up chain (RetryCount==2),
+// then sets post-IVR timer for final agent escalation.
 
 func (t *Tasks) sendVoiceReminders(ctx context.Context) error {
-	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
+	// Get patients who completed WA follow-up chain (RetryCount==2)
+	targets := t.NotifyManager.GetPendingForIVR()
+	if len(targets) == 0 {
+		slog.Info("voice reminders: no targets")
+		return nil
+	}
 
-	// Find appointments for tomorrow where patient hasn't responded to WhatsApp
+	// Get tomorrow's appointments for IVR call parameters
+	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
 	appointments, err := t.AppointmentRepo.FindPendingByDate(ctx, tomorrow)
 	if err != nil {
-		return fmt.Errorf("fetch non-responders: %w", err)
+		return fmt.Errorf("fetch appointments for IVR: %w", err)
 	}
 
-	// Filter to only those who didn't respond (still pending in notification manager)
-	var nonResponders []domain.Appointment
-	seen := make(map[string]bool)
+	// Build phone → appointment map for quick lookup
+	apptByPhone := make(map[string]domain.Appointment)
 	for _, appt := range appointments {
 		phone := utils.ParseColombianPhone(appt.PatientPhone)
-		if phone == "" || seen[phone] {
-			continue
-		}
-		// Only call if they have no pending notification (meaning WhatsApp timed out)
-		if !t.NotifyManager.HasPending(phone) && !appt.Confirmed {
-			nonResponders = append(nonResponders, appt)
-			seen[phone] = true
+		if phone != "" {
+			apptByPhone[phone] = appt
 		}
 	}
 
-	slog.Info("voice reminders", "non_responders", len(nonResponders))
-
-	for _, appt := range nonResponders {
-		phone := utils.ParseColombianPhone(appt.PatientPhone)
-		if phone == "" {
+	sent := 0
+	for _, pending := range targets {
+		if !t.Cfg.IsPhoneWhitelisted(pending.Phone) {
 			continue
 		}
 
-		_, err := t.BirdClient.PlaceCall(phone, map[string]string{
+		appt, ok := apptByPhone[pending.Phone]
+		if !ok {
+			continue // No matching appointment — may have been confirmed/cancelled meanwhile
+		}
+
+		_, err := t.BirdClient.PlaceCall(pending.Phone, map[string]string{
 			"patient_name":     appt.PatientName,
 			"appointment_date": utils.FormatFriendlyDate(appt.Date),
 			"appointment_time": services.FormatTimeSlot(appt.TimeSlot),
 		})
 		if err != nil {
-			slog.Error("voice call failed", "phone", phone, "error", err)
+			slog.Error("voice call failed", "phone", pending.Phone, "error", err)
+			continue
 		}
+
+		// Mark IVR sent: stops old safety-net timer, sets retry=3, new post-IVR timer
+		t.NotifyManager.MarkIVRSent(pending.Phone)
 
 		if t.Tracker != nil {
-			t.Tracker.LogEvent(ctx, "", phone, "notification_ivr_sent",
-				map[string]interface{}{"appointment_id": appt.ID})
+			t.Tracker.LogEvent(ctx, "", pending.Phone, "notification_ivr_sent",
+				map[string]interface{}{"appointment_id": pending.AppointmentID})
 		}
 
-		slog.Info("ivr call initiated", "phone", phone, "appointment_id", appt.ID)
+		slog.Info("ivr call initiated", "phone", pending.Phone, "appointment_id", pending.AppointmentID)
 
+		sent++
 		time.Sleep(3 * time.Second) // Rate limit for calls
 	}
 
+	slog.Info("voice reminders complete", "sent", sent, "targets", len(targets))
 	return nil
 }
 
@@ -252,6 +277,16 @@ func (t *Tasks) cleanup(ctx context.Context) error {
 			slog.Error("waiting list cleanup error", "error", err)
 		} else if wlExpired > 0 {
 			slog.Info("waiting list entries expired by cleanup", "count", wlExpired)
+		}
+	}
+
+	// Clean up processed inbox messages older than 24h (WAL)
+	if t.InboxRepo != nil {
+		deleted, err := t.InboxRepo.DeleteOlderThan(ctx, 24)
+		if err != nil {
+			slog.Error("inbox cleanup error", "error", err)
+		} else if deleted > 0 {
+			slog.Info("inbox messages cleaned", "deleted", deleted)
 		}
 	}
 
@@ -306,6 +341,19 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 			MaxSlots:     20, // Buscar más slots para saber cuántos pacientes notificar
 		}
 
+		// SOAT monthly limit filter for SAN01 WL entries
+		if t.AppointmentSvc != nil && firstEntry.PatientEntity == "SAN01" {
+			if _, _, found := services.IsSOATGroupCups(cupsCode); found {
+				query.MonthFilter = func(year, month int) (bool, error) {
+					blocked, err := t.AppointmentSvc.CheckSOATLimitForMonth(ctx, cupsCode, firstEntry.PatientEntity, year, month)
+					if err != nil {
+						return true, nil // fail-open
+					}
+					return !blocked, nil
+				}
+			}
+		}
+
 		slots, err := t.SlotService.GetAvailableSlots(ctx, query)
 		if err != nil || len(slots) == 0 {
 			slog.Debug("waiting list: no slots for cups", "cups_code", cupsCode)
@@ -321,6 +369,10 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 		}
 
 		for _, entry := range entriesToNotify {
+			if !t.Cfg.IsPhoneWhitelisted(entry.PhoneNumber) {
+				continue
+			}
+
 			// 5. Verificar si ya tiene cita para este CUPS
 			hasFuture, err := t.AppointmentRepo.HasFutureForCup(ctx, entry.PatientID, cupsCode)
 			if err != nil {

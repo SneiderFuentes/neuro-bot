@@ -8,6 +8,11 @@ const (
 	StateAskDocument        = "ASK_DOCUMENT"
 	StatePatientLookup      = "PATIENT_LOOKUP"
 	StateConfirmIdentity    = "CONFIRM_IDENTITY"
+	StateShowContactInfo    = "SHOW_CONTACT_INFO"
+	StateConfirmContactInfo = "CONFIRM_CONTACT_INFO"
+	StateAskUpdatePhone     = "ASK_UPDATE_PHONE"
+	StateAskUpdateEmail     = "ASK_UPDATE_EMAIL"
+	StateUpdateContactInfo  = "UPDATE_CONTACT_INFO"
 	StateShowResults        = "SHOW_RESULTS"
 	StateShowLocations      = "SHOW_LOCATIONS"
 )
@@ -142,6 +147,11 @@ var stateTypes = map[string]StateType{
 	StateAskDocument:        StateTypeInteractive,
 	StatePatientLookup:      StateTypeAutomatic,
 	StateConfirmIdentity:    StateTypeInteractive,
+	StateShowContactInfo:    StateTypeAutomatic,
+	StateConfirmContactInfo: StateTypeInteractive,
+	StateAskUpdatePhone:     StateTypeInteractive,
+	StateAskUpdateEmail:     StateTypeInteractive,
+	StateUpdateContactInfo:  StateTypeAutomatic,
 	StateShowResults:        StateTypeAutomatic,
 	StateShowLocations:      StateTypeAutomatic,
 

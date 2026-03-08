@@ -644,6 +644,17 @@ func TestSendVoiceReminders_RepoError(t *testing.T) {
 	cfg := testConfig()
 	nm := notifications.NewNotificationManager(birdClient, nil, cfg)
 
+	// Register a pending notification at RetryCount=2 so GetPendingForIVR returns a target
+	nm.RegisterPending(notifications.PendingNotification{
+		Type:          "confirmation",
+		Phone:         "+573001234567",
+		AppointmentID: "apt-1",
+	})
+	// Manually advance to RetryCount=2 (simulate 2 follow-ups completed)
+	if p, ok := nm.LoadPendingForTest("+573001234567"); ok {
+		p.RetryCount = 2
+	}
+
 	mockRepo := &testutil.MockAppointmentRepo{
 		FindPendingByDateFn: func(ctx context.Context, date string) ([]domain.Appointment, error) {
 			return nil, errors.New("db error")

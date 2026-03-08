@@ -77,7 +77,7 @@ func (m *mockApptRepoNotif) HasFutureForCup(ctx context.Context, patientID, cupC
 func (m *mockApptRepoNotif) FindLastDoctorForCups(ctx context.Context, patientID string, cups []string) (string, error) {
 	return "", nil
 }
-func (m *mockApptRepoNotif) CountMonthlyByGroup(ctx context.Context, cupsCodes []string) (int, error) {
+func (m *mockApptRepoNotif) CountMonthlyByGroup(ctx context.Context, cupsCodes []string, year, month int) (int, error) {
 	return 0, nil
 }
 func (m *mockApptRepoNotif) FindPendingByDate(ctx context.Context, date string) ([]domain.Appointment, error) {
@@ -158,7 +158,11 @@ func TestNotificationManager_HasPending(t *testing.T) {
 }
 
 func TestNotificationManager_PendingCount(t *testing.T) {
-	m := &NotificationManager{}
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{ConfirmFollowup1Hours: 3}
+	m := NewNotificationManager(birdClient, nil, cfg)
 
 	if m.PendingCount() != 0 {
 		t.Errorf("expected 0 pending, got %d", m.PendingCount())
@@ -218,7 +222,7 @@ func TestHandleConfirmation_Confirm(t *testing.T) {
 			return nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
@@ -251,7 +255,7 @@ func TestHandleConfirmation_Cancel(t *testing.T) {
 			return nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
@@ -286,7 +290,7 @@ func TestHandleReschedule_Confirm(t *testing.T) {
 			return nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
@@ -319,7 +323,7 @@ func TestHandleReschedule_Cancel(t *testing.T) {
 			return nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
@@ -366,7 +370,7 @@ func TestHandleCancellation_Reschedule(t *testing.T) {
 			return &appt, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
 
@@ -407,11 +411,17 @@ func TestHandleCancellation_Reschedule(t *testing.T) {
 	}
 }
 
-func TestHandleTimeout_Confirmation_Retry(t *testing.T) {
+// Cambio 14: Escalation chain tests
+
+func TestHandleTimeout_Confirmation_Step0_FollowUp1(t *testing.T) {
 	birdClient, srv := newTestBirdClient()
 	defer srv.Close()
 
-	cfg := &config.Config{}
+	cfg := &config.Config{
+		ConfirmFollowup1Hours: 3,
+		ConfirmFollowup2Hours: 3,
+		ConfirmPostIVRMinutes: 30,
+	}
 	mgr := NewNotificationManager(birdClient, nil, cfg)
 
 	mgr.pending.Store("+573001234567", &PendingNotification{
@@ -423,7 +433,7 @@ func TestHandleTimeout_Confirmation_Retry(t *testing.T) {
 	mgr.handleTimeout("+573001234567")
 
 	if !mgr.HasPending("+573001234567") {
-		t.Error("expected pending to exist after first retry")
+		t.Error("expected pending to exist after follow-up 1")
 	}
 	val, _ := mgr.pending.Load("+573001234567")
 	p := val.(*PendingNotification)
@@ -432,20 +442,258 @@ func TestHandleTimeout_Confirmation_Retry(t *testing.T) {
 	}
 }
 
-func TestHandleTimeout_Confirmation_MaxRetries(t *testing.T) {
-	mgr := &NotificationManager{}
+func TestHandleTimeout_Confirmation_Step1_FollowUp2(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{
+		ConfirmFollowup1Hours: 3,
+		ConfirmFollowup2Hours: 3,
+		ConfirmPostIVRMinutes: 30,
+	}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
 
 	mgr.pending.Store("+573001234567", &PendingNotification{
 		Type:       "confirmation",
 		Phone:      "+573001234567",
-		RetryCount: 2, // Already at max
+		RetryCount: 1,
+	})
+
+	mgr.handleTimeout("+573001234567")
+
+	if !mgr.HasPending("+573001234567") {
+		t.Error("expected pending to exist after follow-up 2")
+	}
+	val, _ := mgr.pending.Load("+573001234567")
+	p := val.(*PendingNotification)
+	if p.RetryCount != 2 {
+		t.Errorf("expected retry count 2, got %d", p.RetryCount)
+	}
+}
+
+func TestHandleTimeout_Confirmation_Step2_SafetyEscalation(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
+	cfg := &config.Config{
+		BirdTeamFallback:      "team-fallback",
+		ConfirmFollowup1Hours: 3,
+		ConfirmFollowup2Hours: 3,
+		ConfirmPostIVRMinutes: 30,
+	}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:           "confirmation",
+		Phone:          "+573001234567",
+		AppointmentID:  "APT001",
+		ConversationID: "conv-1",
+		RetryCount:     2, // IVR didn't run → safety escalation
+	})
+
+	mgr.handleTimeout("+573001234567")
+
+	// After escalation, pending should be deleted (LoadAndDelete in handleTimeout)
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted after agent escalation")
+	}
+}
+
+func TestHandleTimeout_Confirmation_Step3_PostIVR(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			appt := sampleAppt()
+			return &appt, nil
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
+	cfg := &config.Config{
+		BirdTeamFallback:      "team-fallback",
+		ConfirmFollowup1Hours: 3,
+		ConfirmFollowup2Hours: 3,
+		ConfirmPostIVRMinutes: 30,
+	}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:           "confirmation",
+		Phone:          "+573001234567",
+		AppointmentID:  "APT001",
+		ConversationID: "conv-1",
+		RetryCount:     3, // Post-IVR timeout
 	})
 
 	mgr.handleTimeout("+573001234567")
 
 	if mgr.HasPending("+573001234567") {
-		t.Error("expected pending to be deleted after max retries")
+		t.Error("expected pending to be deleted after post-IVR escalation")
 	}
+}
+
+func TestHandleTimeout_Confirmation_EscalateNoAppt(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	apptRepo := &mockApptRepoNotif{
+		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
+			return nil, nil // Not found
+		},
+	}
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
+	cfg := &config.Config{BirdTeamFallback: "team-fallback"}
+	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
+
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:           "confirmation",
+		Phone:          "+573001234567",
+		AppointmentID:  "APT-MISSING",
+		ConversationID: "conv-1",
+		RetryCount:     3,
+	})
+
+	// Should not panic even when appointment not found
+	mgr.handleTimeout("+573001234567")
+
+	if mgr.HasPending("+573001234567") {
+		t.Error("expected pending to be deleted")
+	}
+}
+
+func TestGetPendingForIVR(t *testing.T) {
+	cfg := &config.Config{}
+	mgr := NewNotificationManager(nil, nil, cfg)
+
+	// confirmation retry=2 → should be returned
+	mgr.pending.Store("+573001111111", &PendingNotification{
+		Type: "confirmation", Phone: "+573001111111", RetryCount: 2,
+	})
+	// reschedule retry=2 → should be returned
+	mgr.pending.Store("+573002222222", &PendingNotification{
+		Type: "reschedule", Phone: "+573002222222", RetryCount: 2,
+	})
+	// confirmation retry=1 → NOT returned (not ready)
+	mgr.pending.Store("+573003333333", &PendingNotification{
+		Type: "confirmation", Phone: "+573003333333", RetryCount: 1,
+	})
+	// waiting_list retry=2 → NOT returned (wrong type)
+	mgr.pending.Store("+573004444444", &PendingNotification{
+		Type: "waiting_list", Phone: "+573004444444", RetryCount: 2,
+	})
+	// confirmation retry=3 → NOT returned (already past IVR)
+	mgr.pending.Store("+573005555555", &PendingNotification{
+		Type: "confirmation", Phone: "+573005555555", RetryCount: 3,
+	})
+
+	targets := mgr.GetPendingForIVR()
+	if len(targets) != 2 {
+		t.Errorf("expected 2 IVR targets, got %d", len(targets))
+	}
+
+	// Verify the correct phones are in the result
+	phones := make(map[string]bool)
+	for _, p := range targets {
+		phones[p.Phone] = true
+	}
+	if !phones["+573001111111"] {
+		t.Error("expected +573001111111 in IVR targets")
+	}
+	if !phones["+573002222222"] {
+		t.Error("expected +573002222222 in IVR targets")
+	}
+}
+
+func TestMarkIVRSent(t *testing.T) {
+	cfg := &config.Config{ConfirmPostIVRMinutes: 30}
+	mgr := NewNotificationManager(nil, nil, cfg)
+
+	mgr.pending.Store("+573001234567", &PendingNotification{
+		Type:       "confirmation",
+		Phone:      "+573001234567",
+		RetryCount: 2,
+	})
+
+	mgr.MarkIVRSent("+573001234567")
+
+	val, ok := mgr.pending.Load("+573001234567")
+	if !ok {
+		t.Fatal("expected pending to still exist after MarkIVRSent")
+	}
+	p := val.(*PendingNotification)
+	if p.RetryCount != 3 {
+		t.Errorf("expected retry count 3, got %d", p.RetryCount)
+	}
+	if p.Timer == nil {
+		t.Error("expected new timer to be set")
+	}
+	p.Timer.Stop()
+}
+
+func TestMarkIVRSent_NotFound(t *testing.T) {
+	cfg := &config.Config{ConfirmPostIVRMinutes: 30}
+	mgr := NewNotificationManager(nil, nil, cfg)
+
+	// Should not panic when phone not found
+	mgr.MarkIVRSent("+573009999999")
+
+	if mgr.HasPending("+573009999999") {
+		t.Error("expected no pending for non-existent phone")
+	}
+}
+
+func TestRegisterPending_ConfirmationTimer(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{ConfirmFollowup1Hours: 3}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:  "confirmation",
+		Phone: "+573001234567",
+	})
+
+	val, ok := mgr.pending.Load("+573001234567")
+	if !ok {
+		t.Fatal("expected pending to be stored")
+	}
+	p := val.(*PendingNotification)
+	if p.Timer == nil {
+		t.Error("expected timer to be set")
+	}
+	p.Timer.Stop()
+}
+
+func TestRegisterPending_WaitingListStill6h(t *testing.T) {
+	birdClient, srv := newTestBirdClient()
+	defer srv.Close()
+
+	cfg := &config.Config{ConfirmFollowup1Hours: 3}
+	mgr := NewNotificationManager(birdClient, nil, cfg)
+
+	mgr.RegisterPending(PendingNotification{
+		Type:  "waiting_list",
+		Phone: "+573009876543",
+	})
+
+	val, ok := mgr.pending.Load("+573009876543")
+	if !ok {
+		t.Fatal("expected pending to be stored")
+	}
+	p := val.(*PendingNotification)
+	if p.Timer == nil {
+		t.Error("expected timer to be set")
+	}
+	p.Timer.Stop()
 }
 
 func TestHandleTimeout_Cancellation(t *testing.T) {
@@ -1014,7 +1262,7 @@ func TestSelfReschedule_FromConfirmation(t *testing.T) {
 			return &appt, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
 
@@ -1091,7 +1339,7 @@ func TestSelfReschedule_FromRescheduleFlow(t *testing.T) {
 			return &appt, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
 
@@ -1132,7 +1380,7 @@ func TestSelfReschedule_NoProcedures(t *testing.T) {
 			return &appt, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{BirdTeamFallback: "team-fallback"}
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
 
@@ -1170,7 +1418,7 @@ func TestSelfReschedule_MissingDeps(t *testing.T) {
 			return &appt, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
 	// Do NOT call SetWaitingListDeps → sessionRepo and workerPool are nil
@@ -1194,7 +1442,7 @@ func TestSelfReschedule_ApptNotFound(t *testing.T) {
 			return nil, nil // Not found
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
 
@@ -1235,7 +1483,7 @@ func TestSelfReschedule_BlockSize(t *testing.T) {
 			return &appt, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
 
@@ -1272,7 +1520,7 @@ func TestSelfReschedule_CreateSessionError(t *testing.T) {
 			return &appt, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 	cfg := &config.Config{}
 	mgr := NewNotificationManager(birdClient, apptSvc, cfg)
 

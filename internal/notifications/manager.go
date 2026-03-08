@@ -148,13 +148,24 @@ func (m *NotificationManager) SetWaitingListCheckDeps(ss SlotSearcher, ac Future
 	m.wlChecker = wlc
 }
 
-// RegisterPending registers a pending notification with a 6-hour timeout.
+// RegisterPending registers a pending notification with a type-appropriate timeout.
+// Confirmation/reschedule use configurable ConfirmFollowup1Hours; others default to 6h.
 func (m *NotificationManager) RegisterPending(notif PendingNotification) {
 	notif.CreatedAt = time.Now()
-	expiresAt := notif.CreatedAt.Add(6 * time.Hour)
+
+	// Confirmation/reschedule: configurable escalation chain
+	var duration time.Duration
+	switch notif.Type {
+	case "confirmation", "reschedule":
+		duration = time.Duration(safeHours(m.cfg.ConfirmFollowup1Hours, 3)) * time.Hour
+	default:
+		duration = 6 * time.Hour
+	}
+
+	expiresAt := notif.CreatedAt.Add(duration)
 
 	// In-memory timer (handles timeout while running)
-	notif.Timer = time.AfterFunc(6*time.Hour, func() {
+	notif.Timer = time.AfterFunc(duration, func() {
 		m.handleTimeout(notif.Phone)
 	})
 
@@ -210,6 +221,60 @@ func (m *NotificationManager) HandleResponse(phone, payload, conversationID stri
 func (m *NotificationManager) HasPending(phone string) bool {
 	_, ok := m.pending.Load(phone)
 	return ok
+}
+
+// GetPendingForIVR returns pending confirmations/reschedules that completed
+// the WA follow-up chain (RetryCount==2) and are ready for IVR escalation.
+func (m *NotificationManager) GetPendingForIVR() []*PendingNotification {
+	var result []*PendingNotification
+	m.pending.Range(func(_, val interface{}) bool {
+		p := val.(*PendingNotification)
+		if (p.Type == "confirmation" || p.Type == "reschedule") && p.RetryCount == 2 {
+			result = append(result, p)
+		}
+		return true
+	})
+	return result
+}
+
+// MarkIVRSent updates a pending notification after IVR call was placed.
+// Stops old safety-net timer, sets RetryCount=3, starts post-IVR timer (minutes).
+func (m *NotificationManager) MarkIVRSent(phone string) {
+	val, ok := m.pending.Load(phone)
+	if !ok {
+		return
+	}
+	p := val.(*PendingNotification)
+	if p.Timer != nil {
+		p.Timer.Stop()
+	}
+	p.RetryCount = 3
+	duration := time.Duration(safeMinutes(m.cfg.ConfirmPostIVRMinutes, 30)) * time.Minute
+	p.Timer = time.AfterFunc(duration, func() {
+		m.handleTimeout(phone)
+	})
+	m.pending.Store(phone, p)
+
+	if m.persister != nil {
+		expiresAt := time.Now().Add(duration)
+		if err := m.persister.Upsert(context.Background(), p.Phone, p.Type,
+			p.AppointmentID, p.WaitingListID, p.BirdMessageID, p.ConversationID,
+			p.RetryCount, expiresAt); err != nil {
+			slog.Error("persist IVR sent notification", "phone", phone, "error", err)
+		}
+	}
+
+	slog.Info("IVR sent, post-IVR timer started", "phone", phone, "retry", p.RetryCount, "minutes", safeMinutes(m.cfg.ConfirmPostIVRMinutes, 30))
+}
+
+// LoadPendingForTest exposes the pending sync.Map entry for test manipulation.
+// Do NOT use in production code.
+func (m *NotificationManager) LoadPendingForTest(phone string) (*PendingNotification, bool) {
+	val, ok := m.pending.Load(phone)
+	if !ok {
+		return nil, false
+	}
+	return val.(*PendingNotification), true
 }
 
 // PendingCount returns the number of pending notifications.
@@ -374,4 +439,20 @@ func normalizePostback(payload string) string {
 	default:
 		return payload
 	}
+}
+
+// safeHours returns v if > 0, otherwise fallback. Guards against zero-value configs in tests.
+func safeHours(v, fallback int) int {
+	if v > 0 {
+		return v
+	}
+	return fallback
+}
+
+// safeMinutes returns v if > 0, otherwise fallback. Guards against zero-value configs in tests.
+func safeMinutes(v, fallback int) int {
+	if v > 0 {
+		return v
+	}
+	return fallback
 }

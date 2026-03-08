@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neuro-bot/neuro-bot/internal/config"
 	"github.com/neuro-bot/neuro-bot/internal/domain"
 )
 
@@ -13,7 +14,7 @@ import (
 
 type mockAppointmentRepo struct {
 	hasFutureForCupFn        func(ctx context.Context, pid, cup string) (bool, error)
-	countMonthlyByGroupFn    func(ctx context.Context, cups []string) (int, error)
+	countMonthlyByGroupFn    func(ctx context.Context, cups []string, year, month int) (int, error)
 	findUpcomingByPatientFn  func(ctx context.Context, patientID string) ([]domain.Appointment, error)
 	findByIDFn               func(ctx context.Context, id string) (*domain.Appointment, error)
 	findByAgendaAndDateFn    func(ctx context.Context, agendaID int, date string) ([]domain.Appointment, error)
@@ -65,9 +66,9 @@ func (m *mockAppointmentRepo) HasFutureForCup(ctx context.Context, pid, cup stri
 func (m *mockAppointmentRepo) FindLastDoctorForCups(ctx context.Context, pid string, cups []string) (string, error) {
 	return "", nil
 }
-func (m *mockAppointmentRepo) CountMonthlyByGroup(ctx context.Context, cups []string) (int, error) {
+func (m *mockAppointmentRepo) CountMonthlyByGroup(ctx context.Context, cups []string, year, month int) (int, error) {
 	if m.countMonthlyByGroupFn != nil {
-		return m.countMonthlyByGroupFn(ctx, cups)
+		return m.countMonthlyByGroupFn(ctx, cups, year, month)
 	}
 	return 0, nil
 }
@@ -128,7 +129,7 @@ func TestParseTimeSlotToMinutes(t *testing.T) {
 }
 
 func TestFindConsecutiveBlock(t *testing.T) {
-	svc := NewAppointmentService(&mockAppointmentRepo{})
+	svc := NewAppointmentService(&mockAppointmentRepo{}, nil)
 
 	date := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
 
@@ -161,7 +162,7 @@ func TestFindConsecutiveBlock(t *testing.T) {
 }
 
 func TestCheckSOATLimit_NonSOAT(t *testing.T) {
-	svc := NewAppointmentService(&mockAppointmentRepo{})
+	svc := NewAppointmentService(&mockAppointmentRepo{}, nil)
 
 	blocked, msg, err := svc.CheckSOATLimit(context.Background(), "890271", "EPS001")
 	if err != nil {
@@ -177,11 +178,11 @@ func TestCheckSOATLimit_NonSOAT(t *testing.T) {
 
 func TestCheckSOATLimit_WithinLimit(t *testing.T) {
 	repo := &mockAppointmentRepo{
-		countMonthlyByGroupFn: func(ctx context.Context, cups []string) (int, error) {
+		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
 			return 10, nil // Within limit (aplicacion_sustancia max=20)
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	blocked, _, err := svc.CheckSOATLimit(context.Background(), "861411", "SAN01")
 	if err != nil {
@@ -194,11 +195,11 @@ func TestCheckSOATLimit_WithinLimit(t *testing.T) {
 
 func TestCheckSOATLimit_ExceedsLimit(t *testing.T) {
 	repo := &mockAppointmentRepo{
-		countMonthlyByGroupFn: func(ctx context.Context, cups []string) (int, error) {
+		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
 			return 20, nil // At limit (aplicacion_sustancia max=20)
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	blocked, msg, err := svc.CheckSOATLimit(context.Background(), "861411", "SAN01")
 	if err != nil {
@@ -209,6 +210,124 @@ func TestCheckSOATLimit_ExceedsLimit(t *testing.T) {
 	}
 	if msg == "" {
 		t.Error("expected non-empty message when blocked")
+	}
+}
+
+func TestCheckSOATLimit_SAN02_NotBlocked(t *testing.T) {
+	// SAN02 should NOT be checked anymore (only SAN01)
+	repo := &mockAppointmentRepo{
+		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
+			t.Fatal("CountMonthlyByGroup should not be called for SAN02")
+			return 999, nil
+		},
+	}
+	svc := NewAppointmentService(repo, nil)
+
+	blocked, msg, err := svc.CheckSOATLimit(context.Background(), "861411", "SAN02")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked {
+		t.Error("expected SAN02 NOT blocked — only SAN01 applies")
+	}
+	if msg != "" {
+		t.Errorf("expected empty message, got %q", msg)
+	}
+}
+
+func TestCheckSOATLimit_Disabled(t *testing.T) {
+	// With feature flag disabled, even SAN01 should not be checked
+	repo := &mockAppointmentRepo{
+		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
+			t.Fatal("CountMonthlyByGroup should not be called when disabled")
+			return 999, nil
+		},
+	}
+	cfg := &config.Config{CupsGroupLimitsEnabled: false}
+	svc := NewAppointmentService(repo, cfg)
+
+	blocked, msg, err := svc.CheckSOATLimit(context.Background(), "861411", "SAN01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked {
+		t.Error("expected not blocked when CUPS_GROUP_LIMITS_ENABLED=false")
+	}
+	if msg != "" {
+		t.Errorf("expected empty message, got %q", msg)
+	}
+}
+
+func TestCheckSOATLimitForMonth_WithinLimit(t *testing.T) {
+	repo := &mockAppointmentRepo{
+		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
+			if year != 2026 || month != 4 {
+				t.Errorf("expected year=2026 month=4, got year=%d month=%d", year, month)
+			}
+			return 10, nil
+		},
+	}
+	svc := NewAppointmentService(repo, nil)
+
+	blocked, err := svc.CheckSOATLimitForMonth(context.Background(), "861411", "SAN01", 2026, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked {
+		t.Error("expected not blocked for April when under limit")
+	}
+}
+
+func TestCheckSOATLimitForMonth_AtLimit(t *testing.T) {
+	repo := &mockAppointmentRepo{
+		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
+			return 20, nil
+		},
+	}
+	svc := NewAppointmentService(repo, nil)
+
+	blocked, err := svc.CheckSOATLimitForMonth(context.Background(), "861411", "SAN01", 2026, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blocked {
+		t.Error("expected blocked when at SOAT limit for month")
+	}
+}
+
+func TestCheckSOATLimitForMonth_NonSAN01(t *testing.T) {
+	repo := &mockAppointmentRepo{
+		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
+			t.Fatal("CountMonthlyByGroup should not be called for non-SAN01")
+			return 999, nil
+		},
+	}
+	svc := NewAppointmentService(repo, nil)
+
+	blocked, err := svc.CheckSOATLimitForMonth(context.Background(), "861411", "EPS001", 2026, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked {
+		t.Error("expected not blocked for non-SAN01 entity")
+	}
+}
+
+func TestIsSOATGroupCups(t *testing.T) {
+	groupName, maxPerMonth, found := IsSOATGroupCups("861411")
+	if !found {
+		t.Error("expected 861411 to be in soat group")
+	}
+	if groupName != "aplicacion_sustancia" {
+		t.Errorf("expected aplicacion_sustancia, got %s", groupName)
+	}
+	if maxPerMonth != 20 {
+		t.Errorf("expected max 20, got %d", maxPerMonth)
+	}
+
+	_, _, found2 := IsSOATGroupCups("890271")
+	if found2 {
+		t.Error("890271 should not be in any soat group")
 	}
 }
 
@@ -233,7 +352,7 @@ func TestGetDoctorAgeRestriction(t *testing.T) {
 }
 
 func TestCheckPriorConsultation_NotRequired(t *testing.T) {
-	svc := NewAppointmentService(&mockAppointmentRepo{})
+	svc := NewAppointmentService(&mockAppointmentRepo{}, nil)
 	blocked, msg, err := svc.CheckPriorConsultation(context.Background(), "890271", "PAT001")
 	if err != nil {
 		t.Fatal(err)
@@ -252,7 +371,7 @@ func TestCheckPriorConsultation_HasConsultation(t *testing.T) {
 			return true, nil // Patient has required prior consultation
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 	blocked, _, err := svc.CheckPriorConsultation(context.Background(), "053105", "PAT001")
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +387,7 @@ func TestCheckPriorConsultation_Blocked(t *testing.T) {
 			return false, nil // No prior consultation
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 	blocked, msg, err := svc.CheckPriorConsultation(context.Background(), "053105", "PAT001")
 	if err != nil {
 		t.Fatal(err)
@@ -287,7 +406,7 @@ func TestHasExistingAppointment(t *testing.T) {
 			return pid == "PAT001" && cup == "890271", nil
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	has, err := svc.HasExistingAppointment(context.Background(), "PAT001", "890271")
 	if err != nil {
@@ -357,7 +476,7 @@ func TestGetFirstCupName(t *testing.T) {
 
 func TestCreateWithConsecutive_Single(t *testing.T) {
 	repo := &mockAppointmentRepo{}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	input := domain.CreateAppointmentInput{TimeSlot: "202603150800"}
 	id, err := svc.CreateWithConsecutive(context.Background(), input, 1, 30)
@@ -414,7 +533,7 @@ func TestGetUpcomingAppointments(t *testing.T) {
 			}, nil
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	appts, err := svc.GetUpcomingAppointments(context.Background(), "PAT001")
 	if err != nil {
@@ -437,7 +556,7 @@ func TestGetUpcomingAppointments_Error(t *testing.T) {
 			return nil, fmt.Errorf("database unavailable")
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	_, err := svc.GetUpcomingAppointments(context.Background(), "PAT001")
 	if err == nil {
@@ -470,7 +589,7 @@ func TestFindBlockByAppointmentID_Found(t *testing.T) {
 			}, nil
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	appt, block, err := svc.FindBlockByAppointmentID(context.Background(), "a1")
 	if err != nil {
@@ -494,7 +613,7 @@ func TestFindBlockByAppointmentID_NotFound(t *testing.T) {
 			return nil, nil // not found
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	appt, block, err := svc.FindBlockByAppointmentID(context.Background(), "nonexistent")
 	if err != nil {
@@ -523,7 +642,7 @@ func TestCreateWithConsecutive_Error(t *testing.T) {
 			return &domain.Appointment{ID: fmt.Sprintf("appt-%d", callCount)}, nil
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	input := domain.CreateAppointmentInput{
 		TimeSlot: "202603150800",
@@ -548,7 +667,7 @@ func TestCreateWithConsecutive_Multiple(t *testing.T) {
 			return &domain.Appointment{ID: fmt.Sprintf("appt-%s", input.TimeSlot)}, nil
 		},
 	}
-	svc := NewAppointmentService(repo)
+	svc := NewAppointmentService(repo, nil)
 
 	input := domain.CreateAppointmentInput{
 		TimeSlot: "202603150800",

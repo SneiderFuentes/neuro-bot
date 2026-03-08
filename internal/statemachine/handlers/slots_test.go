@@ -322,7 +322,7 @@ func TestCreateAppointment_Success(t *testing.T) {
 			return &domain.Appointment{ID: "apt-100"}, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(repo)
+	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil))
@@ -351,7 +351,7 @@ func TestCreateAppointment_Success(t *testing.T) {
 
 func TestCreateAppointment_SlotNotFound(t *testing.T) {
 	repo := &testutil.MockAppointmentRepo{}
-	apptSvc := services.NewAppointmentService(repo)
+	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil))
@@ -380,7 +380,7 @@ func TestCreateAppointment_SlotTakenError(t *testing.T) {
 			return nil, fmt.Errorf("slot_taken: already booked")
 		},
 	}
-	apptSvc := services.NewAppointmentService(repo)
+	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil))
@@ -414,7 +414,7 @@ func TestCreateAppointment_GenericError(t *testing.T) {
 			return nil, fmt.Errorf("database connection lost")
 		},
 	}
-	apptSvc := services.NewAppointmentService(repo)
+	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil))

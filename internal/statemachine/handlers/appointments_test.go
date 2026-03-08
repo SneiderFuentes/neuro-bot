@@ -57,7 +57,7 @@ func TestFetchAppointments_WithAppts(t *testing.T) {
 			return appts, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 
 	m := sm.NewMachine()
 	RegisterAppointmentHandlers(m, apptSvc, nil)
@@ -79,7 +79,7 @@ func TestFetchAppointments_NoAppts(t *testing.T) {
 			return []domain.Appointment{}, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 
 	m := sm.NewMachine()
 	RegisterAppointmentHandlers(m, apptSvc, nil)
@@ -101,7 +101,7 @@ func TestFetchAppointments_Error(t *testing.T) {
 			return nil, context.DeadlineExceeded
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 
 	m := sm.NewMachine()
 	RegisterAppointmentHandlers(m, apptSvc, nil)
@@ -123,7 +123,7 @@ func TestListAppointments_Selection(t *testing.T) {
 	apptsJSON, _ := json.Marshal(appts)
 
 	apptRepo := &testutil.MockAppointmentRepo{}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 
 	m := sm.NewMachine()
 	RegisterAppointmentHandlers(m, apptSvc, nil)
@@ -152,7 +152,7 @@ func TestAppointmentAction_Confirm(t *testing.T) {
 			return nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 
 	m := sm.NewMachine()
 	RegisterAppointmentHandlers(m, apptSvc, nil)
@@ -185,7 +185,7 @@ func TestAppointmentAction_Cancel(t *testing.T) {
 			return nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 
 	m := sm.NewMachine()
 	RegisterAppointmentHandlers(m, apptSvc, nil)
@@ -212,7 +212,7 @@ func TestAppointmentAction_Back(t *testing.T) {
 	apptsJSON, _ := json.Marshal(appts)
 
 	apptRepo := &testutil.MockAppointmentRepo{}
-	apptSvc := services.NewAppointmentService(apptRepo)
+	apptSvc := services.NewAppointmentService(apptRepo, nil)
 
 	m := sm.NewMachine()
 	RegisterAppointmentHandlers(m, apptSvc, nil)

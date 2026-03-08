@@ -14,10 +14,11 @@ import (
 
 func testEscalationConfig() *config.Config {
 	return &config.Config{
-		BirdTeamGrupoA:    "team-grupo-a",
-		BirdTeamGrupoB:    "team-grupo-b",
-		BirdTeamFallback:  "team-fallback",
-		BirdAgentFallback: "agent-fallback",
+		TeamRoutingEnabled: true,
+		BirdTeamGrupoA:     "team-grupo-a",
+		BirdTeamGrupoB:     "team-grupo-b",
+		BirdTeamFallback:   "team-fallback",
+		BirdAgentFallback:  "agent-fallback",
 	}
 }
 

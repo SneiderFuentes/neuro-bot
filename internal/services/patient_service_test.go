@@ -12,10 +12,11 @@ import (
 // --- Mock PatientRepository ---
 
 type mockPatientRepo struct {
-	findByDocumentFn func(ctx context.Context, doc string) (*domain.Patient, error)
-	findByIDFn       func(ctx context.Context, id string) (*domain.Patient, error)
-	createFn         func(ctx context.Context, input domain.CreatePatientInput) (string, error)
-	updateEntityFn   func(ctx context.Context, patientID, entityCode string) error
+	findByDocumentFn    func(ctx context.Context, doc string) (*domain.Patient, error)
+	findByIDFn          func(ctx context.Context, id string) (*domain.Patient, error)
+	createFn            func(ctx context.Context, input domain.CreatePatientInput) (string, error)
+	updateEntityFn      func(ctx context.Context, patientID, entityCode string) error
+	updateContactInfoFn func(ctx context.Context, patientID, phone, email string) error
 }
 
 func (m *mockPatientRepo) FindByDocument(ctx context.Context, doc string) (*domain.Patient, error) {
@@ -39,6 +40,12 @@ func (m *mockPatientRepo) Create(ctx context.Context, input domain.CreatePatient
 func (m *mockPatientRepo) UpdateEntity(ctx context.Context, patientID, entityCode string) error {
 	if m.updateEntityFn != nil {
 		return m.updateEntityFn(ctx, patientID, entityCode)
+	}
+	return nil
+}
+func (m *mockPatientRepo) UpdateContactInfo(ctx context.Context, patientID, phone, email string) error {
+	if m.updateContactInfoFn != nil {
+		return m.updateContactInfoFn(ctx, patientID, phone, email)
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
+	"github.com/neuro-bot/neuro-bot/internal/config"
 	"github.com/neuro-bot/neuro-bot/internal/worker"
 )
 
@@ -66,7 +67,7 @@ func signedRequest(method, path string, body []byte, secret string) *http.Reques
 func TestHandleWhatsApp_InvalidSignature(t *testing.T) {
 	birdClient := &bird.Client{WebhookSecret: "test-secret"}
 	pool := worker.NewMessageWorkerPool(1, 10)
-	h := NewWebhookHandler(birdClient, pool, nil)
+	h := NewWebhookHandler(birdClient, pool, nil, &config.Config{})
 
 	body := []byte(`{"payload":{}}`)
 	req := httptest.NewRequest("POST", "/api/webhooks/whatsapp", bytes.NewReader(body))
@@ -84,7 +85,7 @@ func TestHandleWhatsApp_InvalidSignature(t *testing.T) {
 func TestHandleWhatsApp_MissingSignature(t *testing.T) {
 	birdClient := &bird.Client{WebhookSecret: "test-secret"}
 	pool := worker.NewMessageWorkerPool(1, 10)
-	h := NewWebhookHandler(birdClient, pool, nil)
+	h := NewWebhookHandler(birdClient, pool, nil, &config.Config{})
 
 	body := []byte(`{"payload":{}}`)
 	req := httptest.NewRequest("POST", "/api/webhooks/whatsapp", bytes.NewReader(body))
@@ -102,7 +103,7 @@ func TestHandleWhatsApp_OutboundIgnored(t *testing.T) {
 	secret := "test-secret"
 	birdClient := &bird.Client{WebhookSecret: secret}
 	pool := worker.NewMessageWorkerPool(1, 10)
-	h := NewWebhookHandler(birdClient, pool, nil)
+	h := NewWebhookHandler(birdClient, pool, nil, &config.Config{})
 
 	// Test both "outbound" (legacy) and "outgoing" (Bird actual)
 	for _, dir := range []string{"outbound", "outgoing"} {
@@ -132,7 +133,7 @@ func TestHandleWhatsApp_InboundText_Enqueued(t *testing.T) {
 	secret := "test-secret"
 	birdClient := &bird.Client{WebhookSecret: secret}
 	pool := worker.NewMessageWorkerPool(1, 50)
-	h := NewWebhookHandler(birdClient, pool, nil)
+	h := NewWebhookHandler(birdClient, pool, nil, &config.Config{})
 
 	event := bird.WebhookEvent{
 		Payload: bird.WebhookPayload{
@@ -167,7 +168,7 @@ func TestHandleWhatsAppOutbound_AgentCommand(t *testing.T) {
 	secret := "test-secret"
 	birdClient := &bird.Client{WebhookSecret: secret, WebhookSecretOutbound: secret}
 	pool := worker.NewMessageWorkerPool(1, 50)
-	h := NewWebhookHandler(birdClient, pool, nil)
+	h := NewWebhookHandler(birdClient, pool, nil, &config.Config{})
 
 	// Test with Bird actual format: "outgoing" direction + Connector (singular)
 	event := bird.WebhookEvent{
@@ -198,7 +199,7 @@ func TestHandleWhatsAppOutbound_AgentCommand_LegacyFormat(t *testing.T) {
 	secret := "test-secret"
 	birdClient := &bird.Client{WebhookSecret: secret, WebhookSecretOutbound: secret}
 	pool := worker.NewMessageWorkerPool(1, 50)
-	h := NewWebhookHandler(birdClient, pool, nil)
+	h := NewWebhookHandler(birdClient, pool, nil, &config.Config{})
 
 	// Test with legacy format: "outbound" direction + Contacts array
 	event := bird.WebhookEvent{
@@ -229,7 +230,7 @@ func TestHandleWhatsAppOutbound_InboundIgnored(t *testing.T) {
 	secret := "test-secret"
 	birdClient := &bird.Client{WebhookSecret: secret, WebhookSecretOutbound: secret}
 	pool := worker.NewMessageWorkerPool(1, 50)
-	h := NewWebhookHandler(birdClient, pool, nil)
+	h := NewWebhookHandler(birdClient, pool, nil, &config.Config{})
 
 	// Both "inbound" (legacy) and "incoming" (Bird actual) should be ignored
 	for _, dir := range []string{"inbound", "incoming"} {
@@ -265,7 +266,7 @@ func TestHandleWhatsAppOutbound_InboundIgnored(t *testing.T) {
 func TestHandleWhatsApp_EmptyBody(t *testing.T) {
 	birdClient := &bird.Client{WebhookSecret: "secret"}
 	pool := worker.NewMessageWorkerPool(1, 10)
-	h := NewWebhookHandler(birdClient, pool, nil)
+	h := NewWebhookHandler(birdClient, pool, nil, &config.Config{})
 
 	req := httptest.NewRequest("POST", "/api/webhooks/whatsapp", bytes.NewReader(nil))
 	rec := httptest.NewRecorder()

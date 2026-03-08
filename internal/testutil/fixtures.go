@@ -129,6 +129,7 @@ func SampleConfig() *config.Config {
 		BirdAPIURL:            "http://localhost:9999",
 		BirdWorkspaceID:       "ws-test",
 		BirdChannelID:         "ch-test",
+		TeamRoutingEnabled: true,
 		BirdTeamGrupoA:    "team-grupo-a",
 		BirdTeamGrupoB:    "team-grupo-b",
 		BirdTeamFallback:  "team-fallback",

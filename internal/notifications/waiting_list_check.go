@@ -35,6 +35,11 @@ func (m *NotificationManager) CheckWaitingListForCups(ctx context.Context, cupsC
 
 	entry := entries[0]
 
+	// Phone whitelist guard
+	if m.cfg != nil && !m.cfg.IsPhoneWhitelisted(entry.PhoneNumber) {
+		return 0
+	}
+
 	// 2. Check if patient already has a future appointment for this CUPS
 	hasFuture, err := m.apptChecker.HasFutureForCup(ctx, entry.PatientID, cupsCode)
 	if err != nil {
@@ -58,6 +63,19 @@ func (m *NotificationManager) CheckWaitingListForCups(ctx context.Context, cupsC
 	}
 	if entry.PreferredDoctorDoc != "" {
 		query.PreferredDoctor = entry.PreferredDoctorDoc
+	}
+
+	// SOAT monthly limit filter for SAN01 WL entries
+	if m.apptSvc != nil && entry.PatientEntity == "SAN01" {
+		if _, _, found := services.IsSOATGroupCups(cupsCode); found {
+			query.MonthFilter = func(year, month int) (bool, error) {
+				blocked, err := m.apptSvc.CheckSOATLimitForMonth(ctx, cupsCode, entry.PatientEntity, year, month)
+				if err != nil {
+					return true, nil // fail-open
+				}
+				return !blocked, nil
+			}
+		}
 	}
 
 	slots, err := m.slotSearcher.GetAvailableSlots(ctx, query)

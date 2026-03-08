@@ -1,29 +1,45 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
+	"github.com/neuro-bot/neuro-bot/internal/config"
 	"github.com/neuro-bot/neuro-bot/internal/notifications"
 	"github.com/neuro-bot/neuro-bot/internal/worker"
 )
+
+// InboxPersister abstracts message inbox operations for crash recovery (WAL pattern).
+type InboxPersister interface {
+	InsertIfNotExists(ctx context.Context, id, phone, rawBody, msgType string, receivedAt time.Time) (bool, error)
+}
 
 type WebhookHandler struct {
 	birdClient    *bird.Client
 	workerPool    *worker.MessageWorkerPool
 	notifyManager *notifications.NotificationManager
+	cfg           *config.Config
+	inboxRepo     InboxPersister // WAL for crash recovery (optional)
 }
 
-func NewWebhookHandler(birdClient *bird.Client, workerPool *worker.MessageWorkerPool, notifyManager *notifications.NotificationManager) *WebhookHandler {
+func NewWebhookHandler(birdClient *bird.Client, workerPool *worker.MessageWorkerPool, notifyManager *notifications.NotificationManager, cfg *config.Config) *WebhookHandler {
 	return &WebhookHandler{
 		birdClient:    birdClient,
 		workerPool:    workerPool,
 		notifyManager: notifyManager,
+		cfg:           cfg,
 	}
+}
+
+// SetInboxRepo injects the message inbox for crash-recovery persistence (WAL pattern).
+func (h *WebhookHandler) SetInboxRepo(repo InboxPersister) {
+	h.inboxRepo = repo
 }
 
 // HandleWhatsApp procesa webhooks de mensajes inbound de Bird
@@ -32,16 +48,43 @@ func (h *WebhookHandler) HandleWhatsApp(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	_ = body
 
 	// Ignorar outbound que lleguen a este endpoint (por si acaso)
 	// Bird usa "incoming"/"outgoing" como valores de direction
 	if event.Payload.Direction == "outbound" || event.Payload.Direction == "outgoing" {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	// Parsear mensaje inbound
 	msg := bird.ParseInboundMessage(event)
+
+	// Testing whitelist: ignorar teléfonos no autorizados
+	if !h.cfg.IsPhoneWhitelisted(msg.Phone) {
+		slog.Debug("phone not whitelisted, ignoring", "phone", msg.Phone)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// WAL: persistir mensaje a DB ANTES de responder 200 a Bird.
+	// Si el bot crashea después de esto, el mensaje se replayea al reiniciar.
+	if h.inboxRepo != nil && msg.ID != "" {
+		inserted, err := h.inboxRepo.InsertIfNotExists(r.Context(), msg.ID, msg.Phone, string(body), msg.MessageType, msg.ReceivedAt)
+		if err != nil {
+			slog.Error("inbox persist failed", "id", msg.ID, "error", err)
+			// DB falla → responder 500 → Bird reintenta (fail-safe)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !inserted {
+			// Duplicado: ya persistido (quizás Bird reintentó). Acknowledge sin encolar.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
+	// Mensaje seguro en DB → responder 200 a Bird
+	w.WriteHeader(http.StatusOK)
 
 	// Clasificar: postback de notificación o mensaje de chatbot?
 	if msg.IsPostback && isNotificationPostback(msg.PostbackPayload) && h.notifyManager != nil && h.notifyManager.HasPending(msg.Phone) {
@@ -66,6 +109,9 @@ func (h *WebhookHandler) HandleWhatsAppOutbound(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// Responder 200 inmediatamente (outbound no necesita WAL)
+	w.WriteHeader(http.StatusOK)
+
 	// Solo procesar outbound (Bird usa "outgoing")
 	if event.Payload.Direction != "outbound" && event.Payload.Direction != "outgoing" {
 		return
@@ -75,7 +121,8 @@ func (h *WebhookHandler) HandleWhatsAppOutbound(w http.ResponseWriter, r *http.R
 }
 
 // verifyAndParse lee el body, verifica HMAC y parsea el evento.
-// Responde 200 inmediatamente si la firma es válida (Bird espera <50ms).
+// NO escribe la respuesta HTTP — cada caller decide cuándo responder 200.
+// Esto permite a HandleWhatsApp persistir el mensaje a DB antes de responder (WAL pattern).
 func (h *WebhookHandler) verifyAndParse(w http.ResponseWriter, r *http.Request, outbound bool) ([]byte, bird.WebhookEvent, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 	body, err := io.ReadAll(r.Body)
@@ -125,9 +172,6 @@ func (h *WebhookHandler) verifyAndParse(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return nil, bird.WebhookEvent{}, false
 	}
-
-	// Responder 200 inmediatamente
-	w.WriteHeader(http.StatusOK)
 
 	var event bird.WebhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {

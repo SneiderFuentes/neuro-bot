@@ -103,7 +103,7 @@ func main() {
 
 	if repos != nil {
 		patientSvc = services.NewPatientService(repos.Patient)
-		appointmentSvc = services.NewAppointmentService(repos.Appointment)
+		appointmentSvc = services.NewAppointmentService(repos.Appointment, cfg)
 	}
 
 	// State machine (interceptores + handlers se registran por fase)
@@ -189,12 +189,33 @@ func main() {
 		CloseMin:     cfg.InactivityCloseMin,
 	})
 
+	// Message inbox (WAL for crash recovery)
+	inboxRepo := localrepo.NewInboxRepo(localDB)
+
 	// Worker pool (10 workers, buffer 100, overflow hasta 20)
 	workerPool := worker.NewMessageWorkerPool(10, 100)
 	workerPool.SetDependencies(sessionManager, birdClient, machine)
 	workerPool.SetTracker(tracker)
 	workerPool.SetOCRService(ocrSvc)
+	workerPool.SetInboxRepo(inboxRepo)
 	workerPool.Start(ctx)
+
+	// WAL replay: re-process messages that weren't completed before last shutdown/crash
+	if pending, err := inboxRepo.FindPending(ctx); err != nil {
+		slog.Error("inbox replay query failed", "error", err)
+	} else if len(pending) > 0 {
+		slog.Info("replaying unprocessed inbox messages", "count", len(pending))
+		for _, row := range pending {
+			var event bird.WebhookEvent
+			if err := json.Unmarshal([]byte(row.RawBody), &event); err != nil {
+				slog.Error("inbox replay parse failed", "id", row.ID, "error", err)
+				inboxRepo.MarkDone(ctx, row.ID)
+				continue
+			}
+			msg := bird.ParseInboundMessage(event)
+			workerPool.Enqueue(msg)
+		}
+	}
 
 	// Fase 13: Inyectar dependencias de lista de espera al NotificationManager
 	if notifyManager != nil {
@@ -207,22 +228,29 @@ func main() {
 	}
 
 	if repos != nil && notifyManager != nil {
+		schedulerRunRepo := localrepo.NewSchedulerRunRepo(localDB)
+
 		sched := scheduler.NewScheduler(loc)
+		sched.SetRunRepo(schedulerRunRepo)
 		tasks := &scheduler.Tasks{
 			AppointmentRepo: repos.Appointment,
+			AppointmentSvc:  appointmentSvc,
 			BirdClient:      birdClient,
 			NotifyManager:   notifyManager,
 			WaitingListRepo: waitingListRepo,
 			SlotService:     slotSvc,
 			Cfg:             cfg,
 			Tracker:         tracker,
+			InboxRepo:       inboxRepo,
 		}
 		tasks.RegisterAll(sched)
+		sched.RunMissedTasks(ctx) // Catch-up missed tasks before starting the regular loop
 		go sched.Start(ctx)
 	}
 
-	// Webhook handler (con NotificationManager para postbacks proactivos)
-	webhookHandler := api.NewWebhookHandler(birdClient, workerPool, notifyManager)
+	// Webhook handler (con NotificationManager para postbacks proactivos + WAL inbox)
+	webhookHandler := api.NewWebhookHandler(birdClient, workerPool, notifyManager, cfg)
+	webhookHandler.SetInboxRepo(inboxRepo)
 
 	// Fase 13+14: Internal API endpoints (protegidos con API key)
 	startTime := time.Now()

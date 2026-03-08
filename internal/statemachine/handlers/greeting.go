@@ -7,6 +7,7 @@ import (
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/config"
+	"github.com/neuro-bot/neuro-bot/internal/domain"
 	"github.com/neuro-bot/neuro-bot/internal/session"
 	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
 )
@@ -231,20 +232,9 @@ func buildEntityTypeRows() []sm.ListRow {
 	for i := 1; i <= 7; i++ {
 		rows[i-1] = sm.ListRow{
 			ID:          fmt.Sprintf("ct_%d", i),
-			Title:       fmt.Sprintf("%d", i),
-			Description: entityCategoryLabels[i],
+			Title:       domain.EntityCategoryLabels[i],
+			Description: "",
 		}
 	}
 	return rows
-}
-
-// entityCategoryLabels mirrors domain.EntityCategoryLabels for local use.
-var entityCategoryLabels = map[int]string{
-	1: "PARTICULAR",
-	2: "EPS",
-	3: "PREPAGADA",
-	4: "REGIMEN ESPECIAL",
-	5: "SOAT",
-	6: "ARL",
-	7: "POLIZA",
 }

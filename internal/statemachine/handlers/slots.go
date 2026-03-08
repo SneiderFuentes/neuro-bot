@@ -34,7 +34,7 @@ func RegisterSlotHandlers(
 	soatRepo repository.SoatRepository,
 	waitingListRepo WaitingListCreator,
 ) {
-	m.Register(sm.StateSearchSlots, searchSlotsHandler(slotSvc, procRepo))
+	m.Register(sm.StateSearchSlots, searchSlotsHandler(slotSvc, apptSvc, procRepo))
 	m.Register(sm.StateShowSlots, showSlotsHandler())
 	m.Register(sm.StateNoSlotsAvailable, noSlotsHandler(waitingListRepo))
 	m.Register(sm.StateOfferWaitingList, offerWaitingListHandler(waitingListRepo))
@@ -66,7 +66,7 @@ func RegisterSlotHandlers(
 }
 
 // SEARCH_SLOTS (automático) — busca slots disponibles con todos los filtros.
-func searchSlotsHandler(slotSvc *services.SlotService, procRepo repository.ProcedureRepository) sm.StateHandler {
+func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		cupsCode := sess.GetContext("cups_code")
 		age, _ := strconv.Atoi(sess.GetContext("patient_age"))
@@ -105,6 +105,18 @@ func searchSlotsHandler(slotSvc *services.SlotService, procRepo repository.Proce
 			AfterDate:       sess.GetContext("slots_after_date"),
 			MaxSlots:        5,
 			ClinicAddress:   address,
+		}
+
+		// SOAT monthly limit filter (SAN01 + soatGroup CUPS)
+		if sess.GetContext("soat_limit_check") == "1" && apptSvc != nil {
+			entity := sess.GetContext("patient_entity")
+			query.MonthFilter = func(year, month int) (bool, error) {
+				blocked, err := apptSvc.CheckSOATLimitForMonth(ctx, cupsCode, entity, year, month)
+				if err != nil {
+					return true, nil // fail-open
+				}
+				return !blocked, nil
+			}
 		}
 
 		slots, err := slotSvc.GetAvailableSlots(ctx, query)

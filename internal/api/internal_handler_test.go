@@ -60,7 +60,7 @@ func (m *mockApptRepoAPI) HasFutureForCup(ctx context.Context, pid, cup string) 
 func (m *mockApptRepoAPI) FindLastDoctorForCups(ctx context.Context, pid string, cups []string) (string, error) {
 	return "", nil
 }
-func (m *mockApptRepoAPI) CountMonthlyByGroup(ctx context.Context, cups []string) (int, error) {
+func (m *mockApptRepoAPI) CountMonthlyByGroup(ctx context.Context, cups []string, year, month int) (int, error) {
 	return 0, nil
 }
 func (m *mockApptRepoAPI) FindPendingByDate(ctx context.Context, date string) ([]domain.Appointment, error) {

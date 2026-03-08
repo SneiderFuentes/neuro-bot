@@ -71,8 +71,8 @@ func buildEntityTypeList() *sm.ListMessage {
 	for i := 1; i <= 7; i++ {
 		rows[i-1] = sm.ListRow{
 			ID:          fmt.Sprintf("ct_%d", i),
-			Title:       fmt.Sprintf("%d", i),
-			Description: domain.EntityCategoryLabels[i],
+			Title:       domain.EntityCategoryLabels[i],
+			Description: "",
 		}
 	}
 	return &sm.ListMessage{

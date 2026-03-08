@@ -54,3 +54,17 @@ func ParseColombianPhone(phoneString string) string {
 
 	return ""
 }
+
+// FormatPhoneDisplay formatea un teléfono para mostrar al usuario.
+// "+573103343616" → "+57 310 334 3616", vacío → "(no registrado)"
+func FormatPhoneDisplay(phone string) string {
+	parsed := ParseColombianPhone(phone)
+	if parsed == "" {
+		if phone == "" {
+			return "(no registrado)"
+		}
+		return phone
+	}
+	d := parsed[3:] // quitar "+57"
+	return "+57 " + d[:3] + " " + d[3:6] + " " + d[6:]
+}

@@ -5,17 +5,20 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
+	"github.com/neuro-bot/neuro-bot/internal/config"
 	"github.com/neuro-bot/neuro-bot/internal/domain"
 	"github.com/neuro-bot/neuro-bot/internal/repository"
 )
 
 type AppointmentService struct {
 	repo repository.AppointmentRepository
+	cfg  *config.Config
 }
 
-func NewAppointmentService(repo repository.AppointmentRepository) *AppointmentService {
-	return &AppointmentService{repo: repo}
+func NewAppointmentService(repo repository.AppointmentRepository, cfg *config.Config) *AppointmentService {
+	return &AppointmentService{repo: repo, cfg: cfg}
 }
 
 // GetUpcomingAppointments retorna las citas futuras no canceladas del paciente
@@ -164,6 +167,18 @@ var soatGroups = map[string]struct {
 	"otros_procedimientos":      {MaxPerMonth: 932, CupsCodes: []string{"891515", "891514", "930820", "891511", "891509", "930860", "891530", "952303", "954626", "952302", "930103", "930821", "954624", "954625", "952301", "930801", "891503", "891508"}},
 }
 
+// IsSOATGroupCups returns the group name, max per month, and whether the CUPS code belongs to a SOAT group.
+func IsSOATGroupCups(cupsCode string) (groupName string, maxPerMonth int, found bool) {
+	for name, group := range soatGroups {
+		for _, code := range group.CupsCodes {
+			if code == cupsCode {
+				return name, group.MaxPerMonth, true
+			}
+		}
+	}
+	return "", 0, false
+}
+
 // Restricciones de edad por doctor (hardcoded por negocio)
 var doctorAgeRestrictions = map[string]struct {
 	MinAge int
@@ -194,33 +209,23 @@ func (s *AppointmentService) CheckPriorConsultation(ctx context.Context, cupsCod
 	return true, "Este procedimiento requiere una *consulta previa* con el especialista. Por favor agenda primero la consulta y luego el examen.", nil
 }
 
-// CheckSOATLimit verifica si el grupo CUPS ha alcanzado el límite mensual.
-// Solo aplica para entidades SAN01 y SAN02.
+// CheckSOATLimit verifica si el grupo CUPS ha alcanzado el límite mensual (mes actual).
+// Solo aplica para entidad SAN01. Deshabilitado con CUPS_GROUP_LIMITS_ENABLED=false.
 func (s *AppointmentService) CheckSOATLimit(ctx context.Context, cupsCode, entity string) (bool, string, error) {
-	if entity != "SAN01" && entity != "SAN02" {
+	if s.cfg != nil && !s.cfg.CupsGroupLimitsEnabled {
+		return false, "", nil
+	}
+	if entity != "SAN01" {
 		return false, "", nil
 	}
 
-	var groupName string
-	var maxPerMonth int
-	for name, group := range soatGroups {
-		for _, code := range group.CupsCodes {
-			if code == cupsCode {
-				groupName = name
-				maxPerMonth = group.MaxPerMonth
-				break
-			}
-		}
-		if groupName != "" {
-			break
-		}
-	}
-
-	if groupName == "" {
+	groupName, maxPerMonth, found := IsSOATGroupCups(cupsCode)
+	if !found {
 		return false, "", nil
 	}
 
-	count, err := s.repo.CountMonthlyByGroup(ctx, soatGroups[groupName].CupsCodes)
+	now := time.Now()
+	count, err := s.repo.CountMonthlyByGroup(ctx, soatGroups[groupName].CupsCodes, now.Year(), int(now.Month()))
 	if err != nil {
 		return false, "", err
 	}
@@ -230,6 +235,29 @@ func (s *AppointmentService) CheckSOATLimit(ctx context.Context, cupsCode, entit
 	}
 
 	return false, "", nil
+}
+
+// CheckSOATLimitForMonth verifica si el grupo CUPS ha alcanzado el límite para un mes específico.
+// Retorna true si está bloqueado (al límite).
+func (s *AppointmentService) CheckSOATLimitForMonth(ctx context.Context, cupsCode, entity string, year, month int) (bool, error) {
+	if s.cfg != nil && !s.cfg.CupsGroupLimitsEnabled {
+		return false, nil
+	}
+	if entity != "SAN01" {
+		return false, nil
+	}
+
+	groupName, maxPerMonth, found := IsSOATGroupCups(cupsCode)
+	if !found {
+		return false, nil
+	}
+
+	count, err := s.repo.CountMonthlyByGroup(ctx, soatGroups[groupName].CupsCodes, year, month)
+	if err != nil {
+		return false, err
+	}
+
+	return count >= maxPerMonth, nil
 }
 
 // HasExistingAppointment verifica si el paciente ya tiene una cita futura para el CUPS.

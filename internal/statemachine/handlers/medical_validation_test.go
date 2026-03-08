@@ -13,7 +13,7 @@ import (
 // mockApptRepo for medical validation tests
 type mockApptRepo struct {
 	hasFutureForCupFn     func(ctx context.Context, pid, cup string) (bool, error)
-	countMonthlyByGroupFn func(ctx context.Context, cups []string) (int, error)
+	countMonthlyByGroupFn func(ctx context.Context, cups []string, year, month int) (int, error)
 }
 
 func (m *mockApptRepo) FindByID(ctx context.Context, id string) (*domain.Appointment, error) {
@@ -45,9 +45,9 @@ func (m *mockApptRepo) HasFutureForCup(ctx context.Context, pid, cup string) (bo
 func (m *mockApptRepo) FindLastDoctorForCups(ctx context.Context, pid string, cups []string) (string, error) {
 	return "", nil
 }
-func (m *mockApptRepo) CountMonthlyByGroup(ctx context.Context, cups []string) (int, error) {
+func (m *mockApptRepo) CountMonthlyByGroup(ctx context.Context, cups []string, year, month int) (int, error) {
 	if m.countMonthlyByGroupFn != nil {
-		return m.countMonthlyByGroupFn(ctx, cups)
+		return m.countMonthlyByGroupFn(ctx, cups, year, month)
 	}
 	return 0, nil
 }
@@ -62,7 +62,7 @@ func (m *mockApptRepo) RescheduleDate(ctx context.Context, agendaID int, doctorD
 
 func TestAskContrasted_NotContrastable_Skip(t *testing.T) {
 	gfrSvc := services.NewGFRService()
-	apptSvc := services.NewAppointmentService(&mockApptRepo{})
+	apptSvc := services.NewAppointmentService(&mockApptRepo{}, nil)
 
 	m := sm.NewMachine()
 	RegisterMedicalValidationHandlers(m, gfrSvc, apptSvc)
@@ -125,7 +125,7 @@ func TestAskContrasted_Yes(t *testing.T) {
 
 func TestAskPregnancy_MaleSkip(t *testing.T) {
 	gfrSvc := services.NewGFRService()
-	apptSvc := services.NewAppointmentService(&mockApptRepo{})
+	apptSvc := services.NewAppointmentService(&mockApptRepo{}, nil)
 
 	m := sm.NewMachine()
 	RegisterMedicalValidationHandlers(m, gfrSvc, apptSvc)
@@ -169,7 +169,7 @@ func TestGfrCreatinine_ValidInput(t *testing.T) {
 
 func TestGfrCreatinine_InvalidInput(t *testing.T) {
 	gfrSvc := services.NewGFRService()
-	apptSvc := services.NewAppointmentService(&mockApptRepo{})
+	apptSvc := services.NewAppointmentService(&mockApptRepo{}, nil)
 
 	m := sm.NewMachine()
 	RegisterMedicalValidationHandlers(m, gfrSvc, apptSvc)
@@ -286,7 +286,7 @@ func TestCheckExisting_NoExisting(t *testing.T) {
 			return false, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(repo)
+	apptSvc := services.NewAppointmentService(repo, nil)
 
 	// Only register the single handler
 	m := sm.NewMachine()
@@ -312,7 +312,7 @@ func TestCheckExisting_HasExisting(t *testing.T) {
 			return true, nil
 		},
 	}
-	apptSvc := services.NewAppointmentService(repo)
+	apptSvc := services.NewAppointmentService(repo, nil)
 
 	// Only register the single handler
 	m := sm.NewMachine()
@@ -790,7 +790,7 @@ func TestAppointmentExists(t *testing.T) {
 // ==================== CheckPriorConsult ====================
 
 func TestCheckPriorConsult_NotBlocked(t *testing.T) {
-	apptSvc := services.NewAppointmentService(&mockApptRepo{})
+	apptSvc := services.NewAppointmentService(&mockApptRepo{}, nil)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateCheckPriorConsult, checkPriorConsultHandler(apptSvc))
@@ -811,7 +811,7 @@ func TestCheckPriorConsult_NotBlocked(t *testing.T) {
 // ==================== CheckSoatLimit ====================
 
 func TestCheckSoatLimit_NotBlocked(t *testing.T) {
-	apptSvc := services.NewAppointmentService(&mockApptRepo{})
+	apptSvc := services.NewAppointmentService(&mockApptRepo{}, nil)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateCheckSoatLimit, checkSoatLimitHandler(apptSvc))
@@ -826,6 +826,29 @@ func TestCheckSoatLimit_NotBlocked(t *testing.T) {
 	}
 	if result.NextState != sm.StateCheckAgeRestriction {
 		t.Errorf("expected CHECK_AGE_RESTRICTION, got %s", result.NextState)
+	}
+}
+
+func TestCheckSoatLimit_SAN01_SetsFlag(t *testing.T) {
+	apptSvc := services.NewAppointmentService(&mockApptRepo{}, nil)
+
+	m := sm.NewMachine()
+	m.Register(sm.StateCheckSoatLimit, checkSoatLimitHandler(apptSvc))
+
+	sess := testSess(sm.StateCheckSoatLimit)
+	sess.Context["cups_code"] = "861411" // aplicacion_sustancia → in soatGroup
+	sess.Context["patient_entity"] = "SAN01"
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateCheckAgeRestriction {
+		t.Errorf("expected CHECK_AGE_RESTRICTION, got %s", result.NextState)
+	}
+	// Should set flag, not block
+	if result.UpdateCtx == nil || result.UpdateCtx["soat_limit_check"] != "1" {
+		t.Error("expected soat_limit_check=1 in UpdateCtx for SAN01 + soatGroup CUPS")
 	}
 }
 

@@ -29,10 +29,11 @@ type SlotQuery struct {
 	IsContrasted    bool
 	IsSedated       bool
 	Espacios        int    // Consecutive slots needed
-	PreferredDoctor string // Doctor document (from prior consultation)
-	AfterDate       string // For pagination (YYYY-MM-DD)
-	MaxSlots        int    // Default 5
-	ClinicAddress   string // Procedure clinic address
+	PreferredDoctor string                          // Doctor document (from prior consultation)
+	AfterDate       string                          // For pagination (YYYY-MM-DD)
+	MaxSlots        int                             // Default 5
+	ClinicAddress   string                          // Procedure clinic address
+	MonthFilter     func(year, month int) (bool, error) // Optional: true = month allowed, nil = no filter
 }
 
 type AvailableSlot struct {
@@ -112,11 +113,32 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 	// 6. Calculate available slots per working day
 	var allSlots []AvailableSlot
 	configCache := make(map[string]*domain.ScheduleConfig)
+	monthCache := make(map[string]bool) // "YYYY-MM" → allowed
 
 	for _, day := range workingDays {
 		// Skip if before pagination cursor
 		if query.AfterDate != "" && day.Date <= query.AfterDate {
 			continue
+		}
+
+		// SOAT monthly limit filter
+		if query.MonthFilter != nil {
+			dt, _ := time.Parse("2006-01-02", day.Date)
+			key := fmt.Sprintf("%d-%02d", dt.Year(), int(dt.Month()))
+			if allowed, ok := monthCache[key]; ok {
+				if !allowed {
+					continue
+				}
+			} else {
+				ok2, err2 := query.MonthFilter(dt.Year(), int(dt.Month()))
+				if err2 != nil {
+					ok2 = true // fail-open
+				}
+				monthCache[key] = ok2
+				if !ok2 {
+					continue
+				}
+			}
 		}
 
 		// Contrasted: no Saturdays

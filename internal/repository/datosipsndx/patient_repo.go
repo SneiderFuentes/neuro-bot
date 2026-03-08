@@ -117,3 +117,13 @@ func (r *PatientRepo) UpdateEntity(ctx context.Context, patientID, entityCode st
 	}
 	return nil
 }
+
+func (r *PatientRepo) UpdateContactInfo(ctx context.Context, patientID, phone, email string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE pacientes SET Telefono = ?, CorreoE = ?, FechaModificado = NOW(), ModificadoPor = 0 WHERE NumeroPaciente = ?`,
+		phone, email, patientID)
+	if err != nil {
+		return fmt.Errorf("update contact info: %w", err)
+	}
+	return nil
+}

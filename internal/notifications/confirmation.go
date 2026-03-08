@@ -156,45 +156,123 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 	}
 }
 
-// handleConfirmationTimeout handles the 6-hour no-response case.
+// handleConfirmationTimeout implements a 4-step escalation chain:
+//
+//	Step 0 → Follow-up #1 (friendly text, NO agent)
+//	Step 1 → Follow-up #2 (direct text, NO agent)
+//	Step 2 → Safety escalation (IVR didn't run — escalate to agent)
+//	Step 3 → Post-IVR timeout (normal escalation to agent)
+//
 // NOTE: Caller (handleTimeout) already removed pending from sync.Map and DB via LoadAndDelete.
-// If retrying, we re-store the pending notification.
 func (m *NotificationManager) handleConfirmationTimeout(pending *PendingNotification) {
-	if pending.RetryCount < 2 {
-		// Send follow-up message
+	switch pending.RetryCount {
+	case 0:
+		// Step 1: Follow-up #1 — friendly text, NO agent assignment
 		m.birdClient.SendText(pending.Phone, pending.ConversationID,
-			"Sigues ahi?\n\nTe enviamos un recordatorio de tu cita. "+
-				"Por favor confirma o cancela para que podamos gestionar tu espacio.")
+			"Hola! Aun no recibimos tu respuesta sobre tu cita de manana. "+
+				"Por favor confirma, cancela o reprograma para que podamos gestionar tu espacio.")
 
-		// Escalate to agent in Bird Inbox
-		if pending.ConversationID != "" {
-			m.birdClient.UpdateFeedItem(pending.ConversationID, pending.BirdMessageID,
-				false, m.cfg.BirdTeamFallback, "")
-		}
-
-		// Re-register with retry++ and new timer (re-store since LoadAndDelete removed it)
-		pending.RetryCount++
-		pending.Timer = time.AfterFunc(6*time.Hour, func() {
-			m.handleTimeout(pending.Phone)
-		})
+		pending.RetryCount = 1
+		duration := time.Duration(safeHours(m.cfg.ConfirmFollowup2Hours, 3)) * time.Hour
+		pending.Timer = time.AfterFunc(duration, func() { m.handleTimeout(pending.Phone) })
 		m.pending.Store(pending.Phone, pending)
 
-		// Persist retry to DB
 		if m.persister != nil {
-			expiresAt := time.Now().Add(6 * time.Hour)
+			expiresAt := time.Now().Add(duration)
 			if err := m.persister.Upsert(context.Background(), pending.Phone, pending.Type,
 				pending.AppointmentID, pending.WaitingListID, pending.BirdMessageID, pending.ConversationID,
 				pending.RetryCount, expiresAt); err != nil {
-				slog.Error("persist retry notification", "phone", pending.Phone, "error", err)
+				slog.Error("persist followup1", "phone", pending.Phone, "error", err)
 			}
 		}
 
-		slog.Info("proactive followup sent", "phone", pending.Phone, "retry", pending.RetryCount)
-	} else {
-		// Max retries reached — will be picked up by IVR at 15:00
-		slog.Info("proactive no response, max retries",
-			"phone", pending.Phone,
-			"appointment_id", pending.AppointmentID,
-			"retries", pending.RetryCount)
+		slog.Info("confirmation followup 1 sent", "phone", pending.Phone)
+
+	case 1:
+		// Step 2: Follow-up #2 — direct text, NO agent assignment
+		m.birdClient.SendText(pending.Phone, pending.ConversationID,
+			"Recordatorio: Tu cita de manana aun no ha sido confirmada. "+
+				"Si no recibimos respuesta, te llamaremos para confirmar.")
+
+		pending.RetryCount = 2
+		// Safety-net timer: 2h (wait for 15:00 IVR task) + PostIVR minutes + 30min buffer
+		duration := 2*time.Hour + time.Duration(safeMinutes(m.cfg.ConfirmPostIVRMinutes, 30)+30)*time.Minute
+		pending.Timer = time.AfterFunc(duration, func() { m.handleTimeout(pending.Phone) })
+		m.pending.Store(pending.Phone, pending)
+
+		if m.persister != nil {
+			expiresAt := time.Now().Add(duration)
+			if err := m.persister.Upsert(context.Background(), pending.Phone, pending.Type,
+				pending.AppointmentID, pending.WaitingListID, pending.BirdMessageID, pending.ConversationID,
+				pending.RetryCount, expiresAt); err != nil {
+				slog.Error("persist followup2", "phone", pending.Phone, "error", err)
+			}
+		}
+
+		slog.Info("confirmation followup 2 sent", "phone", pending.Phone)
+
+	case 2, 3:
+		// Step 3/4: Escalate to agent (step 2 = IVR didn't run, step 3 = post-IVR)
+		m.escalateToAgent(pending)
 	}
+}
+
+// escalateToAgent sends an internal note to Bird Inbox, messages the patient,
+// and assigns the conversation to the best available agent. Called as the final
+// step of the confirmation escalation chain.
+func (m *NotificationManager) escalateToAgent(pending *PendingNotification) {
+	ctx := context.Background()
+
+	// 1. Look up appointment details for the note
+	appt, _, _ := m.apptSvc.FindBlockByAppointmentID(ctx, pending.AppointmentID)
+
+	patientName := ""
+	var note string
+	if appt != nil {
+		patientName = appt.PatientName
+		cupName := services.GetFirstCupName(*appt)
+		note = fmt.Sprintf("Paciente %s NO confirmo cita de manana.\n"+
+			"Fecha: %s | Hora: %s\n"+
+			"Procedimiento: %s\n"+
+			"No respondio a: mensajes WhatsApp + llamada IVR.\n"+
+			"Cita ID: %s",
+			patientName,
+			utils.FormatFriendlyDate(appt.Date),
+			services.FormatTimeSlot(appt.TimeSlot),
+			cupName,
+			pending.AppointmentID)
+	} else {
+		note = fmt.Sprintf("Paciente NO confirmo cita.\nCita ID: %s", pending.AppointmentID)
+	}
+
+	// 2. Internal note — visible ONLY in Bird Inbox (patient doesn't see it on WhatsApp)
+	if pending.ConversationID != "" {
+		m.birdClient.SendInternalText(pending.ConversationID, note)
+	}
+
+	// 3. Message to patient
+	m.birdClient.SendText(pending.Phone, pending.ConversationID,
+		"Un asistente del centro se comunicara contigo para confirmar tu cita de manana.")
+
+	// 4. Assign to best available agent
+	if pending.ConversationID != "" {
+		m.birdClient.EscalateToAgent(
+			pending.ConversationID, pending.Phone,
+			m.cfg.BirdTeamFallback, "Call Center",
+			patientName, m.cfg.BirdTeamFallback)
+	}
+
+	// 5. Log event
+	if m.tracker != nil {
+		m.tracker.LogEvent(ctx, "", pending.Phone, "notification_escalated_agent",
+			map[string]interface{}{
+				"appointment_id": pending.AppointmentID,
+				"retry_count":    pending.RetryCount,
+			})
+	}
+
+	slog.Info("confirmation escalated to agent",
+		"phone", pending.Phone,
+		"appointment_id", pending.AppointmentID,
+		"retry_count", pending.RetryCount)
 }

@@ -455,7 +455,7 @@ func (r *AppointmentRepo) FindLastDoctorForCups(ctx context.Context, patientID s
 	return doctorDoc, nil
 }
 
-func (r *AppointmentRepo) CountMonthlyByGroup(ctx context.Context, cupsCodes []string) (int, error) {
+func (r *AppointmentRepo) CountMonthlyByGroup(ctx context.Context, cupsCodes []string, year, month int) (int, error) {
 	if len(cupsCodes) == 0 {
 		return 0, nil
 	}
@@ -470,9 +470,11 @@ func (r *AppointmentRepo) CountMonthlyByGroup(ctx context.Context, cupsCodes []s
 	query := fmt.Sprintf(`SELECT COUNT(DISTINCT c.IdCita) FROM citas c
 	          INNER JOIN pxcita px ON px.IdCita = c.IdCita
 	          WHERE px.CUPS IN (%s)
-	            AND MONTH(c.FeCita) = MONTH(CURDATE())
-	            AND YEAR(c.FeCita) = YEAR(CURDATE())
+	            AND MONTH(c.FeCita) = ?
+	            AND YEAR(c.FeCita) = ?
 	            AND c.Cancelada = 0 AND c.Remonte = 0`, strings.Join(placeholders, ","))
+
+	args = append(args, month, year)
 
 	var count int
 	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)

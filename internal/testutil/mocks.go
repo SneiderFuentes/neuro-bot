@@ -14,10 +14,11 @@ import (
 
 // MockPatientRepo implements repository.PatientRepository.
 type MockPatientRepo struct {
-	FindByDocumentFn func(ctx context.Context, doc string) (*domain.Patient, error)
-	FindByIDFn       func(ctx context.Context, id string) (*domain.Patient, error)
-	CreateFn         func(ctx context.Context, input domain.CreatePatientInput) (string, error)
-	UpdateEntityFn   func(ctx context.Context, patientID, entityCode string) error
+	FindByDocumentFn    func(ctx context.Context, doc string) (*domain.Patient, error)
+	FindByIDFn          func(ctx context.Context, id string) (*domain.Patient, error)
+	CreateFn            func(ctx context.Context, input domain.CreatePatientInput) (string, error)
+	UpdateEntityFn      func(ctx context.Context, patientID, entityCode string) error
+	UpdateContactInfoFn func(ctx context.Context, patientID, phone, email string) error
 }
 
 func (m *MockPatientRepo) FindByDocument(ctx context.Context, doc string) (*domain.Patient, error) {
@@ -44,6 +45,12 @@ func (m *MockPatientRepo) UpdateEntity(ctx context.Context, patientID, entityCod
 	}
 	return nil
 }
+func (m *MockPatientRepo) UpdateContactInfo(ctx context.Context, patientID, phone, email string) error {
+	if m.UpdateContactInfoFn != nil {
+		return m.UpdateContactInfoFn(ctx, patientID, phone, email)
+	}
+	return nil
+}
 
 // MockAppointmentRepo implements repository.AppointmentRepository.
 type MockAppointmentRepo struct {
@@ -57,7 +64,7 @@ type MockAppointmentRepo struct {
 	CancelBatchFn           func(ctx context.Context, ids []string, reason, channel, channelID string) error
 	HasFutureForCupFn       func(ctx context.Context, patientID, cupCode string) (bool, error)
 	FindLastDoctorForCupsFn func(ctx context.Context, patientID string, cups []string) (string, error)
-	CountMonthlyByGroupFn   func(ctx context.Context, cupsCodes []string) (int, error)
+	CountMonthlyByGroupFn   func(ctx context.Context, cupsCodes []string, year, month int) (int, error)
 	FindPendingByDateFn     func(ctx context.Context, date string) ([]domain.Appointment, error)
 	RescheduleDateFn        func(ctx context.Context, agendaID int, doctorDoc, oldDate, newDate string) (int, error)
 }
@@ -132,9 +139,9 @@ func (m *MockAppointmentRepo) FindLastDoctorForCups(ctx context.Context, patient
 	}
 	return "", nil
 }
-func (m *MockAppointmentRepo) CountMonthlyByGroup(ctx context.Context, cupsCodes []string) (int, error) {
+func (m *MockAppointmentRepo) CountMonthlyByGroup(ctx context.Context, cupsCodes []string, year, month int) (int, error) {
 	if m.CountMonthlyByGroupFn != nil {
-		return m.CountMonthlyByGroupFn(ctx, cupsCodes)
+		return m.CountMonthlyByGroupFn(ctx, cupsCodes, year, month)
 	}
 	return 0, nil
 }

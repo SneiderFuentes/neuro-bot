@@ -14,6 +14,7 @@ type PatientRepository interface {
 	FindByID(ctx context.Context, id string) (*domain.Patient, error)
 	Create(ctx context.Context, input domain.CreatePatientInput) (string, error)
 	UpdateEntity(ctx context.Context, patientID, entityCode string) error
+	UpdateContactInfo(ctx context.Context, patientID, phone, email string) error
 }
 
 // AppointmentRepository — operaciones sobre citas en BD externa.
@@ -29,7 +30,7 @@ type AppointmentRepository interface {
 	CancelBatch(ctx context.Context, ids []string, reason, channel, channelID string) error
 	HasFutureForCup(ctx context.Context, patientID, cupCode string) (bool, error)
 	FindLastDoctorForCups(ctx context.Context, patientID string, cups []string) (string, error)
-	CountMonthlyByGroup(ctx context.Context, cupsCodes []string) (int, error)
+	CountMonthlyByGroup(ctx context.Context, cupsCodes []string, year, month int) (int, error)
 	FindPendingByDate(ctx context.Context, date string) ([]domain.Appointment, error)
 	RescheduleDate(ctx context.Context, agendaID int, doctorDoc, oldDate, newDate string) (int, error)
 }
