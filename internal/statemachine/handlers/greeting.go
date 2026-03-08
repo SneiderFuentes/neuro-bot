@@ -273,7 +273,8 @@ func showHelpHandler() sm.StateHandler {
 			"• *Documento:* Ingresa solo numeros, sin puntos ni espacios\n" +
 			"• *Orden medica:* Envia una foto clara donde se lean bien los procedimientos\n" +
 			"• *Seleccionar opciones:* Cuando te muestre una lista, toca el boton para ver las opciones\n" +
-			"• *Horarios:* Te mostrare los horarios disponibles mas cercanos. Si no hay, puedes quedar en lista de espera\n\n" +
+			"• *Horarios:* Te mostrare los horarios disponibles mas cercanos. Si no hay, puedes quedar en lista de espera\n" +
+			"• *Volver al menu:* Escribe *menu* o *0* en cualquier momento para volver al inicio\n\n" +
 			"Si en algun momento necesitas ayuda humana, el bot te conectara con un agente.\n\n" +
 			"*Horario de atencion:*\n" +
 			"Lunes a viernes: 7:00 AM - 6:00 PM\n" +
