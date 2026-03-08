@@ -70,54 +70,17 @@ func wrapOpenAIResponse(content string) string {
 
 // --- Tests ---
 
-func registerAskMedicalOrderConfig(m *sm.Machine) {
-	m.RegisterWithConfig(sm.StateAskMedicalOrder, sm.HandlerConfig{
-		InputType: sm.InputButton,
-		Options:   []string{"order_photo", "order_manual"},
-		Handler:   askMedicalOrderHandler(),
-	})
-}
-
-func TestAskMedicalOrder_Photo(t *testing.T) {
+func TestAskMedicalOrder_Automatic(t *testing.T) {
 	m := sm.NewMachine()
-	registerAskMedicalOrderConfig(m)
+	m.Register(sm.StateAskMedicalOrder, askMedicalOrderHandler())
 
 	sess := testSess(sm.StateAskMedicalOrder)
-	result, err := m.Process(context.Background(), sess, postbackM("order_photo"))
+	result, err := m.Process(context.Background(), sess, textM("any"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.NextState != sm.StateUploadMedicalOrder {
 		t.Errorf("expected UPLOAD_MEDICAL_ORDER, got %s", result.NextState)
-	}
-}
-
-func TestAskMedicalOrder_Manual(t *testing.T) {
-	m := sm.NewMachine()
-	registerAskMedicalOrderConfig(m)
-
-	sess := testSess(sm.StateAskMedicalOrder)
-	result, err := m.Process(context.Background(), sess, postbackM("order_manual"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateAskManualCups {
-		t.Errorf("expected ASK_MANUAL_CUPS, got %s", result.NextState)
-	}
-}
-
-func TestAskMedicalOrder_Invalid(t *testing.T) {
-	m := sm.NewMachine()
-	registerAskMedicalOrderConfig(m)
-
-	sess := testSess(sm.StateAskMedicalOrder)
-	result, err := m.Process(context.Background(), sess, textM("hola"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Should stay in same state (retry)
-	if result.NextState != sm.StateAskMedicalOrder {
-		t.Errorf("expected ASK_MEDICAL_ORDER (retry), got %s", result.NextState)
 	}
 }
 
@@ -150,17 +113,17 @@ func TestUploadMedicalOrder_RetryPostback(t *testing.T) {
 	}
 }
 
-func TestUploadMedicalOrder_GoManualPostback(t *testing.T) {
+func TestUploadMedicalOrder_EscalateAgentPostback(t *testing.T) {
 	m := sm.NewMachine()
 	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
-	result, err := m.Process(context.Background(), sess, postbackM("go_manual"))
+	result, err := m.Process(context.Background(), sess, postbackM("escalate_agent"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateAskManualCups {
-		t.Errorf("expected ASK_MANUAL_CUPS, got %s", result.NextState)
+	if result.NextState != sm.StateEscalateToAgent {
+		t.Errorf("expected ESCALATE_TO_AGENT, got %s", result.NextState)
 	}
 }
 
@@ -339,8 +302,8 @@ func TestConfirmOCRResult_Incorrect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateAskManualCups {
-		t.Errorf("expected ASK_MANUAL_CUPS, got %s", result.NextState)
+	if result.NextState != sm.StateUploadMedicalOrder {
+		t.Errorf("expected UPLOAD_MEDICAL_ORDER, got %s", result.NextState)
 	}
 }
 

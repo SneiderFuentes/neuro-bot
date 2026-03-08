@@ -301,21 +301,20 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 
 	// --- Orden Medica ---
 	case sm.StateAskMedicalOrder:
-		situation = fmt.Sprintf("El paciente no eligio metodo para ingresar la orden (foto o manual).\nPaciente: %s | Doc: %s", patientName, patientDoc)
-		actions = "- Preguntale como quiere ingresar la orden:\n" +
+		situation = fmt.Sprintf("El paciente necesita enviar su orden medica.\nPaciente: %s | Doc: %s", patientName, patientDoc)
+		actions = "- Pidele que envie la foto de la orden:\n" +
 			"  /bot resume UPLOAD_MEDICAL_ORDER — Pedir foto de orden\n" +
-			"  /bot resume ASK_MANUAL_CUPS nombre — Ingresar procedimiento manual"
+			"- Si puedes ver la imagen o el paciente te describe la orden:\n" +
+			"  /bot orden <descripcion de procedimientos con codigos y cantidades>\n" +
+			"  Ej: /bot orden Resonancia cerebral simple codigo 883141, cantidad 1"
 
 	case sm.StateUploadMedicalOrder:
-		situation = fmt.Sprintf("El paciente no logro enviar la foto de su orden medica.\nPaciente: %s | Doc: %s", patientName, patientDoc)
-		actions = "- Pidele que envie la foto de la orden y luego:\n" +
+		situation = fmt.Sprintf("El paciente no logro enviar la foto de su orden medica o el bot no la reconocio.\nPaciente: %s | Doc: %s", patientName, patientDoc)
+		actions = "- Pidele que envie la foto de la orden:\n" +
 			"  /bot resume UPLOAD_MEDICAL_ORDER — Reintentar subida de orden\n" +
-			"- Si la imagen se ve pero el bot no la reconocio, describe la orden:\n" +
+			"- Si puedes ver la imagen o el paciente te describe la orden:\n" +
 			"  /bot orden Resonancia cerebral simple codigo 883141, cantidad 1\n" +
-			"  /bot orden Electromiografia 4 ext codigo 930810 cantidad 1, Resonancia columna lumbar codigo 883210 cantidad 1\n" +
-			"- Si ya sabes el procedimiento:\n" +
-			"  /bot resume ASK_MANUAL_CUPS nombre del procedimiento\n" +
-			"  Ej: /bot resume ASK_MANUAL_CUPS resonancia cerebral"
+			"  /bot orden Electromiografia 4 ext codigo 930810 cantidad 1, Resonancia columna lumbar codigo 883210 cantidad 1"
 
 	case sm.StateConfirmOCRResult:
 		ocrCups := sess.GetContext("ocr_cups_json")
@@ -323,14 +322,16 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			ocrCups, patientName, patientDoc)
 		actions = "- Verificale los procedimientos detectados:\n" +
 			"  /bot resume CONFIRM_OCR_RESULT — Mostrar resultado de nuevo\n" +
-			"  /bot resume ASK_MANUAL_CUPS nombre — Corregir manualmente"
+			"- Si puedes ver la orden o el paciente te la describe:\n" +
+			"  /bot orden <descripcion de procedimientos con codigos y cantidades>"
 
 	case sm.StateAskManualCups:
 		situation = fmt.Sprintf("El paciente no pudo encontrar su procedimiento al buscarlo.\nPaciente: %s | Doc: %s", patientName, patientDoc)
-		actions = "- Preguntale el nombre del procedimiento:\n" +
+		actions = "- Si puedes ver la orden o el paciente te la describe:\n" +
+			"  /bot orden <descripcion con codigos y cantidades>\n" +
+			"- O busca por nombre:\n" +
 			"  /bot resume ASK_MANUAL_CUPS nombre del procedimiento\n" +
-			"  Ej: /bot resume ASK_MANUAL_CUPS resonancia cerebral simple\n" +
-			"  Ej: /bot resume ASK_MANUAL_CUPS electromiografia"
+			"  Ej: /bot resume ASK_MANUAL_CUPS resonancia cerebral simple"
 
 	case sm.StateSelectProcedure:
 		situation = fmt.Sprintf("El paciente no logro seleccionar un procedimiento de la lista.\nPaciente: %s | Doc: %s", patientName, patientDoc)

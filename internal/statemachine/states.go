@@ -203,7 +203,7 @@ var stateTypes = map[string]StateType{
 	StateAppointmentCancelled: StateTypeAutomatic,
 
 	// Orden Médica y OCR
-	StateAskMedicalOrder:    StateTypeInteractive,
+	StateAskMedicalOrder:    StateTypeAutomatic,
 	StateUploadMedicalOrder: StateTypeInteractive,
 	StateValidateOCR:        StateTypeAutomatic,
 	StateConfirmOCRResult:   StateTypeInteractive,

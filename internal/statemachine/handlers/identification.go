@@ -183,13 +183,6 @@ func routeAfterContactInfo(ctx context.Context, sess *session.Session, r *sm.Sta
 			}
 		}
 		r.NextState = sm.StateAskMedicalOrder
-		r.Messages = append(r.Messages, &sm.ButtonMessage{
-			Text: "¿Tienes tu orden médica a la mano?\n\nPuedes enviar una *foto* de la orden para que la lea automáticamente, o puedes ingresar el procedimiento *manualmente*.",
-			Buttons: []sm.Button{
-				{Text: "Enviar foto", Payload: "order_photo"},
-				{Text: "Ingresar manual", Payload: "order_manual"},
-			},
-		})
 	default:
 		r.NextState = sm.StatePostActionMenu
 	}

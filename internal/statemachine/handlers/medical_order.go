@@ -15,20 +15,7 @@ import (
 
 // RegisterMedicalOrderHandlers registra los handlers de Orden Médica y OCR (Fase 8)
 func RegisterMedicalOrderHandlers(m *sm.Machine, ocrSvc *services.OCRService, procedureRepo repository.ProcedureRepository) {
-	m.RegisterWithConfig(sm.StateAskMedicalOrder, sm.HandlerConfig{
-		InputType: sm.InputButton,
-		Options:   []string{"order_photo", "order_manual"},
-		RetryPrompt: func(sess *session.Session, result *sm.StateResult) {
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
-				Text: "Tienes tu orden médica a la mano?\n\nPuedes enviar una *foto* de la orden para que la lea automáticamente, o puedes ingresar el procedimiento *manualmente*.",
-				Buttons: []sm.Button{
-					{Text: "Enviar foto", Payload: "order_photo"},
-					{Text: "Ingresar manual", Payload: "order_manual"},
-				},
-			})
-		},
-		Handler: askMedicalOrderHandler(),
-	})
+	m.Register(sm.StateAskMedicalOrder, askMedicalOrderHandler())
 	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
 	m.Register(sm.StateValidateOCR, validateOCRHandler(procedureRepo))
 	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(ocrSvc))
@@ -37,21 +24,12 @@ func RegisterMedicalOrderHandlers(m *sm.Machine, ocrSvc *services.OCRService, pr
 	m.Register(sm.StateSelectProcedure, selectProcedureHandler())
 }
 
-// ASK_MEDICAL_ORDER — solo lógica de negocio (validación declarativa en RegisterWithConfig).
+// ASK_MEDICAL_ORDER (automático) — pide foto de la orden y transiciona a UPLOAD.
 func askMedicalOrderHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		selected := sm.ValidatedPayload(ctx)
-		switch selected {
-		case "order_photo":
-			return sm.NewResult(sm.StateUploadMedicalOrder).
-				WithText("Envía una *foto clara* de tu orden médica.\n\nAsegúrate de que:\n- Se vean bien los procedimientos\n- La foto no esté borrosa\n- Se lea el texto").
-				WithEvent("order_method_selected", map[string]interface{}{"method": "photo"}), nil
-		case "order_manual":
-			return sm.NewResult(sm.StateAskManualCups).
-				WithText("Escribe el nombre del procedimiento o examen que necesitas.\n\nEjemplo: \"Electromiografía\" o \"Resonancia de rodilla\"").
-				WithEvent("order_method_selected", map[string]interface{}{"method": "manual"}), nil
-		}
-		return nil, fmt.Errorf("unreachable: selected=%s", selected)
+		return sm.NewResult(sm.StateUploadMedicalOrder).
+			WithText("Envía una *foto clara* de tu orden médica.\n\nAsegúrate de que:\n- Se vean bien los procedimientos\n- La foto no esté borrosa\n- Se lea el texto").
+			WithEvent("order_photo_requested", nil), nil
 	}
 }
 
@@ -70,7 +48,7 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				return sm.NewResult(sess.CurrentState).
 					WithButtons("Error al procesar la imagen. ¿Qué deseas hacer?",
 						sm.Button{Text: "Enviar otra foto", Payload: "retry_photo"},
-						sm.Button{Text: "Ingresar manual", Payload: "go_manual"},
+						sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
 					).
 					WithEvent("ocr_error", map[string]interface{}{"error": err.Error()}), nil
 			}
@@ -83,7 +61,7 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				return sm.NewResult(sess.CurrentState).
 					WithButtons(errorMsg+"\n\n¿Qué deseas hacer?",
 						sm.Button{Text: "Enviar otra foto", Payload: "retry_photo"},
-						sm.Button{Text: "Ingresar manual", Payload: "go_manual"},
+						sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
 					).
 					WithEvent("ocr_failed", map[string]interface{}{"error": ocrResult.Error}), nil
 			}
@@ -114,10 +92,10 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				case "retry_photo":
 					return sm.NewResult(sess.CurrentState).
 						WithText("Envía otra foto de tu orden médica."), nil
-				case "go_manual":
-					return sm.NewResult(sm.StateAskManualCups).
-						WithText("Escribe el nombre del procedimiento que necesitas.").
-						WithEvent("ocr_switch_to_manual", nil), nil
+				case "escalate_agent":
+					return sm.NewResult(sm.StateEscalateToAgent).
+						WithText("Te voy a comunicar con uno de nuestros agentes para que pueda ayudarte con tu orden médica.").
+						WithEvent("ocr_escalate_to_agent", nil), nil
 				}
 			}
 
@@ -131,8 +109,9 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		var cups []services.CUPSEntry
 		if err := json.Unmarshal([]byte(sess.GetContext("ocr_cups_json")), &cups); err != nil {
-			return sm.NewResult(sm.StateAskManualCups).
-				WithText("Error al procesar los datos. Ingresa el procedimiento manualmente."), nil
+			return sm.NewResult(sm.StateEscalateToAgent).
+				WithText("Error al procesar los datos de tu orden. Te voy a comunicar con un agente para que pueda ayudarte.").
+				WithEvent("ocr_parse_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		// Validar CUPS contra la BD — enriquecer con nombre de BD si el código es conocido
@@ -192,8 +171,9 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 		case "ocr_correct":
 			var cups []services.CUPSEntry
 			if err := json.Unmarshal([]byte(sess.GetContext("ocr_cups_json")), &cups); err != nil {
-				return sm.NewResult(sm.StateAskManualCups).
-					WithText("Error al procesar. Ingresa el procedimiento manualmente."), nil
+				return sm.NewResult(sm.StateEscalateToAgent).
+					WithText("Error al procesar tu orden. Te voy a comunicar con un agente para que pueda ayudarte.").
+					WithEvent("ocr_parse_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 
 			// Preservar is_sedated del OCR antes de GroupByService (la IA no devuelve is_sedated)
@@ -266,8 +246,11 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 			return r.WithEvent("ocr_validated", map[string]interface{}{"groups": len(groups)}), nil
 
 		case "ocr_incorrect":
-			return sm.NewResult(sm.StateAskManualCups).
-				WithText("Entendido. Escribe el nombre del procedimiento que necesitas:").
+			return sm.NewResult(sm.StateUploadMedicalOrder).
+				WithButtons("Entendido. ¿Qué deseas hacer?",
+					sm.Button{Text: "Enviar otra foto", Payload: "retry_photo"},
+					sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
+				).
 				WithClearCtx("ocr_cups_json").
 				WithEvent("ocr_rejected", nil), nil
 		}
@@ -282,7 +265,7 @@ func ocrFailedHandler() sm.StateHandler {
 		return sm.NewResult(sm.StateUploadMedicalOrder).
 			WithButtons("No pudimos procesar tu orden médica. ¿Qué deseas hacer?",
 				sm.Button{Text: "Enviar otra foto", Payload: "retry_photo"},
-				sm.Button{Text: "Ingresar manual", Payload: "go_manual"},
+				sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
 			).
 			WithEvent("ocr_failed_redirect", nil), nil
 	}
