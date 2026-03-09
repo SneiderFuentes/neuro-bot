@@ -25,7 +25,9 @@ func RegisterGreetingHandlers(m *sm.Machine, cfg *config.Config, locationRepo Lo
 		InputType: sm.InputButton,
 		Options:   []string{"consultar", "agendar", "resultados", "ubicacion", "ayuda"},
 		RetryPrompt: func(sess *session.Session, result *sm.StateResult) {
-			result.Messages = append(result.Messages, buildMainMenuList())
+			list := buildMainMenuList()
+			list.Body = "Por favor selecciona una opcion del menu.\n\n" + list.Body
+			result.Messages = append(result.Messages, list)
 		},
 		Handler: mainMenuHandler(),
 	})
@@ -95,8 +97,10 @@ func outOfHoursMenuHandler(cfg *config.Config, locationRepo LocationReader) sm.S
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "ooh_resultados", "ooh_ubicacion", "ooh_ayuda")
 		if result != nil {
+			// Clear default error text — combine into list body (1 message)
+			result.Messages = nil
 			result.Messages = append(result.Messages, &sm.ListMessage{
-				Body:  "En que puedo ayudarte hoy?",
+				Body:  "Por favor selecciona una opcion.\n\nEn que puedo ayudarte hoy?",
 				Title: "Ver opciones",
 				Sections: []sm.ListSection{{
 					Title: "Opciones disponibles",
@@ -175,9 +179,10 @@ func greetingHandler(cfg *config.Config) sm.StateHandler {
 			cfg.BotName, cfg.CenterName)
 
 		r := sm.NewResult(sm.StateMainMenu).
-			WithText(welcomeText).
 			WithEvent("greeting_sent", nil)
-		r.Messages = append(r.Messages, buildMainMenuList())
+		list := buildMainMenuList()
+		list.Body = welcomeText + "\n\n" + list.Body
+		r.Messages = append(r.Messages, list)
 		return r, nil
 	}
 }
@@ -284,11 +289,10 @@ func showHelpHandler() sm.StateHandler {
 		if sess.GetContext("help_source") == "ooh" {
 			r := sm.NewResult(sm.StateOutOfHoursMenu).
 				WithText(msg1).
-				WithText(msg2).
 				WithClearCtx("help_source").
 				WithEvent("help_shown", nil)
 			r.Messages = append(r.Messages, &sm.ListMessage{
-				Body:  "En que puedo ayudarte hoy?",
+				Body:  msg2 + "\n\nEn que puedo ayudarte hoy?",
 				Title: "Ver opciones",
 				Sections: []sm.ListSection{{
 					Title: "Opciones disponibles",
@@ -304,9 +308,10 @@ func showHelpHandler() sm.StateHandler {
 
 		r := sm.NewResult(sm.StateMainMenu).
 			WithText(msg1).
-			WithText(msg2).
 			WithEvent("help_shown", nil)
-		r.Messages = append(r.Messages, buildMainMenuList())
+		list := buildMainMenuList()
+		list.Body = msg2 + "\n\n" + list.Body
+		r.Messages = append(r.Messages, list)
 		return r, nil
 	}
 }

@@ -261,9 +261,9 @@ func TestMainMenu_Ayuda(t *testing.T) {
 	if result.NextState != sm.StateMainMenu {
 		t.Errorf("expected MAIN_MENU (auto-chained from SHOW_HELP), got %s", result.NextState)
 	}
-	// Should have help messages (2 text + 1 list)
-	if len(result.Messages) < 3 {
-		t.Errorf("expected at least 3 messages (2 help text + menu list), got %d", len(result.Messages))
+	// Should have help messages (1 text + 1 list with tips in body)
+	if len(result.Messages) < 2 {
+		t.Errorf("expected at least 2 messages (help text + menu list), got %d", len(result.Messages))
 	}
 }
 

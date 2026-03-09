@@ -180,9 +180,9 @@ func TestRegisterWithConfig_ButtonRetryPrompt(t *testing.T) {
 	if !promptCalled {
 		t.Error("RetryPrompt was not called")
 	}
-	// Default error text + retry prompt = 2 messages
-	if len(result.Messages) < 2 {
-		t.Errorf("expected at least 2 messages, got %d", len(result.Messages))
+	// Default error text cleared, only retry prompt = 1 message
+	if len(result.Messages) != 1 {
+		t.Errorf("expected 1 message (retry prompt only), got %d", len(result.Messages))
 	}
 }
 

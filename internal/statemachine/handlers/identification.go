@@ -37,7 +37,7 @@ func RegisterIdentificationHandlers(m *sm.Machine, patientSvc *services.PatientS
 				email = "(no registrado)"
 			}
 			result.Messages = append(result.Messages, &sm.ButtonMessage{
-				Text: fmt.Sprintf("Tus datos de contacto:\n\nCelular: %s\nEmail: %s\n\n¿Son correctos?", phone, email),
+				Text: fmt.Sprintf("Por favor selecciona una opcion.\n\nTus datos de contacto:\n\nCelular: %s\nEmail: %s\n\n¿Son correctos?", phone, email),
 				Buttons: []sm.Button{
 					{Text: "Sí, son correctos", Payload: "contact_ok"},
 					{Text: "No, actualizar", Payload: "contact_update"},

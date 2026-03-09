@@ -63,6 +63,8 @@ func wrapButtonHandler(cfg HandlerConfig) StateHandler {
 		if result != nil {
 			// Only show retry prompt for normal retries (same state), not when escalating
 			if cfg.RetryPrompt != nil && result.NextState == sess.CurrentState {
+				// Clear default text messages — RetryPrompt rebuilds the full UI in one message
+				result.Messages = nil
 				cfg.RetryPrompt(sess, result)
 			}
 			return result, nil
@@ -105,6 +107,8 @@ func wrapTextHandler(cfg HandlerConfig) StateHandler {
 		if retryResult != nil {
 			// Only show retry prompt for normal retries (same state), not when escalating
 			if cfg.RetryPrompt != nil && retryResult.NextState == sess.CurrentState {
+				// Clear default text messages — RetryPrompt rebuilds the full UI in one message
+				retryResult.Messages = nil
 				cfg.RetryPrompt(sess, retryResult)
 			}
 			return retryResult, nil
@@ -131,6 +135,8 @@ func wrapImageHandler(cfg HandlerConfig) StateHandler {
 		result := RetryOrEscalate(sess, errorMsg)
 		// Only show retry prompt for normal retries (same state), not when escalating
 		if cfg.RetryPrompt != nil && result.NextState == sess.CurrentState {
+			// Clear default text messages — RetryPrompt rebuilds the full UI in one message
+			result.Messages = nil
 			cfg.RetryPrompt(sess, result)
 		}
 		return result, nil
