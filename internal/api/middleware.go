@@ -11,9 +11,13 @@ import (
 // maxRequestBodySize limits the size of incoming request bodies (1 MB).
 const maxRequestBodySize = 1 << 20
 
-// RequestLogger middleware para logging de requests
+// RequestLogger middleware para logging de requests (skips /health to reduce noise)
 func RequestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		slog.Info("request",

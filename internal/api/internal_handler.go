@@ -758,6 +758,18 @@ func (h *InternalHandler) HandleHealthKPIs(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(metrics)
 }
 
+// --- Test Alert ---
+
+// HandleTestAlert triggers a test slog.Error to verify Telegram alerting works end-to-end.
+func (h *InternalHandler) HandleTestAlert(w http.ResponseWriter, r *http.Request) {
+	slog.Error("test alert: telegram integration check",
+		"source", "manual_test",
+		"triggered_by", r.RemoteAddr,
+	)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "test error logged — check Telegram"})
+}
+
 // --- Helpers ---
 
 func groupAppointmentsByPatientID(appointments []domain.Appointment) map[string][]domain.Appointment {

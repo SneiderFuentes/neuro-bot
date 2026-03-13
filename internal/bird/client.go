@@ -173,6 +173,8 @@ func (c *Client) sendToConversation(conversationID string, body interface{}, dra
 
 	respBody, _ := io.ReadAll(resp.Body)
 
+	slog.Debug("conversations_api_response", "status", resp.StatusCode, "conversation_id", conversationID, "body_len", len(respBody))
+
 	if resp.StatusCode == 422 {
 		return "", fmt.Errorf("%w: %s", ErrConversationNotActive, string(respBody))
 	}
@@ -264,14 +266,22 @@ func (c *Client) trySendToConversation(phone, conversationID string, body interf
 		return id, nil, true
 	}
 
-	// Self-heal: if the conversation is closed, look up the current one and retry
+	// Self-heal: if the conversation is closed/stuck, look up a fresh one and retry
 	if errors.Is(err, ErrConversationNotActive) {
+		// Invalidate cached conversation_id so subsequent messages don't hit the same wall
+		c.mu.Lock()
+		if c.convCache[phone] == conversationID {
+			delete(c.convCache, phone)
+		}
+		c.mu.Unlock()
+
 		if freshID, lookErr := c.LookupConversationByPhone(phone); lookErr == nil && freshID != "" && freshID != conversationID {
 			slog.Info("conversation_id_self_healed",
 				"phone", phone,
 				"old", conversationID,
 				"new", freshID,
 			)
+			c.CacheConversationID(phone, freshID)
 			if id2, err2 := c.sendToConversation(freshID, body, false); err2 == nil {
 				return id2, nil, true
 			}
@@ -327,19 +337,25 @@ func (c *Client) SendButtons(to, conversationID, text string, buttons []Button) 
 	if id, _, ok := c.trySendToConversation(to, conversationID, body); ok {
 		return id, nil
 	}
-	// Fallback: Channels API
-	payload := map[string]interface{}{
-		"receiver": map[string]interface{}{
-			"contacts": []map[string]string{{"identifierValue": to}},
-		},
-		"body": body,
+	// Fallback: Channels API — interactive buttons not supported, send as numbered text
+	slog.Info("send_buttons_text_fallback", "phone", to, "buttons", len(buttons))
+	var textFallback string
+	textFallback = text + "\n"
+	for i, btn := range buttons {
+		textFallback += fmt.Sprintf("\n%d. %s", i+1, btn.Text)
 	}
-	return c.sendMessage(c.messagesURL(), payload)
+	return c.SendText(to, "", textFallback)
 }
 
 // SendList envía un mensaje con lista interactiva.
 // Routes via Conversations API when conversationID is available.
 func (c *Client) SendList(to, conversationID, body, buttonLabel string, sections []ListSection) (string, error) {
+	totalRows := 0
+	for _, s := range sections {
+		totalRows += len(s.Rows)
+	}
+	slog.Debug("send_list_building", "phone", to, "sections", len(sections), "total_rows", totalRows, "button", buttonLabel)
+
 	items := make([]map[string]interface{}, len(sections))
 	for i, section := range sections {
 		actions := make([]map[string]interface{}, len(section.Rows))
@@ -369,17 +385,31 @@ func (c *Client) SendList(to, conversationID, body, buttonLabel string, sections
 			},
 		},
 	}
+
+	// Debug: log the full payload for list messages
+	if debugJSON, err := json.Marshal(msgBody); err == nil {
+		slog.Debug("send_list_payload", "phone", to, "payload", string(debugJSON))
+	}
+
 	if id, _, ok := c.trySendToConversation(to, conversationID, msgBody); ok {
 		return id, nil
 	}
-	// Fallback: Channels API
-	payload := map[string]interface{}{
-		"receiver": map[string]interface{}{
-			"contacts": []map[string]string{{"identifierValue": to}},
-		},
-		"body": msgBody,
+	// Fallback: Channels API — interactive lists not supported, send as numbered text
+	slog.Info("send_list_text_fallback", "phone", to, "sections", len(sections))
+	var textFallback string
+	textFallback = body + "\n"
+	idx := 1
+	for _, section := range sections {
+		for _, row := range section.Rows {
+			desc := ""
+			if row.Description != "" {
+				desc = " — " + row.Description
+			}
+			textFallback += fmt.Sprintf("\n%d. %s%s", idx, row.Title, desc)
+			idx++
+		}
 	}
-	return c.sendMessage(c.messagesURL(), payload)
+	return c.SendText(to, "", textFallback)
 }
 
 // SendInternalText sends a text message visible only in Bird Inbox (not delivered to WhatsApp).
@@ -459,6 +489,7 @@ func (c *Client) ListActiveAgents() ([]AgentInfo, error) {
 
 // AssignFeedItem assigns a conversation to a team+agent in Bird Inbox.
 // Uses the Feeds API: PATCH /feeds/channel:{channelId}/items/{conversationId}
+// If the feed item doesn't exist (404), attempts to create it via POST first.
 func (c *Client) AssignFeedItem(conversationID, teamID, agentID string) error {
 	if conversationID == "" {
 		return nil
@@ -480,23 +511,88 @@ func (c *Client) AssignFeedItem(conversationID, teamID, agentID string) error {
 		return fmt.Errorf("marshal feed item assignment: %w", err)
 	}
 
+	resp, err := c.doPatchFeedItem(url, jsonBody)
+	if err != nil {
+		return fmt.Errorf("assign feed item: %w", err)
+	}
+
+	if resp == 404 {
+		// Feed item doesn't exist — create it via POST then retry PATCH
+		slog.Info("feed_item_not_found_creating",
+			"conversation_id", conversationID,
+			"feed_id", feedID,
+		)
+		if createErr := c.createFeedItem(feedID, conversationID); createErr != nil {
+			slog.Warn("create_feed_item_failed", "error", createErr)
+			return fmt.Errorf("assign feed item: item not found and create failed: %w", createErr)
+		}
+		resp, err = c.doPatchFeedItem(url, jsonBody)
+		if err != nil {
+			return fmt.Errorf("assign feed item (retry): %w", err)
+		}
+		if resp >= 400 {
+			return fmt.Errorf("assign feed item (retry): status %d", resp)
+		}
+	}
+	return nil
+}
+
+// doPatchFeedItem sends a PATCH request to the feed items endpoint. Returns status code.
+func (c *Client) doPatchFeedItem(url string, jsonBody []byte) (int, error) {
 	req, err := http.NewRequest("PATCH", url, bytes.NewReader(jsonBody))
 	if err != nil {
-		return fmt.Errorf("create feed item assignment request: %w", err)
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("assign feed item: %w", err)
+		return 0, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("assign feed item: status %d, body: %s", resp.StatusCode, string(respBody))
+		if resp.StatusCode == 404 {
+			return 404, nil
+		}
+		return resp.StatusCode, fmt.Errorf("status %d, body: %s", resp.StatusCode, string(respBody))
 	}
+	return resp.StatusCode, nil
+}
+
+// createFeedItem creates a feed item for a conversation via POST.
+func (c *Client) createFeedItem(feedID, conversationID string) error {
+	url := fmt.Sprintf("%s/workspaces/%s/feeds/%s/items",
+		c.conversationsBase(), c.workspaceID, feedID)
+
+	payload := map[string]interface{}{
+		"conversationId": conversationID,
+	}
+	jsonBody, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("create feed item: status %d, body: %s", resp.StatusCode, string(respBody))
+	}
+	slog.Info("feed_item_created", "conversation_id", conversationID, "feed_id", feedID)
 	return nil
 }
 

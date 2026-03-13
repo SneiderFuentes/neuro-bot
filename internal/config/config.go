@@ -82,7 +82,8 @@ type Config struct {
 	CenterKey  string
 	CenterName string
 	BotName    string
-	ResultsURL string
+	ResultsURL      string
+	ResultsVideoURL string
 
 	// Security
 	InternalAPIKey string
@@ -102,6 +103,10 @@ type Config struct {
 	ConfirmFollowup1Hours  int // First follow-up after WA template (hours)
 	ConfirmFollowup2Hours  int // Second follow-up after first (hours)
 	ConfirmPostIVRMinutes  int // Agent escalation after IVR (minutes)
+
+	// Telegram error alerts (optional — empty means disabled)
+	TelegramBotToken string
+	TelegramChatID   string
 
 	// Testing whitelist — only these phones can interact with the bot (empty = all allowed)
 	TestingWhitelistPhones []string
@@ -188,7 +193,8 @@ func Load() *Config {
 		CenterKey:  getEnv("CENTER_KEY", "datosipsndx"),
 		CenterName: getEnv("CENTER_NAME", "Neuro Electrodiagnóstico del Llano"),
 		BotName:    getEnv("BOT_NAME", "Samuel"),
-		ResultsURL: getEnv("RESULTS_URL", ""),
+		ResultsURL:      getEnv("RESULTS_URL", ""),
+		ResultsVideoURL: getEnv("RESULTS_VIDEO_URL", ""),
 
 		// Security
 		InternalAPIKey: os.Getenv("INTERNAL_API_KEY"),
@@ -208,6 +214,10 @@ func Load() *Config {
 		ConfirmFollowup1Hours:  getEnvInt("CONFIRMATION_FOLLOWUP_1_HOURS", 3),
 		ConfirmFollowup2Hours:  getEnvInt("CONFIRMATION_FOLLOWUP_2_HOURS", 3),
 		ConfirmPostIVRMinutes:  getEnvInt("CONFIRMATION_POST_IVR_MINUTES", 30),
+
+		// Telegram error alerts
+		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
 
 		// Testing whitelist
 		TestingWhitelistPhones: parsePhoneList(os.Getenv("TESTING_WHITELIST_PHONES")),

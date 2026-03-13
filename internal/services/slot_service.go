@@ -33,6 +33,7 @@ type SlotQuery struct {
 	AfterDate       string                          // For pagination (YYYY-MM-DD)
 	MaxSlots        int                             // Default 5
 	ClinicAddress   string                          // Procedure clinic address
+	ProcedureType   string                          // cups_procedimientos.tipo — filters agendas by NombreAgenda
 	MonthFilter     func(year, month int) (bool, error) // Optional: true = month allowed, nil = no filter
 }
 
@@ -113,6 +114,7 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 	// 6. Calculate available slots per working day
 	var allSlots []AvailableSlot
 	configCache := make(map[string]*domain.ScheduleConfig)
+	agendaCache := make(map[int]bool)   // agendaID → matches procedure type
 	monthCache := make(map[string]bool) // "YYYY-MM" → allowed
 
 	for _, day := range workingDays {
@@ -146,6 +148,22 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 			dt, _ := time.Parse("2006-01-02", day.Date)
 			if dt.Weekday() == time.Saturday {
 				continue
+			}
+		}
+
+		// Agenda name type filter: skip days whose agenda doesn't match the procedure type
+		if query.ProcedureType != "" {
+			if allowed, ok := agendaCache[day.AgendaID]; ok {
+				if !allowed {
+					continue
+				}
+			} else {
+				schedule, _ := s.scheduleRepo.FindByScheduleID(ctx, day.AgendaID, query.ProcedureType)
+				match := schedule != nil
+				agendaCache[day.AgendaID] = match
+				if !match {
+					continue
+				}
 			}
 		}
 

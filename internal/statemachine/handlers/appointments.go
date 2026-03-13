@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/domain"
+	"github.com/neuro-bot/neuro-bot/internal/repository"
 	"github.com/neuro-bot/neuro-bot/internal/services"
 	"github.com/neuro-bot/neuro-bot/internal/session"
 	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
@@ -17,14 +19,17 @@ import (
 // cupsCode is the CUPS code of the freed slot (called once per unique CUPS in the block).
 type CancellationCallback func(ctx context.Context, cupsCode string)
 
-// RegisterAppointmentHandlers registra FETCH_APPOINTMENTS, LIST_APPOINTMENTS, APPOINTMENT_ACTION
-func RegisterAppointmentHandlers(m *sm.Machine, apptSvc *services.AppointmentService, onCancel CancellationCallback) {
+// RegisterAppointmentHandlers registra los handlers del flujo de consulta de citas.
+func RegisterAppointmentHandlers(m *sm.Machine, apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository, addrMapper *services.AddressMapper, onCancel CancellationCallback) {
 	m.Register(sm.StateFetchAppointments, fetchAppointmentsHandler(apptSvc))
 	m.Register(sm.StateListAppointments, listAppointmentsHandler(apptSvc))
-	m.Register(sm.StateAppointmentAction, appointmentActionHandler(apptSvc, onCancel))
+	m.Register(sm.StateAppointmentAction, appointmentActionHandler(apptSvc, procRepo, addrMapper))
+	m.Register(sm.StateConfirmAppointment, confirmAppointmentHandler(apptSvc, procRepo, addrMapper))
+	m.Register(sm.StateCancelAppointment, cancelAppointmentHandler(apptSvc, onCancel))
+	m.Register(sm.StateNoAppointments, noAppointmentsHandler())
 }
 
-// FETCH_APPOINTMENTS (automático) — consulta citas del paciente
+// FETCH_APPOINTMENTS (automático) — consulta citas del paciente y muestra la lista
 func fetchAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		patientID := sess.GetContext("patient_id")
@@ -37,21 +42,28 @@ func fetchAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHand
 		}
 
 		if len(appointments) == 0 {
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithText("No tienes citas pendientes o confirmadas.").
+			return sm.NewResult(sm.StateNoAppointments).
+				WithButtons("No tienes citas pendientes o confirmadas.\n\n¿Qué deseas hacer?",
+					sm.Button{Text: "Menú principal", Payload: "no_appt_menu"},
+					sm.Button{Text: "Terminar chat", Payload: "no_appt_end"},
+				).
 				WithEvent("no_appointments_found", nil), nil
 		}
 
 		// Serializar citas en contexto para los siguientes estados
 		apptJSON, _ := json.Marshal(appointments)
 
+		// Generar la lista aquí (LIST_APPOINTMENTS es interactivo, no auto-chain)
+		listMsg := buildAppointmentList(apptSvc, appointments)
+
 		return sm.NewResult(sm.StateListAppointments).
 			WithContext("appointments_json", string(apptJSON)).
+			WithList(listMsg.body, listMsg.button, listMsg.section).
 			WithEvent("appointments_found", map[string]interface{}{"count": len(appointments)}), nil
 	}
 }
 
-// LIST_APPOINTMENTS (interactivo, lista) — muestra citas como lista interactiva
+// LIST_APPOINTMENTS (interactivo, lista) — espera selección de cita, muestra detalle al seleccionar
 func listAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		// Si es postback con ID de cita seleccionada
@@ -61,8 +73,14 @@ func listAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandl
 				for _, a := range appts {
 					if a.ID == msg.PostbackPayload {
 						sess.RetryCount = 0
+
+						// Mostrar detalle + lista de acciones en un solo mensaje
+						detail := buildAppointmentDetail(apptSvc, appts, a.ID)
 						return sm.NewResult(sm.StateAppointmentAction).
 							WithContext("selected_appointment_id", msg.PostbackPayload).
+							WithList(detail+"\n\n¿Qué deseas hacer con esta cita?", "Ver opciones",
+								sm.ListSection{Title: "Acciones", Rows: appointmentActionRows()},
+							).
 							WithEvent("appointment_selected", map[string]interface{}{"id": msg.PostbackPayload}), nil
 					}
 				}
@@ -76,173 +94,248 @@ func listAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandl
 			return result, nil
 		}
 
-		// Cargar citas del contexto
+		// Cargar citas del contexto y re-mostrar lista
 		var appointments []domain.Appointment
 		if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
 			return sm.NewResult(sm.StatePostActionMenu).
 				WithText("Error al cargar las citas. Intenta de nuevo."), nil
 		}
 
-		// Construir lista (máx 10 items para WhatsApp)
-		maxShow := 10
-		if len(appointments) < maxShow {
-			maxShow = len(appointments)
-		}
-
-		// Agrupar: detectar citas que son parte del mismo bloque consecutivo
-		// para mostrar una sola fila por bloque
-		type displayItem struct {
-			ID          string
-			DateDisplay string
-			TimeDisplay string
-			DoctorName  string
-			CupName     string
-			BlockSize   int
-		}
-
-		shown := make(map[string]bool) // IDs ya incluidas en un bloque
-		var items []displayItem
-
-		for _, appt := range appointments {
-			if shown[appt.ID] {
-				continue
-			}
-
-			block := apptSvc.FindConsecutiveBlock(appointments, appt.ID)
-			for _, b := range block {
-				shown[b.ID] = true
-			}
-
-			cupName := services.GetFirstCupName(appt)
-			if len(block) > 1 {
-				// Recolectar todos los nombres de procedimientos del bloque
-				cupNames := make(map[string]bool)
-				for _, b := range block {
-					name := services.GetFirstCupName(b)
-					cupNames[name] = true
-				}
-				if len(cupNames) > 1 {
-					cupName = fmt.Sprintf("%s (+%d proc.)", cupName, len(cupNames)-1)
-				}
-			}
-
-			items = append(items, displayItem{
-				ID:          appt.ID, // Usamos el ID de la primera cita del bloque
-				DateDisplay: utils.FormatFriendlyDateShort(appt.Date),
-				TimeDisplay: services.FormatTimeSlot(appt.TimeSlot),
-				DoctorName:  appt.DoctorName,
-				CupName:     cupName,
-				BlockSize:   len(block),
-			})
-
-			if len(items) >= maxShow {
-				break
-			}
-		}
-
-		rows := make([]sm.ListRow, len(items))
-		for i, item := range items {
-			title := fmt.Sprintf("%s %s", item.DateDisplay, item.TimeDisplay)
-			desc := fmt.Sprintf("Dr. %s - %s", item.DoctorName, item.CupName)
-			if item.BlockSize > 1 {
-				desc += fmt.Sprintf(" (%d citas)", item.BlockSize)
-			}
-			rows[i] = sm.ListRow{
-				ID:          item.ID,
-				Title:       truncate(title, 24),
-				Description: truncate(desc, 72),
-			}
-		}
-
-		body := fmt.Sprintf("Tienes *%d cita(s)* pendientes.\nSelecciona una para ver detalles:", len(appointments))
+		listMsg := buildAppointmentList(apptSvc, appointments)
 
 		return sm.NewResult(sess.CurrentState).
-			WithList(body, "Ver citas", sm.ListSection{Title: "Tus citas", Rows: rows}).
-			WithEvent("appointments_listed", map[string]interface{}{"shown": len(items)}), nil
+			WithList(listMsg.body, listMsg.button, listMsg.section).
+			WithEvent("appointments_listed", map[string]interface{}{"shown": len(listMsg.section.Rows)}), nil
 	}
 }
 
-// APPOINTMENT_ACTION (interactivo, botones) — detalle de cita + confirmar/cancelar/volver
-func appointmentActionHandler(apptSvc *services.AppointmentService, onCancel CancellationCallback) sm.StateHandler {
+// APPOINTMENT_ACTION (interactivo, lista) — procesa acción seleccionada sobre la cita
+func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository, addrMapper *services.AddressMapper) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		selectedID := sess.GetContext("selected_appointment_id")
 
-		result, selected := sm.ValidateButtonResponse(sess, msg, "appt_confirm", "appt_cancel", "appt_back")
+		result, selected := sm.ValidateButtonResponse(sess, msg, "appt_confirm", "appt_cancel", "appt_reschedule", "appt_preparation", "appt_back", "appt_menu")
 		if result != nil {
-			// Primera entrada o input inválido: mostrar detalle de la cita
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
+
+			// Re-mostrar detalle + acciones
 			var appointments []domain.Appointment
 			if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
 				return sm.NewResult(sm.StatePostActionMenu).
 					WithText("Error al cargar las citas."), nil
 			}
 
-			var appt *domain.Appointment
-			for i, a := range appointments {
-				if a.ID == selectedID {
-					appt = &appointments[i]
-					break
-				}
-			}
-
-			if appt == nil {
+			detail := buildAppointmentDetail(apptSvc, appointments, selectedID)
+			if detail == "" {
 				return sm.NewResult(sm.StateListAppointments).
 					WithText("Cita no encontrada. Selecciona otra.").
 					WithClearCtx("selected_appointment_id"), nil
 			}
 
-			// Detectar bloque consecutivo
-			block := apptSvc.FindConsecutiveBlock(appointments, selectedID)
-
-			statusText := "Pendiente"
-			if appt.Confirmed {
-				statusText = "Confirmada"
-			}
-
-			cupName := services.GetFirstCupName(*appt)
-			detail := fmt.Sprintf("*Detalle de tu cita:*\n\n"+
-				"Procedimiento: %s\n"+
-				"Doctor: %s\n"+
-				"Fecha: %s\n"+
-				"Hora: %s\n"+
-				"Estado: %s",
-				cupName,
-				appt.DoctorName,
-				utils.FormatFriendlyDate(appt.Date),
-				services.FormatTimeSlot(appt.TimeSlot),
-				statusText)
-
-			if appt.Observations != "" {
-				detail += fmt.Sprintf("\nObservaciones: %s", appt.Observations)
-			}
-
-			if len(block) > 1 {
-				detail += fmt.Sprintf("\n\nEsta cita tiene *%d procedimientos consecutivos* que se gestionarán juntos.", len(block))
-			}
-
 			return sm.NewResult(sess.CurrentState).
-				WithButtons(detail,
-					sm.Button{Text: "Confirmar", Payload: "appt_confirm"},
-					sm.Button{Text: "Cancelar cita", Payload: "appt_cancel"},
-					sm.Button{Text: "Volver", Payload: "appt_back"},
+				WithList(detail+"\n\n¿Qué deseas hacer con esta cita?", "Ver opciones",
+					sm.ListSection{Title: "Acciones", Rows: appointmentActionRows()},
 				), nil
 		}
 
-		// Procesar acción seleccionada
 		switch selected {
 		case "appt_confirm":
-			return handleConfirmAppointment(ctx, sess, apptSvc, selectedID)
+			return sm.NewResult(sm.StateConfirmAppointment).
+				WithButtons("¿Estás seguro de *confirmar* esta cita?",
+					sm.Button{Text: "Sí, confirmar", Payload: "confirm_yes"},
+					sm.Button{Text: "No, volver", Payload: "confirm_no"},
+				).
+				WithEvent("appointment_confirm_requested", nil), nil
+
 		case "appt_cancel":
-			return handleCancelAppointment(ctx, sess, apptSvc, selectedID, onCancel)
+			return sm.NewResult(sm.StateCancelAppointment).
+				WithButtons("¿Estás seguro de *cancelar* esta cita? Esta acción no se puede deshacer.",
+					sm.Button{Text: "Sí, cancelar", Payload: "cancel_yes"},
+					sm.Button{Text: "No, volver", Payload: "cancel_no"},
+				).
+				WithEvent("appointment_cancel_requested", nil), nil
+
+		case "appt_reschedule":
+			// Extraer datos de la cita existente y buscar slots directamente.
+			// La cita vieja NO se cancela — solo se cancela cuando se crea la nueva
+			// (via reschedule_appt_id en createAppointmentHandler).
+			var appointments []domain.Appointment
+			json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments)
+
+			var selectedAppt *domain.Appointment
+			for i, a := range appointments {
+				if a.ID == selectedID {
+					selectedAppt = &appointments[i]
+					break
+				}
+			}
+			if selectedAppt == nil {
+				return sm.NewResult(sm.StateListAppointments).
+					WithText("Cita no encontrada."), nil
+			}
+
+			cupsCode, cupsName := "", ""
+			if len(selectedAppt.Procedures) > 0 {
+				cupsCode = selectedAppt.Procedures[0].CupCode
+				cupsName = selectedAppt.Procedures[0].CupName
+			}
+			if cupsCode == "" {
+				return sm.NewResult(sm.StatePostActionMenu).
+					WithText("No se puede reprogramar: no se encontró el procedimiento."), nil
+			}
+
+			isContrasted := "0"
+			if strings.Contains(selectedAppt.Observations, "Contrastada") {
+				isContrasted = "1"
+			}
+			isSedated := "0"
+			if strings.Contains(selectedAppt.Observations, "Sedacion") {
+				isSedated = "1"
+			}
+
+			block := apptSvc.FindConsecutiveBlock(appointments, selectedID)
+			espacios := len(block)
+			if espacios == 0 {
+				espacios = 1
+			}
+
+			return sm.NewResult(sm.StateSearchSlots).
+				WithContext("cups_code", cupsCode).
+				WithContext("cups_name", cupsName).
+				WithContext("is_contrasted", isContrasted).
+				WithContext("is_sedated", isSedated).
+				WithContext("espacios", fmt.Sprintf("%d", espacios)).
+				WithContext("preferred_doctor_doc", selectedAppt.DoctorID).
+				WithContext("total_procedures", "1").
+				WithContext("current_procedure_idx", "0").
+				WithContext("reschedule_appt_id", selectedAppt.ID).
+				WithContext("patient_age", "0").
+				WithText("Buscando horarios disponibles para reprogramar tu cita de *"+cupsName+"*...").
+				WithEvent("appointment_reschedule_started", map[string]interface{}{
+					"old_appt_id": selectedAppt.ID,
+					"cups_code":   cupsCode,
+				}), nil
+
+		case "appt_preparation":
+			return showAppointmentPreparation(ctx, sess, apptSvc, procRepo, addrMapper)
+
 		case "appt_back":
+			var appointments []domain.Appointment
+			json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments)
+			listMsg := buildAppointmentList(apptSvc, appointments)
+
 			return sm.NewResult(sm.StateListAppointments).
+				WithList(listMsg.body, listMsg.button, listMsg.section).
 				WithClearCtx("selected_appointment_id"), nil
+
+		case "appt_menu":
+			r := sm.NewResult(sm.StateMainMenu).
+				WithClearCtx("selected_appointment_id", "appointments_json")
+			r.Messages = append(r.Messages, buildMainMenuList())
+			return r.WithEvent("appointment_back_to_menu", nil), nil
 		}
 
 		return nil, fmt.Errorf("unreachable: selected=%s", selected)
 	}
 }
 
-func handleConfirmAppointment(ctx context.Context, sess *session.Session, apptSvc *services.AppointmentService, selectedID string) (*sm.StateResult, error) {
+// CONFIRM_APPOINTMENT (interactivo) — reconfirmación antes de confirmar la cita
+func confirmAppointmentHandler(apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository, addrMapper *services.AddressMapper) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		result, selected := sm.ValidateButtonResponse(sess, msg, "confirm_yes", "confirm_no")
+		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
+			result.Messages = nil
+			return sm.NewResult(sess.CurrentState).
+				WithButtons("¿Estás seguro de *confirmar* esta cita?",
+					sm.Button{Text: "Sí, confirmar", Payload: "confirm_yes"},
+					sm.Button{Text: "No, volver", Payload: "confirm_no"},
+				), nil
+		}
+
+		switch selected {
+		case "confirm_yes":
+			return executeConfirmAppointment(ctx, sess, apptSvc, procRepo, addrMapper)
+
+		case "confirm_no":
+			// Volver al detalle de la cita
+			return backToAppointmentAction(sess, apptSvc), nil
+		}
+
+		return nil, fmt.Errorf("unreachable: selected=%s", selected)
+	}
+}
+
+// CANCEL_APPOINTMENT (interactivo) — reconfirmación antes de cancelar la cita.
+func cancelAppointmentHandler(apptSvc *services.AppointmentService, onCancel CancellationCallback) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		result, selected := sm.ValidateButtonResponse(sess, msg, "cancel_yes", "cancel_no")
+		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
+			result.Messages = nil
+			return sm.NewResult(sess.CurrentState).
+				WithButtons("¿Estás seguro de *cancelar* esta cita? Esta acción no se puede deshacer.",
+					sm.Button{Text: "Sí, cancelar", Payload: "cancel_yes"},
+					sm.Button{Text: "No, volver", Payload: "cancel_no"},
+				), nil
+		}
+
+		switch selected {
+		case "cancel_yes":
+			return executeCancelAppointment(ctx, sess, apptSvc, onCancel)
+
+		case "cancel_no":
+			return backToAppointmentAction(sess, apptSvc), nil
+		}
+
+		return nil, fmt.Errorf("unreachable: selected=%s", selected)
+	}
+}
+
+// NO_APPOINTMENTS (interactivo) — menú cuando no hay citas
+func noAppointmentsHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		result, selected := sm.ValidateButtonResponse(sess, msg, "no_appt_menu", "no_appt_end")
+		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
+			result.Messages = nil
+			return sm.NewResult(sess.CurrentState).
+				WithButtons("No tienes citas pendientes o confirmadas.\n\n¿Qué deseas hacer?",
+					sm.Button{Text: "Menú principal", Payload: "no_appt_menu"},
+					sm.Button{Text: "Terminar chat", Payload: "no_appt_end"},
+				), nil
+		}
+
+		switch selected {
+		case "no_appt_menu":
+			r := sm.NewResult(sm.StateMainMenu)
+			r.Messages = append(r.Messages, buildMainMenuList())
+			return r.WithEvent("no_appt_back_to_menu", nil), nil
+
+		case "no_appt_end":
+			return sm.NewResult(sm.StateFarewell).
+				WithEvent("no_appt_farewell", nil), nil
+		}
+
+		return nil, fmt.Errorf("unreachable: selected=%s", selected)
+	}
+}
+
+// --- Helpers privados ---
+
+// executeConfirmAppointment realiza la confirmación de la cita, guardando el conversationID como medio.
+// Busca preparaciones, video/audio y dirección con Maps URL para enviarlas al paciente.
+func executeConfirmAppointment(ctx context.Context, sess *session.Session, apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository, addrMapper *services.AddressMapper) (*sm.StateResult, error) {
+	selectedID := sess.GetContext("selected_appointment_id")
+
 	var appointments []domain.Appointment
 	if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
 		return sm.NewResult(sm.StatePostActionMenu).
@@ -256,7 +349,7 @@ func handleConfirmAppointment(ctx context.Context, sess *session.Session, apptSv
 			WithClearCtx("selected_appointment_id"), nil
 	}
 
-	if err := apptSvc.ConfirmBlock(ctx, block, "whatsapp", ""); err != nil {
+	if err := apptSvc.ConfirmBlock(ctx, block, "whatsapp", sess.ConversationID); err != nil {
 		return sm.NewResult(sm.StatePostActionMenu).
 			WithText("Error al confirmar la cita. Intenta más tarde.").
 			WithEvent("appointment_confirm_error", map[string]interface{}{"error": err.Error()}), nil
@@ -264,8 +357,51 @@ func handleConfirmAppointment(ctx context.Context, sess *session.Session, apptSv
 
 	msg := fmt.Sprintf("*Cita confirmada exitosamente!*\n\n%d cita(s) confirmada(s).", len(block))
 
-	return sm.NewResult(sm.StatePostActionMenu).
-		WithText(msg).
+	// Buscar preparaciones, video/audio y dirección del procedimiento
+	if procRepo != nil {
+		var prepText string
+		address := ""
+		for _, a := range block {
+			for _, proc := range a.Procedures {
+				if proc.CupCode == "" {
+					continue
+				}
+				p, err := procRepo.FindByCode(ctx, proc.CupCode)
+				if err != nil || p == nil {
+					continue
+				}
+				if address == "" && p.Address != "" {
+					address = p.Address
+				}
+				if p.Preparation != "" {
+					prepText += fmt.Sprintf("\n• Para *%s*: %s", proc.CupName, p.Preparation)
+					if p.VideoURL != "" {
+						prepText += fmt.Sprintf("\n  📹 Ver video: %s", p.VideoURL)
+					}
+					if p.AudioURL != "" {
+						prepText += fmt.Sprintf("\n  🎵 Audio: %s", p.AudioURL)
+					}
+				}
+			}
+		}
+		if address != "" {
+			if addrMapper != nil {
+				msg += "\n" + addrMapper.FormatAddress(address)
+			} else {
+				msg += fmt.Sprintf("\n*Dirección:* %s", address)
+			}
+		}
+		if prepText != "" {
+			msg += "\n\n📋 *Preparación:*" + prepText
+		}
+	}
+
+	msg += "\n\nRecuerda presentarte 15 minutos antes con tu documento."
+
+	r := sm.NewResult(sm.StatePostActionMenu).
+		WithText(msg)
+	r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer ahora?"))
+	return r.
 		WithClearCtx("selected_appointment_id", "appointments_json").
 		WithEvent("appointment_confirmed", map[string]interface{}{
 			"appointment_id": selectedID,
@@ -273,7 +409,10 @@ func handleConfirmAppointment(ctx context.Context, sess *session.Session, apptSv
 		}), nil
 }
 
-func handleCancelAppointment(ctx context.Context, sess *session.Session, apptSvc *services.AppointmentService, selectedID string, onCancel CancellationCallback) (*sm.StateResult, error) {
+// executeCancelAppointment realiza la cancelación de la cita.
+func executeCancelAppointment(ctx context.Context, sess *session.Session, apptSvc *services.AppointmentService, onCancel CancellationCallback) (*sm.StateResult, error) {
+	selectedID := sess.GetContext("selected_appointment_id")
+
 	var appointments []domain.Appointment
 	if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
 		return sm.NewResult(sm.StatePostActionMenu).
@@ -287,13 +426,13 @@ func handleCancelAppointment(ctx context.Context, sess *session.Session, apptSvc
 			WithClearCtx("selected_appointment_id"), nil
 	}
 
-	if err := apptSvc.CancelBlock(ctx, block, "Cancelada por paciente vía WhatsApp", "whatsapp", ""); err != nil {
+	if err := apptSvc.CancelBlock(ctx, block, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
 		return sm.NewResult(sm.StatePostActionMenu).
 			WithText("Error al cancelar la cita. Intenta más tarde.").
 			WithEvent("appointment_cancel_error", map[string]interface{}{"error": err.Error()}), nil
 	}
 
-	// Cambio 13: Notify waiting list for freed CUPS codes
+	// Notify waiting list for freed CUPS codes
 	if onCancel != nil {
 		seen := make(map[string]bool)
 		for _, appt := range block {
@@ -309,12 +448,204 @@ func handleCancelAppointment(ctx context.Context, sess *session.Session, apptSvc
 	msg := fmt.Sprintf("*Cita cancelada.*\n\n%d cita(s) cancelada(s).", len(block))
 
 	return sm.NewResult(sm.StatePostActionMenu).
-		WithText(msg).
+		WithButtons(msg+"\n\n¿Qué deseas hacer ahora?",
+			sm.Button{Text: "Ver mis citas", Payload: "ver_citas"},
+			sm.Button{Text: "Menú principal", Payload: "menu_principal"},
+			sm.Button{Text: "Terminar chat", Payload: "terminar_chat"},
+		).
 		WithClearCtx("selected_appointment_id", "appointments_json").
 		WithEvent("appointment_cancelled", map[string]interface{}{
 			"appointment_id": selectedID,
 			"block_size":     len(block),
 		}), nil
+}
+
+// backToAppointmentAction re-muestra el detalle de la cita + lista de acciones.
+func backToAppointmentAction(sess *session.Session, apptSvc *services.AppointmentService) *sm.StateResult {
+	selectedID := sess.GetContext("selected_appointment_id")
+	var appointments []domain.Appointment
+	json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments)
+
+	detail := buildAppointmentDetail(apptSvc, appointments, selectedID)
+	if detail == "" {
+		return sm.NewResult(sm.StateListAppointments).
+			WithText("Cita no encontrada. Selecciona otra.").
+			WithClearCtx("selected_appointment_id")
+	}
+
+	return sm.NewResult(sm.StateAppointmentAction).
+		WithList(detail+"\n\n¿Qué deseas hacer con esta cita?", "Ver opciones",
+			sm.ListSection{Title: "Acciones", Rows: appointmentActionRows()},
+		)
+}
+
+// showAppointmentPreparation looks up preparation instructions for the selected appointment's procedures.
+func showAppointmentPreparation(ctx context.Context, sess *session.Session, apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository, addrMapper *services.AddressMapper) (*sm.StateResult, error) {
+	selectedID := sess.GetContext("selected_appointment_id")
+	var appointments []domain.Appointment
+	json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments)
+
+	block := apptSvc.FindConsecutiveBlock(appointments, selectedID)
+	if len(block) == 0 {
+		return sm.NewResult(sm.StateListAppointments).
+			WithText("Cita no encontrada. Selecciona otra.").
+			WithClearCtx("selected_appointment_id"), nil
+	}
+
+	if procRepo == nil {
+		r := backToAppointmentAction(sess, apptSvc)
+		r.Messages = append([]sm.OutboundMessage{&sm.TextMessage{Text: "No se pudo consultar la preparación en este momento."}}, r.Messages...)
+		return r, nil
+	}
+
+	var prepText string
+	var address string
+	seen := make(map[string]bool)
+	for _, appt := range block {
+		for _, proc := range appt.Procedures {
+			if proc.CupCode == "" || seen[proc.CupCode] {
+				continue
+			}
+			seen[proc.CupCode] = true
+			p, err := procRepo.FindByCode(ctx, proc.CupCode)
+			if err != nil || p == nil {
+				continue
+			}
+			if p.Preparation != "" {
+				prepText += fmt.Sprintf("\n\n*%s:*\n%s", proc.CupName, p.Preparation)
+			}
+			if p.VideoURL != "" {
+				prepText += fmt.Sprintf("\n📹 Ver video: %s", p.VideoURL)
+			}
+			if p.AudioURL != "" {
+				prepText += fmt.Sprintf("\n🎵 Audio: %s", p.AudioURL)
+			}
+			if p.Address != "" && address == "" {
+				address = p.Address
+			}
+		}
+	}
+
+	var msg string
+	if prepText == "" {
+		msg = "No se encontraron instrucciones de preparación para esta cita."
+	} else {
+		msg = "📋 *Preparación para tu cita:*" + prepText
+		if address != "" {
+			if addrMapper != nil {
+				msg += "\n\n" + addrMapper.FormatAddress(address)
+			} else {
+				msg += fmt.Sprintf("\n\n📍 *Dirección:* %s", address)
+			}
+		}
+	}
+
+	r := backToAppointmentAction(sess, apptSvc)
+	r.Messages = append([]sm.OutboundMessage{&sm.TextMessage{Text: msg}}, r.Messages...)
+	return r.WithEvent("appointment_preparation_viewed", map[string]interface{}{
+		"appointment_id": selectedID,
+	}), nil
+}
+
+// buildAppointmentDetail construye el texto de detalle de una cita seleccionada.
+func buildAppointmentDetail(apptSvc *services.AppointmentService, appointments []domain.Appointment, selectedID string) string {
+	var appt *domain.Appointment
+	for i, a := range appointments {
+		if a.ID == selectedID {
+			appt = &appointments[i]
+			break
+		}
+	}
+
+	if appt == nil {
+		return ""
+	}
+
+	block := apptSvc.FindConsecutiveBlock(appointments, selectedID)
+
+	statusText := "Pendiente"
+	if appt.Confirmed {
+		statusText = "Confirmada"
+	}
+
+	cupName := services.GetFirstCupName(*appt)
+	detail := fmt.Sprintf("*Detalle de tu cita:*\n\n"+
+		"Procedimiento: %s\n"+
+		"Doctor: %s\n"+
+		"Fecha: %s\n"+
+		"Hora: %s\n"+
+		"Estado: %s",
+		cupName,
+		appt.DoctorName,
+		utils.FormatFriendlyDate(appt.Date),
+		services.FormatTimeSlot(appt.TimeSlot),
+		statusText)
+
+	if appt.Observations != "" {
+		detail += fmt.Sprintf("\nObservaciones: %s", appt.Observations)
+	}
+
+	if len(block) > 1 {
+		detail += fmt.Sprintf("\n\nEsta cita tiene *%d procedimientos consecutivos* que se gestionarán juntos.", len(block))
+	}
+
+	return detail
+}
+
+// appointmentActionRows retorna las filas de la lista de acciones para una cita.
+func appointmentActionRows() []sm.ListRow {
+	return []sm.ListRow{
+		{ID: "appt_confirm", Title: "Confirmar cita", Description: "Confirmar asistencia a esta cita"},
+		{ID: "appt_cancel", Title: "Cancelar cita", Description: "Cancelar esta cita"},
+		{ID: "appt_reschedule", Title: "Reprogramar cita", Description: "Buscar nuevo horario para esta cita"},
+		{ID: "appt_preparation", Title: "Ver preparación", Description: "Instrucciones de preparación para el examen"},
+		{ID: "appt_back", Title: "Volver al listado", Description: "Ver otras citas programadas"},
+		{ID: "appt_menu", Title: "Menú principal", Description: "Volver al menú principal"},
+	}
+}
+
+// appointmentListData holds the data needed to build a WhatsApp list message
+type appointmentListData struct {
+	body    string
+	button  string
+	section sm.ListSection
+}
+
+// buildAppointmentList constructs the list display for appointments.
+// Each appointment is shown as its own row (no block grouping for display).
+// Block grouping is only used in confirm/cancel actions via FindConsecutiveBlock.
+func buildAppointmentList(apptSvc *services.AppointmentService, appointments []domain.Appointment) appointmentListData {
+	maxShow := 10
+
+	rows := make([]sm.ListRow, 0, maxShow)
+	for _, appt := range appointments {
+		cupName := services.GetFirstCupName(appt)
+		title := fmt.Sprintf("%s %s", utils.FormatFriendlyDateShort(appt.Date), services.FormatTimeSlot(appt.TimeSlot))
+		desc := fmt.Sprintf("Dr. %s - %s", appt.DoctorName, cupName)
+
+		rows = append(rows, sm.ListRow{
+			ID:          appt.ID,
+			Title:       truncate(title, 24),
+			Description: truncate(desc, 72),
+		})
+
+		if len(rows) >= maxShow {
+			break
+		}
+	}
+
+	body := fmt.Sprintf("Tienes *%d cita(s)* programadas.", len(appointments))
+	if len(appointments) > maxShow {
+		body += fmt.Sprintf("\nMostrando las primeras %d:", maxShow)
+	} else {
+		body += "\nSelecciona una para ver detalles:"
+	}
+
+	return appointmentListData{
+		body:    body,
+		button:  "Ver citas",
+		section: sm.ListSection{Title: "Tus citas", Rows: rows},
+	}
 }
 
 // truncate corta un string a maxLen caracteres

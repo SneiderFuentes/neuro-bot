@@ -333,12 +333,13 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 		firstEntry := entries[0]
 
 		query := services.SlotQuery{
-			CupsCode:     cupsCode,
-			PatientAge:   firstEntry.PatientAge,
-			IsContrasted: firstEntry.IsContrasted,
-			IsSedated:    firstEntry.IsSedated,
-			Espacios:     firstEntry.Espacios,
-			MaxSlots:     20, // Buscar más slots para saber cuántos pacientes notificar
+			CupsCode:      cupsCode,
+			PatientAge:    firstEntry.PatientAge,
+			IsContrasted:  firstEntry.IsContrasted,
+			IsSedated:     firstEntry.IsSedated,
+			Espacios:      firstEntry.Espacios,
+			ProcedureType: firstEntry.ProcedureType,
+			MaxSlots:      20, // Buscar más slots para saber cuántos pacientes notificar
 		}
 
 		// SOAT monthly limit filter for SAN01 WL entries

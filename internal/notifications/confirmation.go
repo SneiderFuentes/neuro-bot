@@ -71,13 +71,20 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 				if p.Preparation != "" {
 					prepText += fmt.Sprintf("\n- Para *%s*: %s", proc.CupName, p.Preparation)
 					if p.VideoURL != "" {
-						prepText += fmt.Sprintf("\n  Video: %s", p.VideoURL)
+						prepText += fmt.Sprintf("\n  📹 Video: %s", p.VideoURL)
+					}
+					if p.AudioURL != "" {
+						prepText += fmt.Sprintf("\n  🎵 Audio: %s", p.AudioURL)
 					}
 				}
 			}
 
 			if address != "" {
-				msg += fmt.Sprintf("\n*Direccion:* %s", address)
+				if m.addrMapper != nil {
+					msg += "\n" + m.addrMapper.FormatAddress(address)
+				} else {
+					msg += fmt.Sprintf("\n*Direccion:* %s", address)
+				}
 			}
 			if prepText != "" {
 				msg += "\n\n*Preparacion:*" + prepText

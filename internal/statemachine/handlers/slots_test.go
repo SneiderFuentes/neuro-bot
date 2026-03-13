@@ -73,7 +73,7 @@ func TestSearchSlots_Found(t *testing.T) {
 	)
 
 	m := sm.NewMachine()
-	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil)
+	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil)
 
 	sess := testSess(sm.StateSearchSlots)
 	sess.Context["cups_code"] = "890271"
@@ -103,7 +103,7 @@ func TestSearchSlots_NotFound(t *testing.T) {
 	)
 
 	m := sm.NewMachine()
-	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil)
+	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil)
 
 	sess := testSess(sm.StateSearchSlots)
 	sess.Context["cups_code"] = "890271"
@@ -125,7 +125,7 @@ func TestShowSlots_Selection(t *testing.T) {
 	slots := sampleSlots()
 
 	m := sm.NewMachine()
-	m.Register(sm.StateShowSlots, showSlotsHandler())
+	m.Register(sm.StateShowSlots, showSlotsHandler(nil))
 
 	sess := testSess(sm.StateShowSlots)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
@@ -144,7 +144,7 @@ func TestShowSlots_MoreSlots(t *testing.T) {
 	slots := sampleSlots()
 
 	m := sm.NewMachine()
-	m.Register(sm.StateShowSlots, showSlotsHandler())
+	m.Register(sm.StateShowSlots, showSlotsHandler(nil))
 
 	sess := testSess(sm.StateShowSlots)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
@@ -162,7 +162,7 @@ func TestShowSlots_InvalidSelection(t *testing.T) {
 	slots := sampleSlots()
 
 	m := sm.NewMachine()
-	m.Register(sm.StateShowSlots, showSlotsHandler())
+	m.Register(sm.StateShowSlots, showSlotsHandler(nil))
 
 	sess := testSess(sm.StateShowSlots)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
@@ -190,7 +190,7 @@ func registerConfirmBookingConfig(m *sm.Machine) {
 				result.ClearCtx = append(result.ClearCtx, "selected_slot_id", "available_slots_json")
 				return
 			}
-			summary := buildBookingSummary(sess, slot)
+			summary := buildBookingSummary(sess, slot, nil)
 			result.Messages = append(result.Messages, &sm.ButtonMessage{
 				Text: summary,
 				Buttons: []sm.Button{
@@ -218,8 +218,9 @@ func TestConfirmBooking_Confirm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateCreateAppointment {
-		t.Errorf("expected CREATE_APPOINTMENT, got %s", result.NextState)
+	// Now goes to RECONFIRM_BOOKING instead of CREATE_APPOINTMENT
+	if result.NextState != sm.StateReconfirmBooking {
+		t.Errorf("expected RECONFIRM_BOOKING, got %s", result.NextState)
 	}
 }
 
@@ -447,7 +448,7 @@ func TestBookingSuccess_SingleProcedure(t *testing.T) {
 	slots := sampleSlots()
 
 	m := sm.NewMachine()
-	m.Register(sm.StateBookingSuccess, bookingSuccessHandler())
+	m.Register(sm.StateBookingSuccess, bookingSuccessHandler(nil))
 
 	sess := testSess(sm.StateBookingSuccess)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
@@ -484,7 +485,7 @@ func TestBookingSuccess_MultiProcedure(t *testing.T) {
 	groupsJSON, _ := json.Marshal(groups)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateBookingSuccess, bookingSuccessHandler())
+	m.Register(sm.StateBookingSuccess, bookingSuccessHandler(nil))
 
 	sess := testSess(sm.StateBookingSuccess)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
@@ -500,8 +501,8 @@ func TestBookingSuccess_MultiProcedure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateAskContrasted {
-		t.Errorf("expected ASK_CONTRASTED, got %s", result.NextState)
+	if result.NextState != sm.StateCheckSpecialCups {
+		t.Errorf("expected CHECK_SPECIAL_CUPS, got %s", result.NextState)
 	}
 	if result.UpdateCtx["cups_code"] != "883533" {
 		t.Errorf("expected cups_code=883533, got %s", result.UpdateCtx["cups_code"])
@@ -722,5 +723,42 @@ func TestConfirmBooking_InvalidInput_SlotNotFound(t *testing.T) {
 	}
 	if result.NextState != sm.StateSearchSlots {
 		t.Errorf("expected SEARCH_SLOTS, got %s", result.NextState)
+	}
+}
+
+// --- reconfirmBookingHandler tests ---
+
+func TestReconfirmBooking_Yes(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateReconfirmBooking, reconfirmBookingHandler(nil))
+
+	sess := testSess(sm.StateReconfirmBooking)
+
+	result, err := m.Process(context.Background(), sess, postbackM("reconfirm_yes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateCreateAppointment {
+		t.Errorf("expected CREATE_APPOINTMENT, got %s", result.NextState)
+	}
+}
+
+func TestReconfirmBooking_No(t *testing.T) {
+	slots := sampleSlots()
+
+	m := sm.NewMachine()
+	m.Register(sm.StateReconfirmBooking, reconfirmBookingHandler(nil))
+
+	sess := testSess(sm.StateReconfirmBooking)
+	sess.Context["available_slots_json"] = slotsJSON(slots)
+	sess.Context["selected_slot_id"] = slots[0].TimeSlot
+	sess.Context["cups_name"] = "Electromiografia"
+
+	result, err := m.Process(context.Background(), sess, postbackM("reconfirm_no"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateConfirmBooking {
+		t.Errorf("expected CONFIRM_BOOKING, got %s", result.NextState)
 	}
 }

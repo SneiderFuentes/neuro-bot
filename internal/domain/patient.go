@@ -30,26 +30,27 @@ type Patient struct {
 }
 
 type CreatePatientInput struct {
-	DocumentType    string
-	DocumentNumber  string
-	FirstName       string
-	SecondName      string
-	FirstSurname    string
-	SecondSurname   string
-	BirthDate       time.Time
-	Gender          string
-	Phone           string
-	Email           string
-	Address         string
-	CityCode        string
-	Zone            string
-	EntityCode      string
-	AffiliationType string
-	UserType        string
-	Occupation      string
-	Level           string
-	MaritalStatus   string
-	BirthPlace      string
-	EducationLevel  string
-	CountryCode     string
+	DocumentType       string
+	DocumentNumber     string
+	DocumentIssuePlace string
+	FirstName          string
+	SecondName         string
+	FirstSurname       string
+	SecondSurname      string
+	BirthDate          time.Time
+	Gender             string
+	Phone              string
+	Email              string
+	Address            string
+	CityCode           string
+	Zone               string
+	EntityCode         string
+	AffiliationType    string
+	UserType           string
+	Occupation         string
+	Level              string
+	MaritalStatus      string
+	BirthPlace         string
+	EducationLevel     string
+	CountryCode        string
 }

@@ -70,14 +70,14 @@ func UnsupportedMessageInterceptor() Interceptor {
 	}
 }
 
-// ImageOutOfContextInterceptor rechaza imágenes fuera del estado UPLOAD_MEDICAL_ORDER
+// ImageOutOfContextInterceptor rechaza imágenes y documentos fuera del estado UPLOAD_MEDICAL_ORDER
 func ImageOutOfContextInterceptor() Interceptor {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*StateResult, bool) {
-		if msg.MessageType != "image" {
+		if msg.MessageType != "image" && msg.MessageType != "document" {
 			return nil, false
 		}
 
-		// Imagen SÍ es esperada en UPLOAD_MEDICAL_ORDER
+		// Imagen/documento SÍ es esperada en UPLOAD_MEDICAL_ORDER
 		if sess.CurrentState == StateUploadMedicalOrder {
 			return nil, false
 		}

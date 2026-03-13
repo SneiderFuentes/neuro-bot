@@ -309,6 +309,13 @@ func TestConfirmOCRResult_Incorrect(t *testing.T) {
 
 // --- uploadMedicalOrderHandler image tests ---
 
+// newMockFileServer creates a test server that serves JPEG bytes (for AnalyzeDocument download).
+func newMockFileServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10}) // JPEG magic bytes
+	}))
+}
+
 func imageMsg(url string) bird.InboundMessage {
 	return bird.InboundMessage{
 		ID:          "msg-img",
@@ -319,17 +326,30 @@ func imageMsg(url string) bird.InboundMessage {
 	}
 }
 
+func documentMsg(url string) bird.InboundMessage {
+	return bird.InboundMessage{
+		ID:          "msg-doc",
+		Phone:       "+573001234567",
+		MessageType: "document",
+		DocumentURL: url,
+		ReceivedAt:  time.Now(),
+	}
+}
+
 func TestUploadMedicalOrder_ImageSuccess(t *testing.T) {
 	ocrResponse := `{"choices":[{"message":{"content":"{\"cups\":[{\"cups_code\":\"890271\",\"cups_name\":\"EMG\",\"quantity\":1}],\"entity\":\"\",\"error\":\"\"}"}}]}`
-	srv := newMockOCRServer(ocrResponse)
-	defer srv.Close()
-	ocrSvc := services.NewOCRServiceForTest(srv.URL)
+	ocrSrv := newMockOCRServer(ocrResponse)
+	defer ocrSrv.Close()
+	fileSrv := newMockFileServer()
+	defer fileSrv.Close()
+
+	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
-	result, err := m.Process(context.Background(), sess, imageMsg("https://example.com/order.jpg"))
+	result, err := m.Process(context.Background(), sess, imageMsg(fileSrv.URL+"/order.jpg"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,6 +358,47 @@ func TestUploadMedicalOrder_ImageSuccess(t *testing.T) {
 	}
 	if result.UpdateCtx["ocr_cups_json"] == "" {
 		t.Error("expected ocr_cups_json to be set")
+	}
+}
+
+func TestUploadMedicalOrder_DocumentSuccess(t *testing.T) {
+	ocrResponse := `{"choices":[{"message":{"content":"{\"cups\":[{\"cups_code\":\"890271\",\"cups_name\":\"EMG\",\"quantity\":1}],\"entity\":\"\",\"error\":\"\"}"}}]}`
+	ocrSrv := newMockOCRServer(ocrResponse)
+	defer ocrSrv.Close()
+	fileSrv := newMockFileServer()
+	defer fileSrv.Close()
+
+	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
+
+	m := sm.NewMachine()
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+
+	sess := testSess(sm.StateUploadMedicalOrder)
+	result, err := m.Process(context.Background(), sess, documentMsg(fileSrv.URL+"/order.pdf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateValidateOCR {
+		t.Errorf("expected VALIDATE_OCR, got %s", result.NextState)
+	}
+	if result.UpdateCtx["ocr_cups_json"] == "" {
+		t.Error("expected ocr_cups_json to be set")
+	}
+}
+
+func TestUploadMedicalOrder_DocumentEmptyURL(t *testing.T) {
+	ocrSvc := services.NewOCRServiceForTest("http://unused")
+
+	m := sm.NewMachine()
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+
+	sess := testSess(sm.StateUploadMedicalOrder)
+	result, err := m.Process(context.Background(), sess, documentMsg(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateUploadMedicalOrder {
+		t.Errorf("expected UPLOAD_MEDICAL_ORDER (retry), got %s", result.NextState)
 	}
 }
 
@@ -359,19 +420,22 @@ func TestUploadMedicalOrder_ImageEmptyURL(t *testing.T) {
 }
 
 func TestUploadMedicalOrder_ImageOCRError(t *testing.T) {
-	// Server returns 500 to simulate OCR error
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// OCR server returns 500 to simulate OCR error
+	ocrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		w.Write([]byte("internal server error"))
 	}))
-	defer srv.Close()
-	ocrSvc := services.NewOCRServiceForTest(srv.URL)
+	defer ocrSrv.Close()
+	fileSrv := newMockFileServer()
+	defer fileSrv.Close()
+
+	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
-	result, err := m.Process(context.Background(), sess, imageMsg("https://example.com/order.jpg"))
+	result, err := m.Process(context.Background(), sess, imageMsg(fileSrv.URL+"/order.jpg"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,15 +447,18 @@ func TestUploadMedicalOrder_ImageOCRError(t *testing.T) {
 
 func TestUploadMedicalOrder_ImageNoCups(t *testing.T) {
 	ocrResponse := `{"choices":[{"message":{"content":"{\"cups\":[],\"entity\":\"\",\"error\":\"\"}"}}]}`
-	srv := newMockOCRServer(ocrResponse)
-	defer srv.Close()
-	ocrSvc := services.NewOCRServiceForTest(srv.URL)
+	ocrSrv := newMockOCRServer(ocrResponse)
+	defer ocrSrv.Close()
+	fileSrv := newMockFileServer()
+	defer fileSrv.Close()
+
+	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
-	result, err := m.Process(context.Background(), sess, imageMsg("https://example.com/order.jpg"))
+	result, err := m.Process(context.Background(), sess, imageMsg(fileSrv.URL+"/order.jpg"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,15 +471,18 @@ func TestUploadMedicalOrder_ImageNoCups(t *testing.T) {
 func TestUploadMedicalOrder_StoresDocument(t *testing.T) {
 	// OCR returns document "19262024" in the response
 	ocrResponse := `{"choices":[{"message":{"content":"{\"cups\":[{\"cups_code\":\"890271\",\"cups_name\":\"EMG\",\"quantity\":1}],\"entity\":\"\",\"error\":\"\",\"documento\":\"19262024\"}"}}]}`
-	srv := newMockOCRServer(ocrResponse)
-	defer srv.Close()
-	ocrSvc := services.NewOCRServiceForTest(srv.URL)
+	ocrSrv := newMockOCRServer(ocrResponse)
+	defer ocrSrv.Close()
+	fileSrv := newMockFileServer()
+	defer fileSrv.Close()
+
+	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
 	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
-	result, err := m.Process(context.Background(), sess, imageMsg("https://example.com/order.jpg"))
+	result, err := m.Process(context.Background(), sess, imageMsg(fileSrv.URL+"/order.jpg"))
 	if err != nil {
 		t.Fatal(err)
 	}

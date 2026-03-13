@@ -144,9 +144,26 @@ func (r *ScheduleRepo) FindByScheduleID(ctx context.Context, scheduleID int, sch
 	query := `SELECT RegistroNo, IdTercero, NombreAgenda
 	          FROM tblagendas
 	          WHERE RegistroNo = ?`
+	args := []interface{}{scheduleID}
+
+	// Filter by agenda name matching the procedure type (replicates Laravel ScheduleRepository logic)
+	if scheduleType != "" {
+		st := strings.ToLower(scheduleType)
+		switch st {
+		case "procedimiento", "nocturno", "sedacion":
+			// Special types: agenda name MUST contain the keyword
+			query += ` AND LOWER(NombreAgenda) LIKE ?`
+			args = append(args, "%"+st+"%")
+		default:
+			// Default types (consulta, examen, etc.): exclude special agendas
+			query += ` AND LOWER(NombreAgenda) NOT LIKE '%procedimiento%'
+			           AND LOWER(NombreAgenda) NOT LIKE '%nocturno%'
+			           AND LOWER(NombreAgenda) NOT LIKE '%sedacion%'`
+		}
+	}
 
 	var s domain.Schedule
-	err := r.db.QueryRowContext(ctx, query, scheduleID).Scan(&s.ID, &s.DoctorDocument, &s.Name)
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&s.ID, &s.DoctorDocument, &s.Name)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

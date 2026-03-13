@@ -44,8 +44,30 @@ type Contact struct {
 }
 
 type MessageBody struct {
-	Type string   `json:"type"` // text, image, document, list, interactive
-	Text TextBody `json:"text"`
+	Type        string       `json:"type"` // text, image, document, file, list, interactive
+	Text        TextBody     `json:"text"`
+	List        TextBody     `json:"list"`        // Bird may send list responses under "list" key
+	Interactive TextBody     `json:"interactive"` // Bird may send interactive responses under "interactive" key
+	Image       MediaBody    `json:"image"`       // Bird image: body.image.images[0].mediaUrl
+	File        FileBody     `json:"file"`        // Bird file/document: body.file.files[0].mediaUrl
+}
+
+type MediaBody struct {
+	Images []MediaItem `json:"images"`
+}
+
+type FileBody struct {
+	Files []FileItem `json:"files"`
+}
+
+type MediaItem struct {
+	MediaURL string `json:"mediaUrl"`
+}
+
+type FileItem struct {
+	MediaURL    string `json:"mediaUrl"`
+	ContentType string `json:"contentType"`
+	Filename    string `json:"filename"`
 }
 
 type TextBody struct {
@@ -153,6 +175,7 @@ type InboundMessage struct {
 	MessageType     string // text, image, document, postback, audio, video, location, contact, sticker
 	Text            string // Texto del mensaje o payload del postback
 	ImageURL        string
+	DocumentURL     string
 	ConversationID  string
 	ReceivedAt      time.Time
 	IsPostback      bool

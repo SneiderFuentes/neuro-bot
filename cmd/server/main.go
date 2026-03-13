@@ -25,6 +25,7 @@ import (
 	"github.com/neuro-bot/neuro-bot/internal/session"
 	"github.com/neuro-bot/neuro-bot/internal/statemachine"
 	"github.com/neuro-bot/neuro-bot/internal/statemachine/handlers"
+	tg "github.com/neuro-bot/neuro-bot/internal/telegram"
 	"github.com/neuro-bot/neuro-bot/internal/tracking"
 	"github.com/neuro-bot/neuro-bot/internal/worker"
 )
@@ -37,6 +38,14 @@ func main() {
 
 	// Configurar logger
 	initLogger(cfg.LogLevel)
+
+	// Telegram error alerts (optional — wraps slog handler)
+	if tgClient := tg.NewClient(cfg.TelegramBotToken, cfg.TelegramChatID); tgClient != nil {
+		alertHandler := tg.NewAlertHandler(slog.Default().Handler(), tgClient)
+		go alertHandler.Start(ctx)
+		slog.SetDefault(slog.New(alertHandler))
+		slog.Info("telegram error alerts enabled")
+	}
 
 	// Configurar timezone
 	loc, err := time.LoadLocation(cfg.Timezone)
@@ -99,7 +108,7 @@ func main() {
 			slog.Warn("failed to load cups context for OCR", "error", err)
 		}
 	}
-	ocrSvc := services.NewOCRService(cfg.OpenAIAPIKey, cfg.OpenAIModel, cupsContext)
+	ocrSvc := services.NewOCRService(cfg.OpenAIAPIKey, cfg.OpenAIModel, cupsContext, cfg.BirdAccessKeyID)
 
 	if repos != nil {
 		patientSvc = services.NewPatientService(repos.Patient)
@@ -114,6 +123,13 @@ func main() {
 	// Location repo (local DB)
 	locationRepo := localrepo.NewLocationRepo(localDB)
 
+	// Address mapper (maps procedure addresses → Google Maps URLs from center_locations)
+	var addrMapper *services.AddressMapper
+	if locations, err := locationRepo.FindActive(ctx); err == nil && len(locations) > 0 {
+		addrMapper = services.NewAddressMapper(locations)
+		slog.Info("address mapper loaded", "locations", len(locations))
+	}
+
 	// Fase 5: Saludo e Identificación + Results/Locations
 	handlers.RegisterGreetingHandlers(machine, cfg, locationRepo)
 	handlers.RegisterResultsAndLocationHandlers(machine, cfg, locationRepo)
@@ -126,7 +142,7 @@ func main() {
 	}
 	// Fase 6: Registro de Pacientes
 	if repos != nil && patientSvc != nil {
-		handlers.RegisterRegistrationHandlers(machine, patientSvc, repos.Municipality, repos.Entity)
+		handlers.RegisterRegistrationHandlers(machine, patientSvc, repos.Municipality)
 	}
 	// Fase 7: Consulta y Gestión de Citas
 	// Cambio 13: CancellationCallback — notifyManager captured by reference (assigned later, before server accepts requests)
@@ -137,7 +153,11 @@ func main() {
 		}
 	})
 	if appointmentSvc != nil {
-		handlers.RegisterAppointmentHandlers(machine, appointmentSvc, onCancel)
+		var procRepoForAppts repository.ProcedureRepository
+		if repos != nil {
+			procRepoForAppts = repos.Procedure
+		}
+		handlers.RegisterAppointmentHandlers(machine, appointmentSvc, procRepoForAppts, addrMapper, onCancel)
 	}
 	// Fase 8: Orden Médica y OCR
 	if repos != nil {
@@ -153,7 +173,7 @@ func main() {
 	var slotSvc *services.SlotService
 	if repos != nil && appointmentSvc != nil {
 		slotSvc = services.NewSlotService(repos.Doctor, repos.Schedule)
-		handlers.RegisterSlotHandlers(machine, slotSvc, appointmentSvc, repos.Procedure, repos.Soat, waitingListRepo)
+		handlers.RegisterSlotHandlers(machine, slotSvc, appointmentSvc, repos.Procedure, repos.Soat, waitingListRepo, addrMapper)
 	}
 	// Fase 11: Post-Acción y Escalación
 	handlers.RegisterPostActionHandlers(machine)
@@ -175,6 +195,9 @@ func main() {
 		notifyManager.SetTracker(tracker)
 		if repos != nil {
 			notifyManager.SetProcedureRepo(repos.Procedure)
+		}
+		if addrMapper != nil {
+			notifyManager.SetAddressMapper(addrMapper)
 		}
 		notifyManager.RestorePending(ctx)
 		go notifyManager.StartExpirationChecker(ctx)
@@ -281,6 +304,7 @@ func main() {
 		internalMux.HandleFunc("GET /api/internal/kpis/weekly", internalHandler.HandleWeeklyKPIs)
 		internalMux.HandleFunc("GET /api/internal/kpis/funnel", internalHandler.HandleFunnel)
 		internalMux.HandleFunc("GET /api/internal/kpis/health", internalHandler.HandleHealthKPIs)
+		internalMux.HandleFunc("POST /api/internal/test-alert", internalHandler.HandleTestAlert)
 		mux.Handle("/api/internal/",
 			api.RateLimiter(30, time.Minute)(
 				api.MaxBodySize(

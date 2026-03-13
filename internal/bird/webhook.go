@@ -118,11 +118,17 @@ func ParseInboundMessage(event WebhookEvent) InboundMessage {
 		"conversation_id", msg.ConversationID,
 		"direction", payload.Direction,
 		"body_type", payload.Body.Type,
+		"has_text_actions", len(payload.Body.Text.Actions) > 0,
+		"has_list_actions", len(payload.Body.List.Actions) > 0,
+		"has_interactive_actions", len(payload.Body.Interactive.Actions) > 0,
+		"text_text", payload.Body.Text.Text,
+		"list_text", payload.Body.List.Text,
+		"interactive_text", payload.Body.Interactive.Text,
 	)
 
 	// Clasificar tipo de mensaje
 	switch payload.Body.Type {
-	case "text":
+	case "text", "interactive", "list", "button":
 		if postback, ok := ExtractPostbackPayload(payload.Body); ok {
 			msg.MessageType = "postback"
 			msg.IsPostback = true
@@ -130,13 +136,31 @@ func ParseInboundMessage(event WebhookEvent) InboundMessage {
 			msg.Text = postback
 		} else {
 			msg.MessageType = "text"
+			// Bird may place text under body.text, body.list, or body.interactive
 			msg.Text = payload.Body.Text.Text
+			if msg.Text == "" {
+				msg.Text = payload.Body.List.Text
+			}
+			if msg.Text == "" {
+				msg.Text = payload.Body.Interactive.Text
+			}
 		}
 	case "image":
 		msg.MessageType = "image"
-		msg.ImageURL = payload.Body.Text.Text
-	case "document":
+		if len(payload.Body.Image.Images) > 0 {
+			msg.ImageURL = payload.Body.Image.Images[0].MediaURL
+		}
+		if msg.ImageURL == "" {
+			msg.ImageURL = payload.Body.Text.Text // legacy fallback
+		}
+	case "file", "document":
 		msg.MessageType = "document"
+		if len(payload.Body.File.Files) > 0 {
+			msg.DocumentURL = payload.Body.File.Files[0].MediaURL
+		}
+		if msg.DocumentURL == "" {
+			msg.DocumentURL = payload.Body.Text.Text // legacy fallback
+		}
 	case "audio":
 		msg.MessageType = "audio"
 	case "video":
@@ -155,10 +179,20 @@ func ParseInboundMessage(event WebhookEvent) InboundMessage {
 }
 
 // ExtractPostbackPayload extrae el payload de un postback.
-// Path real: body.text.actions[0].postback.payload
+// Bird may place the postback under body.text, body.list, or body.interactive
+// depending on the original message type.
 func ExtractPostbackPayload(body MessageBody) (string, bool) {
+	// Check body.text.actions (buttons and some postback responses)
 	if len(body.Text.Actions) > 0 && body.Text.Actions[0].Type == "postback" {
 		return body.Text.Actions[0].Postback.Payload, true
+	}
+	// Check body.list.actions (list selection responses)
+	if len(body.List.Actions) > 0 && body.List.Actions[0].Type == "postback" {
+		return body.List.Actions[0].Postback.Payload, true
+	}
+	// Check body.interactive.actions (interactive message responses)
+	if len(body.Interactive.Actions) > 0 && body.Interactive.Actions[0].Type == "postback" {
+		return body.Interactive.Actions[0].Postback.Payload, true
 	}
 	return "", false
 }

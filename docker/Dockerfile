@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o neuro-bot ./cmd/server
 # === Stage 2: Runtime ===
 FROM alpine:3.19
 
-RUN apk --no-cache add ca-certificates tzdata wget
+RUN apk --no-cache add ca-certificates tzdata wget ghostscript
 
 WORKDIR /app
 

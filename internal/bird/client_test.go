@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -57,11 +58,15 @@ func TestSendButtons_PayloadCorrect(t *testing.T) {
 		t.Errorf("expected msg-btn, got %s", msgID)
 	}
 
+	// Without conversationID, buttons fall back to text format
 	bodyMap := received["body"].(map[string]interface{})
+	if bodyMap["type"] != "text" {
+		t.Errorf("expected body.type=text (fallback), got %v", bodyMap["type"])
+	}
 	textMap := bodyMap["text"].(map[string]interface{})
-	actions := textMap["actions"].([]interface{})
-	if len(actions) != 2 {
-		t.Errorf("expected 2 actions, got %d", len(actions))
+	textStr := textMap["text"].(string)
+	if !strings.Contains(textStr, "1. Option 1") || !strings.Contains(textStr, "2. Option 2") {
+		t.Errorf("expected numbered text fallback, got %s", textStr)
 	}
 }
 
@@ -87,9 +92,15 @@ func TestSendList_PayloadCorrect(t *testing.T) {
 		t.Errorf("expected msg-list, got %s", msgID)
 	}
 
+	// Without conversationID, list falls back to text format
 	bodyMap := received["body"].(map[string]interface{})
-	if bodyMap["type"] != "list" {
-		t.Errorf("expected body.type=list, got %v", bodyMap["type"])
+	if bodyMap["type"] != "text" {
+		t.Errorf("expected body.type=text (fallback), got %v", bodyMap["type"])
+	}
+	textMap := bodyMap["text"].(map[string]interface{})
+	textStr := textMap["text"].(string)
+	if !strings.Contains(textStr, "1. Row1") {
+		t.Errorf("expected numbered text fallback, got %s", textStr)
 	}
 }
 

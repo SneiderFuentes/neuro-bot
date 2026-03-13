@@ -3,30 +3,35 @@ package services
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
 
 type OCRService struct {
-	apiKey      string
-	model       string // gpt-4o-mini
-	apiURL      string // default: https://api.openai.com/v1/chat/completions
-	client      *http.Client
-	cupsContext string // CUPS reference table injected into the prompt
+	apiKey         string
+	model          string // gpt-4o-mini
+	apiURL         string // default: https://api.openai.com/v1/chat/completions
+	client         *http.Client
+	cupsContext    string // CUPS reference table injected into the prompt
+	birdAccessKey  string // Bird API key for downloading media files
 }
 
-func NewOCRService(apiKey, model, cupsContext string) *OCRService {
+func NewOCRService(apiKey, model, cupsContext, birdAccessKey string) *OCRService {
 	return &OCRService{
-		apiKey:      apiKey,
-		model:       model,
-		apiURL:      "https://api.openai.com/v1/chat/completions",
-		client:      &http.Client{Timeout: 60 * time.Second},
-		cupsContext: cupsContext,
+		apiKey:        apiKey,
+		model:         model,
+		apiURL:        "https://api.openai.com/v1/chat/completions",
+		client:        &http.Client{Timeout: 60 * time.Second},
+		cupsContext:   cupsContext,
+		birdAccessKey: birdAccessKey,
 	}
 }
 
@@ -49,10 +54,11 @@ type OCRResult struct {
 }
 
 type CUPSEntry struct {
-	Code      string `json:"cups_code"`
-	Name      string `json:"cups_name"`
-	Quantity  int    `json:"quantity"`
-	IsSedated bool   `json:"is_sedated"`
+	Code         string `json:"cups_code"`
+	Name         string `json:"cups_name"`
+	Quantity     int    `json:"quantity"`
+	IsSedated    bool   `json:"is_sedated"`
+	IsContrasted bool   `json:"is_contrasted"`
 }
 
 type CUPSGroup struct {
@@ -81,7 +87,8 @@ FORMATO DE SALIDA:
       "cups_code": "<4-6_digitos>",
       "cups_name": "<descripcion_exacta_de_la_orden>",
       "quantity": <int>,
-      "is_sedated": <boolean>
+      "is_sedated": <boolean>,
+      "is_contrasted": <boolean>
     }
   ],
   "entity": "<nombre_EPS_o_entidad|null>",
@@ -117,6 +124,9 @@ DATOS POR PROCEDIMIENTO:
 - quantity: entero; si la orden no trae número, usa 1.
 - is_sedated: busca en descripción y observaciones del procedimiento:
   "sedación", "sedacion", "bajo sedación", "bajo anestesia", "con anestesia", "anestesia general"
+  Si encuentra alguna: true para ESE procedimiento. Si no: false.
+- is_contrasted: busca en descripción y observaciones del procedimiento:
+  "contraste", "contrastado", "contrastada", "con medio de contraste", "con contraste", "medio de contraste", "gadolinio", "yodo"
   Si encuentra alguna: true para ESE procedimiento. Si no: false.
 
 DETECCIÓN DE ENTIDAD:
@@ -257,6 +267,84 @@ func (s *OCRService) AnalyzeImage(ctx context.Context, imageURL string) (*OCRRes
 		},
 	}
 	return s.callOpenAI(ctx, messages)
+}
+
+// AnalyzeDocument downloads a document (PDF), converts the first page to JPEG
+// using Ghostscript (300 DPI), and sends the image to OpenAI Vision for OCR.
+// Same behavior as Laravel's VisionMedicalOrderService.
+func (s *OCRService) AnalyzeDocument(ctx context.Context, documentURL string) (*OCRResult, error) {
+	// 1. Download the file (with Bird auth if configured)
+	req, err := http.NewRequestWithContext(ctx, "GET", documentURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create download request: %w", err)
+	}
+	if s.birdAccessKey != "" {
+		req.Header.Set("Authorization", "AccessKey "+s.birdAccessKey)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download document: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download document status %d", resp.StatusCode)
+	}
+
+	fileData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read document body: %w", err)
+	}
+
+	// 2. Detect MIME type from magic bytes
+	mimeType := http.DetectContentType(fileData)
+
+	// If it's already an image, send directly as base64
+	if strings.HasPrefix(mimeType, "image/") {
+		dataURI := "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(fileData)
+		return s.AnalyzeImage(ctx, dataURI)
+	}
+
+	// 3. If PDF, convert first page to JPEG with Ghostscript (300 DPI)
+	if mimeType != "application/pdf" {
+		return &OCRResult{Success: false, Error: "formato_no_soportado"}, nil
+	}
+
+	pdfFile, err := os.CreateTemp("", "order-*.pdf")
+	if err != nil {
+		return nil, fmt.Errorf("create temp pdf: %w", err)
+	}
+	defer os.Remove(pdfFile.Name())
+
+	if _, err := pdfFile.Write(fileData); err != nil {
+		pdfFile.Close()
+		return nil, fmt.Errorf("write temp pdf: %w", err)
+	}
+	pdfFile.Close()
+
+	jpegPath := pdfFile.Name() + ".jpg"
+	defer os.Remove(jpegPath)
+
+	cmd := exec.CommandContext(ctx, "gs",
+		"-dSAFER", "-dBATCH", "-dNOPAUSE",
+		"-sDEVICE=jpeg", "-r300",
+		"-dFirstPage=1", "-dLastPage=1",
+		"-sOutputFile="+jpegPath,
+		pdfFile.Name(),
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		slog.Error("ghostscript conversion failed", "error", err, "output", string(output))
+		return nil, fmt.Errorf("pdf to image conversion failed: %w", err)
+	}
+
+	// 4. Read JPEG and encode as base64 data URI
+	jpegData, err := os.ReadFile(jpegPath)
+	if err != nil {
+		return nil, fmt.Errorf("read converted image: %w", err)
+	}
+
+	dataURI := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpegData)
+	return s.AnalyzeImage(ctx, dataURI)
 }
 
 // AnalyzeText processes a text description of a medical order (from agent)

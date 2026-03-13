@@ -401,7 +401,7 @@ func TestStateMachine_AutoChainCycleGuard(t *testing.T) {
 	// We need 25+ distinct auto states to test the maxAutoChain=20 guard.
 	// Use existing auto states and register them in a long chain.
 	// Chain: CHECK_BUSINESS_HOURS → GREETING → PATIENT_LOOKUP → OUT_OF_HOURS →
-	//        FETCH_APPOINTMENTS → NO_APPOINTMENTS → CREATE_PATIENT →
+	//        FETCH_APPOINTMENTS → SHOW_CONTACT_INFO → CREATE_PATIENT →
 	//        APPOINTMENT_CONFIRMED → APPOINTMENT_CANCELLED → VALIDATE_OCR →
 	//        OCR_FAILED → CHECK_EXISTING → APPOINTMENT_EXISTS → ASK_CONTRASTED →
 	//        ASK_PREGNANCY → PREGNANCY_BLOCK → GFR_RESULT → GFR_NOT_ELIGIBLE →
@@ -414,7 +414,7 @@ func TestStateMachine_AutoChainCycleGuard(t *testing.T) {
 		StatePatientLookup,        // 2
 		StateOutOfHours,           // 3
 		StateFetchAppointments,    // 4
-		StateNoAppointments,       // 5
+		StateShowContactInfo,      // 5  (NO_APPOINTMENTS is now Interactive)
 		StateCreatePatient,        // 6
 		StateAppointmentConfirmed, // 7
 		StateAppointmentCancelled, // 8

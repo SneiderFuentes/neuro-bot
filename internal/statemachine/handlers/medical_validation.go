@@ -65,7 +65,31 @@ func askContrastedHandler() sm.StateHandler {
 		if !isContrastable(cupsCode) {
 			return sm.NewResult(sm.StateAskSedation).
 				WithContext("is_contrasted", "0").
+				WithClearCtx("ocr_is_contrasted").
 				WithEvent("contrast_skipped", map[string]interface{}{"cups_code": cupsCode}), nil
+		}
+
+		// Si el OCR ya detectó contraste en la orden, auto-completar
+		if sess.GetContext("ocr_is_contrasted") == "1" {
+			gender := sess.GetContext("patient_gender")
+			age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+
+			r := sm.NewResult("").
+				WithContext("is_contrasted", "1").
+				WithClearCtx("ocr_is_contrasted").
+				WithText("Tu orden indica que el examen requiere *medio de contraste*. Lo tendremos en cuenta.").
+				WithEvent("contrast_auto_detected", map[string]interface{}{"cups_code": cupsCode})
+
+			if gender == "F" && age >= 12 && age <= 55 {
+				r.NextState = sm.StateAskPregnancy
+			} else if age < 1 {
+				r.NextState = sm.StateAskBabyWeight
+			} else {
+				r.NextState = sm.StateGfrCreatinine
+				r.Messages = append(r.Messages, &sm.TextMessage{Text: "Para el examen con contraste necesitamos verificar tu *función renal*.\n\nNecesitas un examen de laboratorio reciente (máximo 3 meses) llamado *\"Creatinina sérica\"* o *\"Creatinina en sangre\"*.\n\nEn tu resultado de laboratorio busca el valor que aparece junto a *Creatinina* en *mg/dL*.\n\n_Ejemplo de resultado:_\n_Creatinina .......... *0.96* mg/dL_\n\nEscribe solo el número, ej: *0.96*"})
+			}
+
+			return r, nil
 		}
 
 		// First entry: show prompt without burning a retry
@@ -100,8 +124,8 @@ func askContrastedHandler() sm.StateHandler {
 				WithClearCtx("_prompted_contrast").
 				WithEvent("contrast_selected", map[string]interface{}{"contrasted": true})
 
-			if gender == "F" && age >= 1 {
-				// Mujer >= 1 año → preguntar embarazo
+			if gender == "F" && age >= 12 && age <= 55 {
+				// Mujer en edad fértil (12-55) → preguntar embarazo
 				r.NextState = sm.StateAskPregnancy
 			} else if age < 1 {
 				// Bebé (any gender) → preguntar peso
@@ -109,7 +133,7 @@ func askContrastedHandler() sm.StateHandler {
 			} else {
 				// Hombre >= 1 → directo a creatinina
 				r.NextState = sm.StateGfrCreatinine
-				r.WithText("Para el examen con contraste necesitamos verificar tu función renal.\n\nEscriba el valor de Creatinina sérica en miligramos por decilitro de sangre. (Ejemplo: si es 0.96 mg, escribir 0.96)")
+				r.WithText("Para el examen con contraste necesitamos verificar tu *función renal*.\n\nNecesitas un examen de laboratorio reciente (máximo 3 meses) llamado *\"Creatinina sérica\"* o *\"Creatinina en sangre\"*.\n\nEn tu resultado de laboratorio busca el valor que aparece junto a *Creatinina* en *mg/dL*.\n\n_Ejemplo de resultado:_\n_Creatinina .......... *0.96* mg/dL_\n\nEscribe solo el número, ej: *0.96*")
 			}
 
 			return r, nil
@@ -125,15 +149,15 @@ func askContrastedHandler() sm.StateHandler {
 	}
 }
 
-// ASK_PREGNANCY (automático) — solo para mujeres >= 1 año con contraste.
-// Auto-skips for males and babies (< 1 year cannot be pregnant).
+// ASK_PREGNANCY (automático) — solo para mujeres en edad fértil (12-55) con contraste.
+// Auto-skips for males, children < 12, and women > 55.
 func askPregnancyHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		gender := sess.GetContext("patient_gender")
 		age, _ := strconv.Atoi(sess.GetContext("patient_age"))
 
-		// Auto-skip: males or babies cannot be pregnant
-		if gender != "F" || age < 1 {
+		// Auto-skip: males or outside fertile age range (12-55)
+		if gender != "F" || age < 12 || age > 55 {
 			nextState := sm.StateGfrCreatinine
 			r := sm.NewResult(nextState).
 				WithContext("is_pregnant", "0")
@@ -141,7 +165,7 @@ func askPregnancyHandler() sm.StateHandler {
 				nextState = sm.StateAskBabyWeight
 				r.NextState = nextState
 			} else {
-				r.WithText("Para el examen con contraste necesitamos verificar tu función renal.\n\nEscriba el valor de Creatinina sérica en miligramos por decilitro de sangre. (Ejemplo: si es 0.96 mg, escribir 0.96)")
+				r.WithText("Para el examen con contraste necesitamos verificar tu *función renal*.\n\nNecesitas un examen de laboratorio reciente (máximo 3 meses) llamado *\"Creatinina sérica\"* o *\"Creatinina en sangre\"*.\n\nEn tu resultado de laboratorio busca el valor que aparece junto a *Creatinina* en *mg/dL*.\n\n_Ejemplo de resultado:_\n_Creatinina .......... *0.96* mg/dL_\n\nEscribe solo el número, ej: *0.96*")
 			}
 			return r, nil
 		}
@@ -178,7 +202,7 @@ func askPregnancyHandler() sm.StateHandler {
 			r := sm.NewResult(sm.StateGfrCreatinine).
 				WithContext("is_pregnant", "0").
 				WithClearCtx("_prompted_pregnancy").
-				WithText("Para el examen con contraste necesitamos verificar tu función renal.\n\nEscriba el valor de Creatinina sérica en miligramos por decilitro de sangre. (Ejemplo: si es 0.96 mg, escribir 0.96)").
+				WithText("Para el examen con contraste necesitamos verificar tu *función renal*.\n\nNecesitas un examen de laboratorio reciente (máximo 3 meses) llamado *\"Creatinina sérica\"* o *\"Creatinina en sangre\"*.\n\nEn tu resultado de laboratorio busca el valor que aparece junto a *Creatinina* en *mg/dL*.\n\n_Ejemplo de resultado:_\n_Creatinina .......... *0.96* mg/dL_\n\nEscribe solo el número, ej: *0.96*").
 				WithEvent("pregnant_selected", map[string]interface{}{"pregnant": false})
 			return r, nil
 		}
@@ -232,7 +256,7 @@ func gfrCreatinineHandler() sm.StateHandler {
 		value, err := strconv.ParseFloat(strings.Replace(input, ",", ".", 1), 64)
 		if err != nil || value <= 0 || value > 30 {
 			retryResult := sm.ValidateWithRetry(sess, "", func(string) bool { return false },
-				"Valor de creatinina no válido. Escriba el valor de Creatinina sérica en miligramos por decilitro de sangre. (Ejemplo: si es 0.96 mg, escribir 0.96)")
+				"Valor no válido. Escribe solo el número de creatinina en mg/dL.\n\n_Ejemplo: si tu resultado dice Creatinina 0.96 mg/dL, escribe *0.96*_")
 			return retryResult, nil
 		}
 

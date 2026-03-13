@@ -18,6 +18,7 @@ type WaitingListEntry struct {
 	IsSedated       bool
 	Espacios        int
 	ProceduresJSON  string
+	ProcedureType   string // cups_procedimientos.tipo (with sedation override)
 	GfrCreatinine   float64
 	GfrHeightCm     int
 	GfrWeightKg     float64

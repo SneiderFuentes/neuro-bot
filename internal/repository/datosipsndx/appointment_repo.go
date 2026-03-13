@@ -29,6 +29,7 @@ func (r *AppointmentRepo) FindByID(ctx context.Context, id string) (*domain.Appo
 	            c.Cumplida, c.Observaciones, c.Remonte
 	          FROM citas c
 	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
+	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
 	          WHERE c.IdCita = ? AND c.Remonte = 0`
 
 	var appt domain.Appointment
@@ -90,6 +91,7 @@ func (r *AppointmentRepo) FindUpcomingByPatient(ctx context.Context, patientID s
 	            c.NumeroPaciente, c.Entidad, c.Agenda, c.Confirmada, c.Observaciones
 	          FROM citas c
 	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
+	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
 	          WHERE c.NumeroPaciente = ? AND c.FeCita >= CURDATE()
 	            AND c.Cancelada = 0 AND c.Remonte = 0
 	          ORDER BY c.FeCita, c.FechaCita`
@@ -227,12 +229,12 @@ func (r *AppointmentRepo) Confirm(ctx context.Context, id string, channel, chann
 
 func (r *AppointmentRepo) Cancel(ctx context.Context, id string, reason, channel, channelID string) error {
 	medio := mapToMedioConfirmacion(channel)
-	observation := fmt.Sprintf(" [Cancelada vía %s: %s]", channel, reason)
+	observation := fmt.Sprintf(" [Cancelada via %s: %s]", channel, reason)
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE citas SET Cancelada = -1, Confirmada = 0,
 		        FechaCancelacion = NOW(), FechaConfirmacion = NULL,
 		        MedioConfirmacion = NULLIF(?, ''), IdMedioConfirmacion = NULLIF(?, ''),
-		        Observaciones = CONCAT(COALESCE(Observaciones, ''), ?)
+		        Observaciones = CONCAT(COALESCE(Observaciones, ''), CONVERT(? USING latin1))
 		 WHERE IdCita = ?`,
 		medio, channelID, observation, id)
 	return err
@@ -273,13 +275,13 @@ func (r *AppointmentRepo) CancelBatch(ctx context.Context, ids []string, reason,
 	defer tx.Rollback()
 
 	medio := mapToMedioConfirmacion(channel)
-	observation := fmt.Sprintf(" [Cancelada vía %s: %s]", channel, reason)
+	observation := fmt.Sprintf(" [Cancelada via %s: %s]", channel, reason)
 	for _, id := range ids {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE citas SET Cancelada = -1, Confirmada = 0,
 			        FechaCancelacion = NOW(), FechaConfirmacion = NULL,
 			        MedioConfirmacion = NULLIF(?, ''), IdMedioConfirmacion = NULLIF(?, ''),
-			        Observaciones = CONCAT(COALESCE(Observaciones, ''), ?)
+			        Observaciones = CONCAT(COALESCE(Observaciones, ''), CONVERT(? USING latin1))
 			 WHERE IdCita = ?`,
 			medio, channelID, observation, id); err != nil {
 			return fmt.Errorf("cancel %s: %w", id, err)
@@ -297,6 +299,7 @@ func (r *AppointmentRepo) FindByAgendaAndDate(ctx context.Context, agendaID int,
 	            c.Entidad, c.Agenda, c.Cancelada, c.Observaciones
 	          FROM citas c
 	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
+	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
 	          LEFT JOIN pacientes p ON p.NumeroPaciente = c.NumeroPaciente
 	          WHERE c.Agenda = ? AND c.FeCita = ?
 	            AND c.Cancelada = 0 AND c.Remonte = 0
@@ -493,6 +496,7 @@ func (r *AppointmentRepo) FindPendingByDate(ctx context.Context, date string) ([
 	            c.Entidad, c.Agenda, c.Confirmada, c.Observaciones
 	          FROM citas c
 	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
+	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
 	          LEFT JOIN pacientes p ON p.NumeroPaciente = c.NumeroPaciente
 	          WHERE c.FeCita = ? AND c.Cancelada = 0 AND c.Remonte = 0 AND c.Confirmada = 0
 	          ORDER BY c.FechaCita`

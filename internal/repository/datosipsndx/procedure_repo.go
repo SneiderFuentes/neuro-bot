@@ -20,11 +20,11 @@ func NewProcedureRepo(db *sql.DB) *ProcedureRepo {
 
 func (r *ProcedureRepo) FindByCode(ctx context.Context, code string) (*domain.Procedure, error) {
 	query := `SELECT id, codigo_cups, nombre, COALESCE(descripcion, ''),
-	            COALESCE(especialidad_id, 0), COALESCE(servicio_id, 0), COALESCE(servicio, ''),
+	            COALESCE(especialidad_id, 0), COALESCE(servicio_id, 0),
 	            COALESCE(preparacion, ''), COALESCE(direccion, ''),
 	            COALESCE(video_url, ''), COALESCE(audio_url, ''),
-	            COALESCE(tipo, ''), COALESCE(espacios_requeridos, 1),
-	            COALESCE(horario_especifico_id, 0), COALESCE(flujo_asignacion_id, 0),
+	            COALESCE(tipo, ''),
+	            COALESCE(horario_especifico_id, 0),
 	            COALESCE(activo, 1)
 	          FROM cups_procedimientos
 	          WHERE codigo_cups = ? AND activo = 1
@@ -34,11 +34,11 @@ func (r *ProcedureRepo) FindByCode(ctx context.Context, code string) (*domain.Pr
 	var active int
 	err := r.db.QueryRowContext(ctx, query, code).Scan(
 		&p.ID, &p.Code, &p.Name, &p.Description,
-		&p.SpecialtyID, &p.ServiceID, &p.ServiceName,
+		&p.SpecialtyID, &p.ServiceID,
 		&p.Preparation, &p.Address,
 		&p.VideoURL, &p.AudioURL,
-		&p.Type, &p.RequiredSpaces,
-		&p.SpecificScheduleID, &p.AssignmentFlowID,
+		&p.Type,
+		&p.SpecificScheduleID,
 		&active,
 	)
 	if err == sql.ErrNoRows {
@@ -53,11 +53,11 @@ func (r *ProcedureRepo) FindByCode(ctx context.Context, code string) (*domain.Pr
 
 func (r *ProcedureRepo) FindByID(ctx context.Context, id int) (*domain.Procedure, error) {
 	query := `SELECT id, codigo_cups, nombre, COALESCE(descripcion, ''),
-	            COALESCE(especialidad_id, 0), COALESCE(servicio_id, 0), COALESCE(servicio, ''),
+	            COALESCE(especialidad_id, 0), COALESCE(servicio_id, 0),
 	            COALESCE(preparacion, ''), COALESCE(direccion, ''),
 	            COALESCE(video_url, ''), COALESCE(audio_url, ''),
-	            COALESCE(tipo, ''), COALESCE(espacios_requeridos, 1),
-	            COALESCE(horario_especifico_id, 0), COALESCE(flujo_asignacion_id, 0),
+	            COALESCE(tipo, ''),
+	            COALESCE(horario_especifico_id, 0),
 	            COALESCE(activo, 1)
 	          FROM cups_procedimientos
 	          WHERE id = ?
@@ -67,11 +67,11 @@ func (r *ProcedureRepo) FindByID(ctx context.Context, id int) (*domain.Procedure
 	var active int
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&p.ID, &p.Code, &p.Name, &p.Description,
-		&p.SpecialtyID, &p.ServiceID, &p.ServiceName,
+		&p.SpecialtyID, &p.ServiceID,
 		&p.Preparation, &p.Address,
 		&p.VideoURL, &p.AudioURL,
-		&p.Type, &p.RequiredSpaces,
-		&p.SpecificScheduleID, &p.AssignmentFlowID,
+		&p.Type,
+		&p.SpecificScheduleID,
 		&active,
 	)
 	if err == sql.ErrNoRows {
@@ -106,8 +106,7 @@ func (r *ProcedureRepo) FindAllActive(ctx context.Context) ([]domain.Procedure, 
 }
 
 func (r *ProcedureRepo) SearchByName(ctx context.Context, name string) ([]domain.Procedure, error) {
-	query := `SELECT id, codigo_cups, nombre, COALESCE(servicio, ''),
-	            COALESCE(espacios_requeridos, 1)
+	query := `SELECT id, codigo_cups, nombre
 	          FROM cups_procedimientos
 	          WHERE nombre LIKE ? AND activo = 1
 	          ORDER BY nombre
@@ -122,7 +121,7 @@ func (r *ProcedureRepo) SearchByName(ctx context.Context, name string) ([]domain
 	var procs []domain.Procedure
 	for rows.Next() {
 		var p domain.Procedure
-		if err := rows.Scan(&p.ID, &p.Code, &p.Name, &p.ServiceName, &p.RequiredSpaces); err != nil {
+		if err := rows.Scan(&p.ID, &p.Code, &p.Name); err != nil {
 			return nil, err
 		}
 		p.IsActive = true

@@ -23,21 +23,24 @@ func RegisterResultsAndLocationHandlers(m *sm.Machine, cfg *config.Config, locat
 	m.Register(sm.StateShowLocations, showLocationsHandler(locationRepo))
 }
 
-// SHOW_RESULTS (automático) — muestra enlace para consultar resultados.
+// SHOW_RESULTS (automático) — muestra enlace para consultar resultados + video instructivo.
 func showResultsHandler(cfg *config.Config) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		var text string
 		if cfg.ResultsURL != "" {
-			text = fmt.Sprintf("Puedes consultar tus resultados médicos en el siguiente enlace:\n\n🔗 %s\n\nNecesitarás tu número de documento para acceder.", cfg.ResultsURL)
+			text = fmt.Sprintf("Ingresa a nuestra página: %s", cfg.ResultsURL)
+			if cfg.ResultsVideoURL != "" {
+				text += fmt.Sprintf("\n\nEn el siguiente video encontrarás el paso a paso para descargar tus resultados. 👇\n%s", cfg.ResultsVideoURL)
+			}
 		} else {
 			text = "Para consultar tus resultados médicos, por favor comunícate con nuestra línea de atención o acércate a nuestras instalaciones."
 		}
 
 		return sm.NewResult(sm.StatePostActionMenu).
-			WithButtons(text+"\n\n¿Qué más deseas hacer?",
-				sm.Button{Text: "📅 Agendar cita", Payload: "otra_cita"},
-				sm.Button{Text: "📋 Ver mis citas", Payload: "ver_citas"},
-				sm.Button{Text: "🔄 Cambiar paciente", Payload: "cambiar_paciente"},
+			WithText(text).
+			WithButtons("¿Qué deseas hacer?",
+				sm.Button{Text: "Menú principal", Payload: "menu_principal"},
+				sm.Button{Text: "Terminar chat", Payload: "terminar_chat"},
 			).
 			WithEvent("results_shown", nil), nil
 	}
@@ -71,12 +74,9 @@ func showLocationsHandler(locationRepo LocationReader) sm.StateHandler {
 			text = "📍 Actualmente no tenemos sedes configuradas. Comunícate con un agente para más información."
 		}
 
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithButtons(text+"\n\n¿Qué más deseas hacer?",
-				sm.Button{Text: "📅 Agendar cita", Payload: "otra_cita"},
-				sm.Button{Text: "📋 Ver mis citas", Payload: "ver_citas"},
-				sm.Button{Text: "🔄 Cambiar paciente", Payload: "cambiar_paciente"},
-			).
-			WithEvent("locations_shown", nil), nil
+		r := sm.NewResult(sm.StatePostActionMenu).
+			WithText(text)
+		r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
+		return r.WithEvent("locations_shown", nil), nil
 	}
 }

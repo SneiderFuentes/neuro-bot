@@ -101,6 +101,7 @@ type NotificationManager struct {
 	sessionRepo     SessionCreator
 	workerPool      VirtualEnqueuer
 	procRepo        PreparationFinder
+	addrMapper      *services.AddressMapper
 	persister       NotificationPersister
 	tracker         EventLogger
 
@@ -129,6 +130,11 @@ func (m *NotificationManager) SetWaitingListDeps(wlRepo WaitingListFinder, sessR
 // SetProcedureRepo injects the procedure repository for preparation lookups.
 func (m *NotificationManager) SetProcedureRepo(repo PreparationFinder) {
 	m.procRepo = repo
+}
+
+// SetAddressMapper injects the address-to-maps-URL mapper.
+func (m *NotificationManager) SetAddressMapper(am *services.AddressMapper) {
+	m.addrMapper = am
 }
 
 // SetPersister injects the database persister for pending notifications.

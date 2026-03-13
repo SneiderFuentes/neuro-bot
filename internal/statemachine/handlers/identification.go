@@ -73,14 +73,10 @@ func patientLookupHandler(patientSvc *services.PatientService) sm.StateHandler {
 
 		patient, err := patientSvc.LookupByDocument(ctx, doc)
 		if err != nil {
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithText("Lo siento, hubo un problema al buscar tu información. Intenta más tarde.").
-				WithButtons("¿Qué deseas hacer?",
-					sm.Button{Text: "📅 Agendar otra cita", Payload: "otra_cita"},
-					sm.Button{Text: "📋 Ver mis citas", Payload: "ver_citas"},
-					sm.Button{Text: "🔄 Cambiar paciente", Payload: "cambiar_paciente"},
-				).
-				WithEvent("patient_lookup_error", map[string]interface{}{"error": err.Error()}), nil
+			r := sm.NewResult(sm.StatePostActionMenu).
+				WithText("Lo siento, hubo un problema al buscar tu información. Intenta más tarde.")
+			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
+			return r.WithEvent("patient_lookup_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		if patient == nil {
@@ -96,13 +92,10 @@ func patientLookupHandler(patientSvc *services.PatientService) sm.StateHandler {
 			}
 
 			// Menú consultar → no puede consultar sin estar registrado
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithButtons("No encontramos un paciente con el documento *"+doc+"*. Verifica que el número sea correcto.\n\nSi eres paciente nuevo, selecciona la opción *Agendar cita* para registrarte.\n\n¿Qué deseas hacer?",
-					sm.Button{Text: "📅 Agendar otra cita", Payload: "otra_cita"},
-					sm.Button{Text: "📋 Ver mis citas", Payload: "ver_citas"},
-					sm.Button{Text: "🔄 Cambiar paciente", Payload: "cambiar_paciente"},
-				).
-				WithEvent("patient_not_found", map[string]interface{}{"doc": doc, "can_register": false}), nil
+			r := sm.NewResult(sm.StatePostActionMenu).
+				WithText("No encontramos un paciente con el documento *" + doc + "*. Verifica que el número sea correcto.\n\nSi eres paciente nuevo, selecciona la opción *Agendar cita* para registrarte.")
+			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
+			return r.WithEvent("patient_not_found", map[string]interface{}{"doc": doc, "can_register": false}), nil
 		}
 
 		// Paciente encontrado → guardar datos en sesión

@@ -54,12 +54,13 @@ func (m *NotificationManager) CheckWaitingListForCups(ctx context.Context, cupsC
 
 	// 3. Verify there are actually available slots
 	query := services.SlotQuery{
-		CupsCode:     cupsCode,
-		PatientAge:   entry.PatientAge,
-		IsContrasted: entry.IsContrasted,
-		IsSedated:    entry.IsSedated,
-		Espacios:     entry.Espacios,
-		MaxSlots:     1,
+		CupsCode:      cupsCode,
+		PatientAge:    entry.PatientAge,
+		IsContrasted:  entry.IsContrasted,
+		IsSedated:     entry.IsSedated,
+		Espacios:      entry.Espacios,
+		ProcedureType: entry.ProcedureType,
+		MaxSlots:      1,
 	}
 	if entry.PreferredDoctorDoc != "" {
 		query.PreferredDoctor = entry.PreferredDoctorDoc

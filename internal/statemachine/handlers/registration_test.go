@@ -7,6 +7,7 @@ import (
 
 	"github.com/neuro-bot/neuro-bot/internal/domain"
 	"github.com/neuro-bot/neuro-bot/internal/services"
+	"github.com/neuro-bot/neuro-bot/internal/session"
 	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
 	"github.com/neuro-bot/neuro-bot/internal/testutil"
 )
@@ -64,8 +65,8 @@ func TestRegDocumentType_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateRegFirstSurname {
-		t.Errorf("expected REG_FIRST_SURNAME, got %s", result.NextState)
+	if result.NextState != sm.StateRegDocumentIssuePlace {
+		t.Errorf("expected REG_DOCUMENT_ISSUE_PLACE, got %s", result.NextState)
 	}
 }
 
@@ -85,7 +86,7 @@ func TestRegDocumentType_Invalid(t *testing.T) {
 
 func TestRegFirstSurname_Valid(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateRegFirstSurname, regFieldHandler("reg_first_surname", "Ingresa tu primer apellido:", validateName, sm.StateRegSecondSurname))
+	m.Register(sm.StateRegFirstSurname, regFieldHandler("reg_first_surname", "Ingresa tu primer apellido:", validateName, sm.StateRegSecondSurname, ""))
 
 	sess := testSess(sm.StateRegFirstSurname)
 	result, err := m.Process(context.Background(), sess, textM("Garcia"))
@@ -99,7 +100,7 @@ func TestRegFirstSurname_Valid(t *testing.T) {
 
 func TestRegFirstSurname_Invalid(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateRegFirstSurname, regFieldHandler("reg_first_surname", "Ingresa tu primer apellido:", validateName, sm.StateRegSecondSurname))
+	m.Register(sm.StateRegFirstSurname, regFieldHandler("reg_first_surname", "Ingresa tu primer apellido:", validateName, sm.StateRegSecondSurname, ""))
 
 	sess := testSess(sm.StateRegFirstSurname)
 	result, err := m.Process(context.Background(), sess, textM("123"))
@@ -203,7 +204,7 @@ func TestConfirmRegistration_Confirm(t *testing.T) {
 	sess.Context["reg_birth_date"] = "1990-03-15"
 	sess.Context["patient_age"] = "35"
 	sess.Context["reg_gender"] = "M"
-	sess.Context["reg_marital_status"] = "SOLTERO"
+	sess.Context["reg_marital_status"] = "1"
 	sess.Context["reg_address"] = "CRA 10 #20-30"
 	sess.Context["reg_phone"] = "3001234567"
 	sess.Context["reg_email"] = "juan@test.com"
@@ -229,8 +230,8 @@ func TestConfirmRegistration_Correct(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateRegDocumentType {
-		t.Errorf("expected REG_DOCUMENT_TYPE, got %s", result.NextState)
+	if result.NextState != sm.StateRegSelectCorrection {
+		t.Errorf("expected REG_SELECT_CORRECTION, got %s", result.NextState)
 	}
 }
 
@@ -260,10 +261,10 @@ func TestCreatePatient_Success(t *testing.T) {
 	sess.Context["reg_municipality"] = "11001"
 	sess.Context["reg_zone"] = "U"
 	sess.Context["reg_entity"] = "EPS001"
-	sess.Context["reg_affiliation_type"] = "COTIZANTE"
-	sess.Context["reg_user_type"] = "CONTRIBUTIVO"
+	sess.Context["reg_affiliation_type"] = "C"
+	sess.Context["reg_user_type"] = "1"
 	sess.Context["reg_occupation"] = "ING"
-	sess.Context["reg_marital_status"] = "SOLTERO"
+	sess.Context["reg_marital_status"] = "1"
 
 	result, err := m.Process(context.Background(), sess, textM(""))
 	if err != nil {
@@ -310,40 +311,6 @@ func (m *mockMunicipalityRepo) Search(ctx context.Context, query string) ([]doma
 	return nil, nil
 }
 
-type mockEntityRepo struct {
-	findActiveFn func(ctx context.Context) ([]domain.Entity, error)
-	findByCodeFn func(ctx context.Context, code string) (*domain.Entity, error)
-}
-
-func (m *mockEntityRepo) FindActive(ctx context.Context) ([]domain.Entity, error) {
-	if m.findActiveFn != nil {
-		return m.findActiveFn(ctx)
-	}
-	return nil, nil
-}
-
-func (m *mockEntityRepo) FindActiveByCategory(ctx context.Context, category string) ([]domain.Entity, error) {
-	return m.FindActive(ctx)
-}
-
-func (m *mockEntityRepo) FindByCode(ctx context.Context, code string) (*domain.Entity, error) {
-	if m.findByCodeFn != nil {
-		return m.findByCodeFn(ctx, code)
-	}
-	return nil, nil
-}
-
-func (m *mockEntityRepo) GetCodeByIndexAndCategory(ctx context.Context, index int, category string) (string, error) {
-	entities, err := m.FindActive(ctx)
-	if err != nil {
-		return "", err
-	}
-	i := index - 1
-	if i < 0 || i >= len(entities) {
-		return "", fmt.Errorf("index out of range")
-	}
-	return entities[i].Code, nil
-}
 
 // =============================================================================
 // Tests for regOptionalFieldHandler (second surname / second name)
@@ -351,7 +318,7 @@ func (m *mockEntityRepo) GetCodeByIndexAndCategory(ctx context.Context, index in
 
 func TestRegOptionalField_NoTengo(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateRegSecondSurname, regOptionalFieldHandler("reg_second_surname", "Ingresa tu *segundo apellido* (o escribe \"no tengo\"):", sm.StateRegFirstName))
+	m.Register(sm.StateRegSecondSurname, regOptionalFieldHandler("reg_second_surname", "Ingresa tu *segundo apellido* (o escribe \"no tengo\"):", sm.StateRegFirstName, ""))
 
 	sess := testSess(sm.StateRegSecondSurname)
 	result, err := m.Process(context.Background(), sess, textM("no tengo"))
@@ -368,7 +335,7 @@ func TestRegOptionalField_NoTengo(t *testing.T) {
 
 func TestRegOptionalField_ValidName(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateRegSecondSurname, regOptionalFieldHandler("reg_second_surname", "Ingresa tu *segundo apellido* (o escribe \"no tengo\"):", sm.StateRegFirstName))
+	m.Register(sm.StateRegSecondSurname, regOptionalFieldHandler("reg_second_surname", "Ingresa tu *segundo apellido* (o escribe \"no tengo\"):", sm.StateRegFirstName, ""))
 
 	sess := testSess(sm.StateRegSecondSurname)
 	result, err := m.Process(context.Background(), sess, textM("Garcia"))
@@ -385,7 +352,7 @@ func TestRegOptionalField_ValidName(t *testing.T) {
 
 func TestRegOptionalField_Invalid(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateRegSecondSurname, regOptionalFieldHandler("reg_second_surname", "Ingresa tu *segundo apellido* (o escribe \"no tengo\"):", sm.StateRegFirstName))
+	m.Register(sm.StateRegSecondSurname, regOptionalFieldHandler("reg_second_surname", "Ingresa tu *segundo apellido* (o escribe \"no tengo\"):", sm.StateRegFirstName, ""))
 
 	sess := testSess(sm.StateRegSecondSurname)
 	result, err := m.Process(context.Background(), sess, textM("123"))
@@ -467,7 +434,7 @@ func TestRegGender_Invalid(t *testing.T) {
 func registerMaritalStatusConfig(m *sm.Machine) {
 	m.RegisterWithConfig(sm.StateRegMaritalStatus, sm.HandlerConfig{
 		InputType: sm.InputButton,
-		Options:   []string{"SOLTERO", "CASADO", "UNION LIBRE", "DIVORCIADO", "VIUDO"},
+		Options:   []string{"1", "2", "3", "4", "5", "6"},
 		Handler:   regMaritalStatusHandler(),
 	})
 }
@@ -477,32 +444,32 @@ func TestRegMaritalStatus_Valid(t *testing.T) {
 	registerMaritalStatusConfig(m)
 
 	sess := testSess(sm.StateRegMaritalStatus)
-	result, err := m.Process(context.Background(), sess, postbackM("SOLTERO"))
+	result, err := m.Process(context.Background(), sess, postbackM("1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.NextState != sm.StateRegAddress {
 		t.Errorf("expected REG_ADDRESS, got %s", result.NextState)
 	}
-	if v := result.UpdateCtx["reg_marital_status"]; v != "SOLTERO" {
-		t.Errorf("expected reg_marital_status=SOLTERO, got %q", v)
+	if v := result.UpdateCtx["reg_marital_status"]; v != "1" {
+		t.Errorf("expected reg_marital_status=1, got %q", v)
 	}
 }
 
-func TestRegMaritalStatus_TextValid(t *testing.T) {
+func TestRegMaritalStatus_Casado(t *testing.T) {
 	m := sm.NewMachine()
 	registerMaritalStatusConfig(m)
 
 	sess := testSess(sm.StateRegMaritalStatus)
-	result, err := m.Process(context.Background(), sess, textM("casado"))
+	result, err := m.Process(context.Background(), sess, postbackM("2"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.NextState != sm.StateRegAddress {
 		t.Errorf("expected REG_ADDRESS, got %s", result.NextState)
 	}
-	if v := result.UpdateCtx["reg_marital_status"]; v != "CASADO" {
-		t.Errorf("expected reg_marital_status=CASADO, got %q", v)
+	if v := result.UpdateCtx["reg_marital_status"]; v != "2" {
+		t.Errorf("expected reg_marital_status=2, got %q", v)
 	}
 }
 
@@ -763,40 +730,11 @@ func TestRegZone_Urban(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateRegClientType {
-		t.Errorf("expected REG_CLIENT_TYPE, got %s", result.NextState)
-	}
-	if v := result.UpdateCtx["reg_zone"]; v != "U" {
-		t.Errorf("expected reg_zone=U, got %q", v)
-	}
-}
-
-// =============================================================================
-// Tests for regClientTypeHandler
-// =============================================================================
-
-func registerClientTypeConfig(m *sm.Machine) {
-	m.RegisterWithConfig(sm.StateRegClientType, sm.HandlerConfig{
-		InputType: sm.InputButton,
-		Options:   []string{"PARTICULAR", "EPS", "SOAT"},
-		Handler:   regClientTypeHandler(),
-	})
-}
-
-func TestRegClientType_EPS(t *testing.T) {
-	m := sm.NewMachine()
-	registerClientTypeConfig(m)
-
-	sess := testSess(sm.StateRegClientType)
-	result, err := m.Process(context.Background(), sess, postbackM("EPS"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	if result.NextState != sm.StateRegUserType {
 		t.Errorf("expected REG_USER_TYPE, got %s", result.NextState)
 	}
-	if v := result.UpdateCtx["reg_client_type"]; v != "EPS" {
-		t.Errorf("expected reg_client_type=EPS, got %q", v)
+	if v := result.UpdateCtx["reg_zone"]; v != "U" {
+		t.Errorf("expected reg_zone=U, got %q", v)
 	}
 }
 
@@ -807,7 +745,7 @@ func TestRegClientType_EPS(t *testing.T) {
 func registerUserTypeConfig(m *sm.Machine) {
 	m.RegisterWithConfig(sm.StateRegUserType, sm.HandlerConfig{
 		InputType: sm.InputButton,
-		Options:   []string{"CONTRIBUTIVO", "SUBSIDIADO", "PARTICULAR"},
+		Options:   userTypePayloads(),
 		Handler:   regUserTypeHandler(),
 	})
 }
@@ -817,15 +755,15 @@ func TestRegUserType_Contributivo(t *testing.T) {
 	registerUserTypeConfig(m)
 
 	sess := testSess(sm.StateRegUserType)
-	result, err := m.Process(context.Background(), sess, postbackM("CONTRIBUTIVO"))
+	result, err := m.Process(context.Background(), sess, postbackM("1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.NextState != sm.StateRegAffiliationType {
 		t.Errorf("expected REG_AFFILIATION_TYPE, got %s", result.NextState)
 	}
-	if v := result.UpdateCtx["reg_user_type"]; v != "CONTRIBUTIVO" {
-		t.Errorf("expected reg_user_type=CONTRIBUTIVO, got %q", v)
+	if v := result.UpdateCtx["reg_user_type"]; v != "1" {
+		t.Errorf("expected reg_user_type=1, got %q", v)
 	}
 }
 
@@ -836,7 +774,7 @@ func TestRegUserType_Contributivo(t *testing.T) {
 func registerAffiliationTypeConfig(m *sm.Machine) {
 	m.RegisterWithConfig(sm.StateRegAffiliationType, sm.HandlerConfig{
 		InputType: sm.InputButton,
-		Options:   []string{"COTIZANTE", "BENEFICIARIO"},
+		Options:   []string{"C", "B", "O"},
 		Handler:   regAffiliationTypeHandler(),
 	})
 }
@@ -846,136 +784,15 @@ func TestRegAffiliationType_Cotizante(t *testing.T) {
 	registerAffiliationTypeConfig(m)
 
 	sess := testSess(sm.StateRegAffiliationType)
-	result, err := m.Process(context.Background(), sess, postbackM("COTIZANTE"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateRegEntity {
-		t.Errorf("expected REG_ENTITY, got %s", result.NextState)
-	}
-	if v := result.UpdateCtx["reg_affiliation_type"]; v != "COTIZANTE" {
-		t.Errorf("expected reg_affiliation_type=COTIZANTE, got %q", v)
-	}
-}
-
-// =============================================================================
-// Tests for regEntityHandler
-// =============================================================================
-
-func TestRegEntity_Postback(t *testing.T) {
-	repo := &mockEntityRepo{}
-	m := sm.NewMachine()
-	m.Register(sm.StateRegEntity, regEntityHandler(repo))
-
-	sess := testSess(sm.StateRegEntity)
-	result, err := m.Process(context.Background(), sess, postbackM("EPS001"))
+	result, err := m.Process(context.Background(), sess, postbackM("C"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.NextState != sm.StateConfirmRegistration {
 		t.Errorf("expected CONFIRM_REGISTRATION, got %s", result.NextState)
 	}
-	if v := result.UpdateCtx["reg_entity"]; v != "EPS001" {
-		t.Errorf("expected reg_entity=EPS001, got %q", v)
-	}
-	if v := result.UpdateCtx["patient_entity"]; v != "EPS001" {
-		t.Errorf("expected patient_entity=EPS001, got %q", v)
-	}
-}
-
-func TestRegEntity_SingleMatch(t *testing.T) {
-	repo := &mockEntityRepo{
-		findActiveFn: func(ctx context.Context) ([]domain.Entity, error) {
-			return []domain.Entity{
-				{Code: "EPS010", Name: "Nueva EPS"},
-				{Code: "EPS020", Name: "Sanitas"},
-				{Code: "EPS030", Name: "Sura"},
-			}, nil
-		},
-	}
-	m := sm.NewMachine()
-	m.Register(sm.StateRegEntity, regEntityHandler(repo))
-
-	sess := testSess(sm.StateRegEntity)
-	result, err := m.Process(context.Background(), sess, textM("Nueva"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateConfirmRegistration {
-		t.Errorf("expected CONFIRM_REGISTRATION, got %s", result.NextState)
-	}
-	if v := result.UpdateCtx["reg_entity"]; v != "EPS010" {
-		t.Errorf("expected reg_entity=EPS010, got %q", v)
-	}
-}
-
-func TestRegEntity_MultipleMatches(t *testing.T) {
-	repo := &mockEntityRepo{
-		findActiveFn: func(ctx context.Context) ([]domain.Entity, error) {
-			return []domain.Entity{
-				{Code: "EPS010", Name: "Salud Total"},
-				{Code: "EPS020", Name: "Saludcoop"},
-				{Code: "EPS030", Name: "Saludvida"},
-			}, nil
-		},
-	}
-	m := sm.NewMachine()
-	m.Register(sm.StateRegEntity, regEntityHandler(repo))
-
-	sess := testSess(sm.StateRegEntity)
-	result, err := m.Process(context.Background(), sess, textM("Salud"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateRegEntity {
-		t.Errorf("expected REG_ENTITY (stays, shows list), got %s", result.NextState)
-	}
-}
-
-func TestRegEntity_NoMatch(t *testing.T) {
-	repo := &mockEntityRepo{
-		findActiveFn: func(ctx context.Context) ([]domain.Entity, error) {
-			return []domain.Entity{
-				{Code: "EPS010", Name: "Nueva EPS"},
-			}, nil
-		},
-	}
-	m := sm.NewMachine()
-	m.Register(sm.StateRegEntity, regEntityHandler(repo))
-
-	sess := testSess(sm.StateRegEntity)
-	result, err := m.Process(context.Background(), sess, textM("xyz"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateRegEntity {
-		t.Errorf("expected REG_ENTITY (no match), got %s", result.NextState)
-	}
-}
-
-func TestRegEntity_TooMany(t *testing.T) {
-	repo := &mockEntityRepo{
-		findActiveFn: func(ctx context.Context) ([]domain.Entity, error) {
-			entities := make([]domain.Entity, 12)
-			for i := range entities {
-				entities[i] = domain.Entity{
-					Code: fmt.Sprintf("EPS%03d", i),
-					Name: fmt.Sprintf("Entidad a%d", i),
-				}
-			}
-			return entities, nil
-		},
-	}
-	m := sm.NewMachine()
-	m.Register(sm.StateRegEntity, regEntityHandler(repo))
-
-	sess := testSess(sm.StateRegEntity)
-	result, err := m.Process(context.Background(), sess, textM("a"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateRegEntity {
-		t.Errorf("expected REG_ENTITY (too many matches), got %s", result.NextState)
+	if v := result.UpdateCtx["reg_affiliation_type"]; v != "C" {
+		t.Errorf("expected reg_affiliation_type=C, got %q", v)
 	}
 }
 
@@ -1013,5 +830,174 @@ func TestFormatOptional(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("formatOptional(%q) = %q, want %q", tc.input, got, tc.expected)
 		}
+	}
+}
+
+// =============================================================================
+// Tests for regSelectCorrectionHandler
+// =============================================================================
+
+func registerSelectCorrectionConfig(m *sm.Machine) {
+	m.RegisterWithConfig(sm.StateRegSelectCorrection, sm.HandlerConfig{
+		InputType: sm.InputButton,
+		Options:   correctionPayloads(),
+		Handler:   regSelectCorrectionHandler(),
+	})
+}
+
+func TestRegSelectCorrection_FirstName(t *testing.T) {
+	m := sm.NewMachine()
+	registerSelectCorrectionConfig(m)
+
+	sess := testSess(sm.StateRegSelectCorrection)
+	result, err := m.Process(context.Background(), sess, postbackM("corr_first_name"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateRegFirstName {
+		t.Errorf("expected REG_FIRST_NAME, got %s", result.NextState)
+	}
+	if result.UpdateCtx["reg_correction_mode"] != "true" {
+		t.Error("expected reg_correction_mode=true")
+	}
+	if len(result.Messages) == 0 {
+		t.Error("expected prompt message")
+	}
+}
+
+func TestRegSelectCorrection_Restart(t *testing.T) {
+	m := sm.NewMachine()
+	registerSelectCorrectionConfig(m)
+
+	sess := testSess(sm.StateRegSelectCorrection)
+	result, err := m.Process(context.Background(), sess, postbackM("corr_restart"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateRegDocumentType {
+		t.Errorf("expected REG_DOCUMENT_TYPE, got %s", result.NextState)
+	}
+	if v, ok := result.UpdateCtx["reg_correction_mode"]; ok && v == "true" {
+		t.Error("restart should not set correction mode")
+	}
+}
+
+func TestRegSelectCorrection_Invalid(t *testing.T) {
+	m := sm.NewMachine()
+	registerSelectCorrectionConfig(m)
+
+	sess := testSess(sm.StateRegSelectCorrection)
+	result, err := m.Process(context.Background(), sess, textM("invalid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateRegSelectCorrection {
+		t.Errorf("expected REG_SELECT_CORRECTION (retry), got %s", result.NextState)
+	}
+}
+
+// =============================================================================
+// Tests for withCorrectionRedirect wrapper
+// =============================================================================
+
+func correctionTestSession() *session.Session {
+	sess := testSess("")
+	sess.Context["reg_correction_mode"] = "true"
+	sess.Context["reg_document_type"] = "CC"
+	sess.Context["patient_doc"] = "1234567890"
+	sess.Context["reg_first_name"] = "JUAN"
+	sess.Context["reg_second_name"] = ""
+	sess.Context["reg_first_surname"] = "GARCIA"
+	sess.Context["reg_second_surname"] = ""
+	sess.Context["reg_birth_date"] = "1990-03-15"
+	sess.Context["patient_age"] = "35"
+	sess.Context["reg_gender"] = "M"
+	sess.Context["reg_marital_status"] = "1"
+	sess.Context["reg_address"] = "CRA 10"
+	sess.Context["reg_phone"] = "3001234567"
+	sess.Context["reg_email"] = ""
+	sess.Context["reg_occupation"] = "ING"
+	sess.Context["reg_municipality"] = "11001"
+	sess.Context["reg_entity"] = "EPS001"
+	sess.Context["reg_user_type"] = "1"
+	sess.Context["reg_affiliation_type"] = "C"
+	return sess
+}
+
+func TestCorrectionRedirect_FirstName(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateRegFirstName, withCorrectionRedirect(
+		regFieldHandler("reg_first_name", "Primer nombre:", validateName, sm.StateRegSecondName, ""),
+	))
+
+	sess := correctionTestSession()
+	sess.CurrentState = sm.StateRegFirstName
+
+	result, err := m.Process(context.Background(), sess, textM("Pedro"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateConfirmRegistration {
+		t.Errorf("expected CONFIRM_REGISTRATION, got %s", result.NextState)
+	}
+	if result.UpdateCtx["reg_first_name"] != "PEDRO" {
+		t.Errorf("expected reg_first_name=PEDRO, got %q", result.UpdateCtx["reg_first_name"])
+	}
+}
+
+func TestCorrectionRedirect_NoCorrectionMode(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateRegFirstName, withCorrectionRedirect(
+		regFieldHandler("reg_first_name", "Primer nombre:", validateName, sm.StateRegSecondName, ""),
+	))
+
+	sess := testSess(sm.StateRegFirstName)
+	result, err := m.Process(context.Background(), sess, textM("Pedro"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateRegSecondName {
+		t.Errorf("expected REG_SECOND_NAME (normal flow), got %s", result.NextState)
+	}
+}
+
+func TestCorrectionRedirect_ValidationFails(t *testing.T) {
+	m := sm.NewMachine()
+	m.Register(sm.StateRegFirstName, withCorrectionRedirect(
+		regFieldHandler("reg_first_name", "Primer nombre:", validateName, sm.StateRegSecondName, ""),
+	))
+
+	sess := correctionTestSession()
+	sess.CurrentState = sm.StateRegFirstName
+
+	result, err := m.Process(context.Background(), sess, textM("123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateRegFirstName {
+		t.Errorf("expected REG_FIRST_NAME (retry), got %s", result.NextState)
+	}
+}
+
+func TestCorrectionRedirect_DocumentType(t *testing.T) {
+	m := sm.NewMachine()
+	m.RegisterWithConfig(sm.StateRegDocumentType, sm.HandlerConfig{
+		InputType: sm.InputButton,
+		Options:   []string{"CC", "TI", "CE", "PA", "RC", "MS", "AS"},
+		Handler:   withCorrectionRedirect(regDocumentTypeHandler()),
+	})
+
+	sess := correctionTestSession()
+	sess.CurrentState = sm.StateRegDocumentType
+
+	result, err := m.Process(context.Background(), sess, postbackM("TI"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateConfirmRegistration {
+		t.Errorf("expected CONFIRM_REGISTRATION, got %s", result.NextState)
+	}
+	if result.UpdateCtx["reg_document_type"] != "TI" {
+		t.Errorf("expected reg_document_type=TI, got %q", result.UpdateCtx["reg_document_type"])
 	}
 }

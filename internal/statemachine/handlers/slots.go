@@ -25,6 +25,56 @@ type WaitingListCreator interface {
 	HasActiveForPatientAndCups(ctx context.Context, patientID, cupsCode string) (bool, error)
 }
 
+// advanceToNextProcedure checks if there are more procedure groups to process.
+// If yes, returns a result that transitions to the next group. If no, returns nil.
+func advanceToNextProcedure(sess *session.Session) *sm.StateResult {
+	totalProc, _ := strconv.Atoi(sess.GetContext("total_procedures"))
+	currentIdx, _ := strconv.Atoi(sess.GetContext("current_procedure_idx"))
+
+	if currentIdx+1 >= totalProc {
+		return nil
+	}
+
+	nextIdx := currentIdx + 1
+	var groups []services.CUPSGroup
+	if err := json.Unmarshal([]byte(sess.GetContext("procedures_json")), &groups); err != nil {
+		return nil
+	}
+	if nextIdx >= len(groups) || len(groups[nextIdx].Cups) == 0 {
+		return nil
+	}
+
+	nextGroup := groups[nextIdx]
+	r := sm.NewResult(sm.StateCheckSpecialCups).
+		WithText(fmt.Sprintf("Ahora procesaremos el siguiente procedimiento:\n*%s*", nextGroup.Cups[0].Name)).
+		WithContext("current_procedure_idx", fmt.Sprintf("%d", nextIdx)).
+		WithContext("cups_code", nextGroup.Cups[0].Code).
+		WithContext("cups_name", nextGroup.Cups[0].Name).
+		WithContext("espacios", fmt.Sprintf("%d", nextGroup.Espacios)).
+		WithClearCtx("is_contrasted", "is_sedated", "is_pregnant",
+			"gfr_creatinine", "gfr_height_cm", "gfr_weight_kg",
+			"gfr_disease_type", "gfr_calculated",
+			"selected_slot_id", "available_slots_json", "slots_after_date",
+			"preferred_doctor_doc", "ocr_is_sedated", "ocr_is_contrasted",
+			"_prompted_contrast", "_prompted_sedation", "_prompted_pregnancy",
+			"cups_preparation", "cups_video_url", "cups_audio_url")
+
+	// Propagate OCR sedation/contrast detection for next group
+	for _, c := range nextGroup.Cups {
+		if c.IsSedated {
+			r.WithContext("ocr_is_sedated", "1")
+			break
+		}
+	}
+	for _, c := range nextGroup.Cups {
+		if c.IsContrasted {
+			r.WithContext("ocr_is_contrasted", "1")
+			break
+		}
+	}
+	return r
+}
+
 // RegisterSlotHandlers registra los 8 handlers de búsqueda de slots y agendamiento (Fase 10).
 func RegisterSlotHandlers(
 	m *sm.Machine,
@@ -33,9 +83,10 @@ func RegisterSlotHandlers(
 	procRepo repository.ProcedureRepository,
 	soatRepo repository.SoatRepository,
 	waitingListRepo WaitingListCreator,
+	addrMapper *services.AddressMapper,
 ) {
 	m.Register(sm.StateSearchSlots, searchSlotsHandler(slotSvc, apptSvc, procRepo))
-	m.Register(sm.StateShowSlots, showSlotsHandler())
+	m.Register(sm.StateShowSlots, showSlotsHandler(addrMapper))
 	m.Register(sm.StateNoSlotsAvailable, noSlotsHandler(waitingListRepo))
 	m.Register(sm.StateOfferWaitingList, offerWaitingListHandler(waitingListRepo))
 	m.RegisterWithConfig(sm.StateConfirmBooking, sm.HandlerConfig{
@@ -49,7 +100,7 @@ func RegisterSlotHandlers(
 				result.ClearCtx = append(result.ClearCtx, "selected_slot_id", "available_slots_json")
 				return
 			}
-			summary := buildBookingSummary(sess, slot)
+			summary := buildBookingSummary(sess, slot, addrMapper)
 			result.Messages = append(result.Messages, &sm.ButtonMessage{
 				Text: summary,
 				Buttons: []sm.Button{
@@ -60,8 +111,9 @@ func RegisterSlotHandlers(
 		},
 		Handler: confirmBookingHandler(),
 	})
+	m.Register(sm.StateReconfirmBooking, reconfirmBookingHandler(addrMapper))
 	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, soatRepo))
-	m.Register(sm.StateBookingSuccess, bookingSuccessHandler())
+	m.Register(sm.StateBookingSuccess, bookingSuccessHandler(addrMapper))
 	m.Register(sm.StateBookingFailed, bookingFailedHandler())
 }
 
@@ -77,12 +129,14 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 			espacios = 1
 		}
 
-		// Look up procedure details (address, preparation, video)
+		// Look up procedure details (address, preparation, video, type)
 		var address string
+		var procedureType string
 		if procRepo != nil {
 			proc, _ := procRepo.FindByCode(ctx, cupsCode)
 			if proc != nil {
 				address = proc.Address
+				procedureType = proc.Type
 				if proc.Preparation != "" {
 					sess.SetContext("cups_preparation", proc.Preparation)
 				}
@@ -95,6 +149,16 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 			}
 		}
 
+		// Sedation override: force agenda type to "sedacion" (same as Laravel)
+		if isSedated {
+			procedureType = "sedacion"
+		}
+
+		// Store procedure type in session for waiting list entries
+		if procedureType != "" {
+			sess.SetContext("procedure_type", procedureType)
+		}
+
 		query := services.SlotQuery{
 			CupsCode:        cupsCode,
 			PatientAge:      age,
@@ -105,6 +169,7 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 			AfterDate:       sess.GetContext("slots_after_date"),
 			MaxSlots:        5,
 			ClinicAddress:   address,
+			ProcedureType:   procedureType,
 		}
 
 		// SOAT monthly limit filter (SAN01 + soatGroup CUPS)
@@ -121,12 +186,10 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 
 		slots, err := slotSvc.GetAvailableSlots(ctx, query)
 		if err != nil {
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithButtons("Error al buscar horarios. Intenta más tarde.\n\n¿Qué deseas hacer?",
-					sm.Button{Text: "Reintentar", Payload: "otra_cita"},
-					sm.Button{Text: "Volver al menú", Payload: "menu"},
-				).
-				WithEvent("slot_search_error", map[string]interface{}{"error": err.Error()}), nil
+			r := sm.NewResult(sm.StatePostActionMenu).
+				WithText("Error al buscar horarios. Intenta más tarde.")
+			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
+			return r.WithEvent("slot_search_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		if len(slots) == 0 {
@@ -164,7 +227,7 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 }
 
 // SHOW_SLOTS (interactivo) — usuario selecciona un slot de la lista.
-func showSlotsHandler() sm.StateHandler {
+func showSlotsHandler(addrMapper *services.AddressMapper) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		payload := strings.TrimSpace(msg.Text)
 		if msg.PostbackPayload != "" {
@@ -245,7 +308,11 @@ func showSlotsHandler() sm.StateHandler {
 			selected.TimeDisplay)
 
 		if selected.ClinicAddress != "" {
-			summary += fmt.Sprintf("\nDirección: %s", selected.ClinicAddress)
+			if addrMapper != nil {
+				summary += "\n" + addrMapper.FormatAddress(selected.ClinicAddress)
+			} else {
+				summary += fmt.Sprintf("\nDirección: %s", selected.ClinicAddress)
+			}
 		}
 		summary += "\n\n¿Confirmas esta cita?"
 
@@ -274,13 +341,15 @@ func noSlotsHandler(wlRepo WaitingListCreator) sm.StateHandler {
 		// Cambio 12b: Self-reschedule from active appointment (confirmation/reschedule template).
 		// The old appointment is still active → don't offer WL (patient still has their slot).
 		if sess.GetContext("reschedule_appt_id") != "" {
-			return sm.NewResult(sm.StatePostActionMenu).
+			r := sm.NewResult(sm.StatePostActionMenu).
 				WithText("No hay horarios disponibles para *"+cupsName+"* en otra fecha.\n\n"+
 					"Tu cita original sigue vigente.").
 				WithEvent("no_slots_reschedule_active", map[string]interface{}{
-					"cups_code":            sess.GetContext("cups_code"),
-					"reschedule_appt_id":   sess.GetContext("reschedule_appt_id"),
-				}), nil
+					"cups_code":          sess.GetContext("cups_code"),
+					"reschedule_appt_id": sess.GetContext("reschedule_appt_id"),
+				})
+			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer ahora?"))
+			return r, nil
 		}
 
 		return sm.NewResult(sm.StateOfferWaitingList).
@@ -301,14 +370,24 @@ func autoAddToWaitingList(ctx context.Context, sess *session.Session, wlRepo Wai
 	// Check for duplicate
 	hasActive, err := wlRepo.HasActiveForPatientAndCups(ctx, patientID, cupsCode)
 	if err == nil && hasActive {
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText("No hay horarios disponibles para *"+cupsName+"*.\n\n"+
-				"Ya tienes una inscripcion activa en la lista de espera. "+
-				"Te avisaremos por WhatsApp cuando haya disponibilidad.").
-			WithEvent("waiting_list_auto_duplicate", map[string]interface{}{
-				"cups_code":  cupsCode,
-				"patient_id": patientID,
+		dupMsg := "No hay horarios disponibles para *" + cupsName + "*.\n\n" +
+			"Ya tienes una inscripcion activa en la lista de espera. " +
+			"Te avisaremos por WhatsApp cuando haya disponibilidad."
+		if next := advanceToNextProcedure(sess); next != nil {
+			next.Messages = append([]sm.OutboundMessage{&sm.TextMessage{Text: dupMsg}}, next.Messages...)
+			return next.WithEvent("waiting_list_auto_duplicate", map[string]interface{}{
+				"cups_code":      cupsCode,
+				"patient_id":     patientID,
+				"next_procedure": true,
 			}), nil
+		}
+		r := sm.NewResult(sm.StatePostActionMenu).
+			WithText(dupMsg)
+		r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
+		return r.WithEvent("waiting_list_auto_duplicate", map[string]interface{}{
+			"cups_code":  cupsCode,
+			"patient_id": patientID,
+		}), nil
 	}
 
 	age, _ := strconv.Atoi(sess.GetContext("patient_age"))
@@ -332,6 +411,7 @@ func autoAddToWaitingList(ctx context.Context, sess *session.Session, wlRepo Wai
 		IsSedated:     sess.GetContext("is_sedated") == "1",
 		Espacios:      espacios,
 		ProceduresJSON: sess.GetContext("procedures_json"),
+		ProcedureType:  sess.GetContext("procedure_type"),
 		Status:        "waiting",
 		ExpiresAt:     time.Now().AddDate(0, 0, 30),
 	}
@@ -340,25 +420,40 @@ func autoAddToWaitingList(ctx context.Context, sess *session.Session, wlRepo Wai
 
 	if err := wlRepo.Create(ctx, entry); err != nil {
 		slog.Error("auto_add_wl: create entry", "error", err)
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText("No hay horarios disponibles para *"+cupsName+"*.\n\n"+
-				"Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.").
-			WithEvent("waiting_list_auto_failed", map[string]interface{}{
-				"error": err.Error(),
+		r := sm.NewResult(sm.StatePostActionMenu).
+			WithText("No hay horarios disponibles para *" + cupsName + "*.\n\n" +
+				"Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.")
+		r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
+		return r.WithEvent("waiting_list_auto_failed", map[string]interface{}{
+			"error": err.Error(),
+		}), nil
+	}
+
+	autoMsg := "No hay horarios disponibles para *" + cupsName + "*.\n\n" +
+		"Te hemos inscrito automaticamente en la *lista de espera*.\n" +
+		"Te avisaremos por WhatsApp cuando haya disponibilidad.\n\n" +
+		"La inscripcion es valida por 30 dias."
+
+	if next := advanceToNextProcedure(sess); next != nil {
+		next.Messages = append([]sm.OutboundMessage{&sm.TextMessage{Text: autoMsg}}, next.Messages...)
+		return next.WithContext("waiting_list_entry_id", entry.ID).
+			WithEvent("waiting_list_auto_joined", map[string]interface{}{
+				"cups_code":      cupsCode,
+				"patient_id":     patientID,
+				"entry_id":       entry.ID,
+				"next_procedure": true,
 			}), nil
 	}
 
-	return sm.NewResult(sm.StatePostActionMenu).
-		WithText("No hay horarios disponibles para *"+cupsName+"*.\n\n"+
-			"Te hemos inscrito automaticamente en la *lista de espera*.\n"+
-			"Te avisaremos por WhatsApp cuando haya disponibilidad.\n\n"+
-			"La inscripcion es valida por 30 dias.").
-		WithContext("waiting_list_entry_id", entry.ID).
-		WithEvent("waiting_list_auto_joined", map[string]interface{}{
-			"cups_code":  cupsCode,
-			"patient_id": patientID,
-			"entry_id":   entry.ID,
-		}), nil
+	r := sm.NewResult(sm.StatePostActionMenu).
+		WithText(autoMsg).
+		WithContext("waiting_list_entry_id", entry.ID)
+	r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
+	return r.WithEvent("waiting_list_auto_joined", map[string]interface{}{
+		"cups_code":  cupsCode,
+		"patient_id": patientID,
+		"entry_id":   entry.ID,
+	}), nil
 }
 
 // OFFER_WAITING_LIST (interactivo) — usuario decide unirse o no a la lista de espera.
@@ -387,12 +482,22 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 			if wlRepo != nil {
 				hasActive, err := wlRepo.HasActiveForPatientAndCups(ctx, patientID, cupsCode)
 				if err == nil && hasActive {
-					return sm.NewResult(sm.StatePostActionMenu).
-						WithText("Ya tienes una inscripcion activa en la lista de espera para *"+cupsName+"*.\nTe avisaremos cuando haya disponibilidad.").
-						WithEvent("waiting_list_duplicate", map[string]interface{}{
-							"cups_code":  cupsCode,
-							"patient_id": patientID,
+					dupMsg := "Ya tienes una inscripcion activa en la lista de espera para *" + cupsName + "*.\nTe avisaremos cuando haya disponibilidad."
+					if next := advanceToNextProcedure(sess); next != nil {
+						next.Messages = append([]sm.OutboundMessage{&sm.TextMessage{Text: dupMsg}}, next.Messages...)
+						return next.WithEvent("waiting_list_duplicate", map[string]interface{}{
+							"cups_code":      cupsCode,
+							"patient_id":     patientID,
+							"next_procedure": true,
 						}), nil
+					}
+					r := sm.NewResult(sm.StatePostActionMenu).
+						WithText(dupMsg)
+					r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
+					return r.WithEvent("waiting_list_duplicate", map[string]interface{}{
+						"cups_code":  cupsCode,
+						"patient_id": patientID,
+					}), nil
 				}
 			}
 
@@ -418,6 +523,7 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 				IsSedated:     sess.GetContext("is_sedated") == "1",
 				Espacios:      espacios,
 				ProceduresJSON: sess.GetContext("procedures_json"),
+				ProcedureType:  sess.GetContext("procedure_type"),
 				Status:        "waiting",
 				ExpiresAt:     time.Now().AddDate(0, 0, 30),
 			}
@@ -439,30 +545,52 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 			// Guardar en BD
 			if wlRepo != nil {
 				if err := wlRepo.Create(ctx, entry); err != nil {
-					return sm.NewResult(sm.StatePostActionMenu).
-						WithText("Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.").
-						WithEvent("waiting_list_creation_failed", map[string]interface{}{
-							"error": err.Error(),
-						}), nil
+					r := sm.NewResult(sm.StatePostActionMenu).
+						WithText("Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.")
+					r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
+					return r.WithEvent("waiting_list_creation_failed", map[string]interface{}{
+						"error": err.Error(),
+					}), nil
 				}
 			}
 
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithText("Te hemos inscrito en la *lista de espera*.\n\n"+
-					"Te enviaremos un mensaje de WhatsApp cuando haya disponibilidad para *"+cupsName+"*.\n\n"+
-					"La inscripcion es valida por 30 dias.").
-				WithContext("waiting_list_entry_id", entry.ID).
-				WithEvent("waiting_list_joined", map[string]interface{}{
-					"cups_code":  cupsCode,
-					"patient_id": patientID,
-					"entry_id":   entry.ID,
-				}), nil
+			wlMsg := "Te hemos inscrito en la *lista de espera*.\n\n" +
+				"Te enviaremos un mensaje de WhatsApp cuando haya disponibilidad para *" + cupsName + "*.\n\n" +
+				"La inscripcion es valida por 30 dias."
+
+			if next := advanceToNextProcedure(sess); next != nil {
+				next.Messages = append([]sm.OutboundMessage{&sm.TextMessage{Text: wlMsg}}, next.Messages...)
+				return next.WithContext("waiting_list_entry_id", entry.ID).
+					WithEvent("waiting_list_joined", map[string]interface{}{
+						"cups_code":      cupsCode,
+						"patient_id":     patientID,
+						"entry_id":       entry.ID,
+						"next_procedure": true,
+					}), nil
+			}
+
+			r := sm.NewResult(sm.StatePostActionMenu).
+				WithText(wlMsg).
+				WithContext("waiting_list_entry_id", entry.ID)
+			r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
+			return r.WithEvent("waiting_list_joined", map[string]interface{}{
+				"cups_code":  cupsCode,
+				"patient_id": patientID,
+				"entry_id":   entry.ID,
+			}), nil
 
 		case "wl_no":
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithEvent("waiting_list_declined", map[string]interface{}{
-					"cups_code": sess.GetContext("cups_code"),
+			if next := advanceToNextProcedure(sess); next != nil {
+				return next.WithEvent("waiting_list_declined", map[string]interface{}{
+					"cups_code":      sess.GetContext("cups_code"),
+					"next_procedure": true,
 				}), nil
+			}
+			r := sm.NewResult(sm.StatePostActionMenu)
+			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer ahora?"))
+			return r.WithEvent("waiting_list_declined", map[string]interface{}{
+				"cups_code": sess.GetContext("cups_code"),
+			}), nil
 		}
 
 		return nil, fmt.Errorf("unreachable")
@@ -476,8 +604,12 @@ func confirmBookingHandler() sm.StateHandler {
 
 		switch selected {
 		case "booking_confirm":
-			return sm.NewResult(sm.StateCreateAppointment).
-				WithEvent("booking_confirmed", nil), nil
+			return sm.NewResult(sm.StateReconfirmBooking).
+				WithButtons("¿Estás seguro de *confirmar* esta cita?",
+					sm.Button{Text: "Sí, confirmar", Payload: "reconfirm_yes"},
+					sm.Button{Text: "No, volver", Payload: "reconfirm_no"},
+				).
+				WithEvent("booking_reconfirm_requested", nil), nil
 
 		case "booking_change":
 			return sm.NewResult(sm.StateSearchSlots).
@@ -486,6 +618,47 @@ func confirmBookingHandler() sm.StateHandler {
 		}
 
 		return nil, fmt.Errorf("unreachable")
+	}
+}
+
+// RECONFIRM_BOOKING (interactivo) — segunda confirmación antes de crear la cita.
+func reconfirmBookingHandler(addrMapper *services.AddressMapper) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		result, selected := sm.ValidateButtonResponse(sess, msg, "reconfirm_yes", "reconfirm_no")
+		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
+			result.Messages = nil
+			return sm.NewResult(sess.CurrentState).
+				WithButtons("¿Estás seguro de *confirmar* esta cita?",
+					sm.Button{Text: "Sí, confirmar", Payload: "reconfirm_yes"},
+					sm.Button{Text: "No, volver", Payload: "reconfirm_no"},
+				), nil
+		}
+
+		switch selected {
+		case "reconfirm_yes":
+			return sm.NewResult(sm.StateCreateAppointment).
+				WithEvent("booking_confirmed", nil), nil
+
+		case "reconfirm_no":
+			// Re-mostrar resumen de la cita
+			slot := findSelectedSlot(sess)
+			if slot == nil {
+				return sm.NewResult(sm.StateSearchSlots).
+					WithText("Slot no encontrado. Buscando nuevos horarios...").
+					WithClearCtx("selected_slot_id", "available_slots_json"), nil
+			}
+			summary := buildBookingSummary(sess, slot, addrMapper)
+			return sm.NewResult(sm.StateConfirmBooking).
+				WithButtons(summary,
+					sm.Button{Text: "Confirmar cita", Payload: "booking_confirm"},
+					sm.Button{Text: "Elegir otro", Payload: "booking_change"},
+				), nil
+		}
+
+		return nil, fmt.Errorf("unreachable: selected=%s", selected)
 	}
 }
 
@@ -579,7 +752,7 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 }
 
 // BOOKING_SUCCESS (automático) — cita creada exitosamente.
-func bookingSuccessHandler() sm.StateHandler {
+func bookingSuccessHandler(addrMapper *services.AddressMapper) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		slot := findSelectedSlot(sess)
 		cupsName := sess.GetContext("cups_name")
@@ -609,7 +782,11 @@ func bookingSuccessHandler() sm.StateHandler {
 			header, cupsName, doctorName, dateDisplay, timeDisplay)
 
 		if address != "" {
-			successMsg += fmt.Sprintf("\nDirección: %s", address)
+			if addrMapper != nil {
+				successMsg += "\n" + addrMapper.FormatAddress(address)
+			} else {
+				successMsg += fmt.Sprintf("\nDirección: %s", address)
+			}
 		}
 
 		// Preparation instructions
@@ -619,61 +796,31 @@ func bookingSuccessHandler() sm.StateHandler {
 		if videoURL := sess.GetContext("cups_video_url"); videoURL != "" {
 			successMsg += fmt.Sprintf("\n\n🎥 *Video de preparación:*\n%s", videoURL)
 		}
+		if audioURL := sess.GetContext("cups_audio_url"); audioURL != "" {
+			successMsg += fmt.Sprintf("\n\n🎵 *Audio:*\n%s", audioURL)
+		}
 
 		successMsg += "\n\nRecuerda presentarte 15 minutos antes con tu documento y orden médica."
 
 		// Check multi-procedure flow
-		totalProc, _ := strconv.Atoi(sess.GetContext("total_procedures"))
-		currentIdx, _ := strconv.Atoi(sess.GetContext("current_procedure_idx"))
-
-		if currentIdx+1 < totalProc {
-			nextIdx := currentIdx + 1
-			var groups []services.CUPSGroup
-			json.Unmarshal([]byte(sess.GetContext("procedures_json")), &groups)
-
-			if nextIdx < len(groups) && len(groups[nextIdx].Cups) > 0 {
-				nextGroup := groups[nextIdx]
-				r := sm.NewResult(sm.StateAskContrasted).
-					WithText(successMsg+fmt.Sprintf("\n\nAhora procesaremos el siguiente procedimiento:\n*%s*", nextGroup.Cups[0].Name)).
-					WithContext("current_procedure_idx", fmt.Sprintf("%d", nextIdx)).
-					WithContext("cups_code", nextGroup.Cups[0].Code).
-					WithContext("cups_name", nextGroup.Cups[0].Name).
-					WithContext("espacios", fmt.Sprintf("%d", nextGroup.Espacios)).
-					WithClearCtx("is_contrasted", "is_sedated", "is_pregnant",
-						"gfr_creatinine", "gfr_height_cm", "gfr_weight_kg",
-						"gfr_disease_type", "gfr_calculated",
-						"selected_slot_id", "available_slots_json", "slots_after_date",
-						"preferred_doctor_doc", "ocr_is_sedated",
-						"_prompted_contrast", "_prompted_sedation", "_prompted_pregnancy",
-					"cups_preparation", "cups_video_url", "cups_audio_url").
-					WithEvent("booking_success", map[string]interface{}{
-						"appointment_id": sess.GetContext("created_appointment_id"),
-						"cups_code":      sess.GetContext("cups_code"),
-						"next_procedure": true,
-					})
-				// Propagate OCR sedation detection for next group
-				for _, c := range nextGroup.Cups {
-					if c.IsSedated {
-						r.WithContext("ocr_is_sedated", "1")
-						break
-					}
-				}
-				return r, nil
-			}
+		if next := advanceToNextProcedure(sess); next != nil {
+			next.Messages = append([]sm.OutboundMessage{&sm.TextMessage{Text: successMsg}}, next.Messages...)
+			return next.WithEvent("booking_success", map[string]interface{}{
+				"appointment_id": sess.GetContext("created_appointment_id"),
+				"cups_code":      sess.GetContext("cups_code"),
+				"next_procedure": true,
+			}), nil
 		}
 
 		// No more procedures → post action menu
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithButtons(successMsg+"\n\n¿Qué más deseas hacer?",
-				sm.Button{Text: "Agendar otra cita", Payload: "otra_cita"},
-				sm.Button{Text: "Ver mis citas", Payload: "ver_citas"},
-				sm.Button{Text: "Cambiar paciente", Payload: "cambiar_paciente"},
-			).
-			WithEvent("booking_success", map[string]interface{}{
-				"appointment_id": sess.GetContext("created_appointment_id"),
-				"cups_code":      sess.GetContext("cups_code"),
-				"next_procedure": false,
-			}), nil
+		r := sm.NewResult(sm.StatePostActionMenu).
+			WithText(successMsg)
+		r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
+		return r.WithEvent("booking_success", map[string]interface{}{
+			"appointment_id": sess.GetContext("created_appointment_id"),
+			"cups_code":      sess.GetContext("cups_code"),
+			"next_procedure": false,
+		}), nil
 	}
 }
 
@@ -690,13 +837,10 @@ func bookingFailedHandler() sm.StateHandler {
 				WithEvent("slot_taken", nil), nil
 
 		default:
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithButtons("Ocurrió un error al crear la cita. Por favor intenta más tarde.\n\n¿Qué deseas hacer?",
-					sm.Button{Text: "Reintentar", Payload: "otra_cita"},
-					sm.Button{Text: "Ver mis citas", Payload: "ver_citas"},
-					sm.Button{Text: "Cambiar paciente", Payload: "cambiar_paciente"},
-				).
-				WithEvent("booking_failed", map[string]interface{}{"reason": reason}), nil
+			r := sm.NewResult(sm.StatePostActionMenu).
+				WithText("Ocurrió un error al crear la cita. Por favor intenta más tarde.")
+			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
+			return r.WithEvent("booking_failed", map[string]interface{}{"reason": reason}), nil
 		}
 	}
 }
@@ -718,7 +862,7 @@ func findSelectedSlot(sess *session.Session) *services.AvailableSlot {
 }
 
 // buildBookingSummary creates the booking confirmation text.
-func buildBookingSummary(sess *session.Session, slot *services.AvailableSlot) string {
+func buildBookingSummary(sess *session.Session, slot *services.AvailableSlot, addrMapper *services.AddressMapper) string {
 	dateDisplay := slot.Date
 	if dt, err := time.Parse("2006-01-02", slot.Date); err == nil {
 		dateDisplay = utils.FormatFriendlyDate(dt)
@@ -735,7 +879,11 @@ func buildBookingSummary(sess *session.Session, slot *services.AvailableSlot) st
 		slot.TimeDisplay)
 
 	if slot.ClinicAddress != "" {
-		summary += fmt.Sprintf("\nDirección: %s", slot.ClinicAddress)
+		if addrMapper != nil {
+			summary += "\n" + addrMapper.FormatAddress(slot.ClinicAddress)
+		} else {
+			summary += fmt.Sprintf("\nDirección: %s", slot.ClinicAddress)
+		}
 	}
 
 	if prep := sess.GetContext("cups_preparation"); prep != "" {
@@ -743,6 +891,9 @@ func buildBookingSummary(sess *session.Session, slot *services.AvailableSlot) st
 	}
 	if videoURL := sess.GetContext("cups_video_url"); videoURL != "" {
 		summary += fmt.Sprintf("\n\n🎥 *Video:* %s", videoURL)
+	}
+	if audioURL := sess.GetContext("cups_audio_url"); audioURL != "" {
+		summary += fmt.Sprintf("\n\n🎵 *Audio:* %s", audioURL)
 	}
 
 	summary += "\n\n¿Confirmas esta cita?"

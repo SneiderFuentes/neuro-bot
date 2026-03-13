@@ -31,9 +31,10 @@ const (
 
 // === Registro de Paciente Nuevo ===
 const (
-	StateRegistrationStart   = "REGISTRATION_START"
-	StateRegDocumentType     = "REG_DOCUMENT_TYPE"
-	StateRegFirstSurname     = "REG_FIRST_SURNAME"
+	StateRegistrationStart       = "REGISTRATION_START"
+	StateRegDocumentType         = "REG_DOCUMENT_TYPE"
+	StateRegDocumentIssuePlace   = "REG_DOCUMENT_ISSUE_PLACE"
+	StateRegFirstSurname         = "REG_FIRST_SURNAME"
 	StateRegSecondSurname    = "REG_SECOND_SURNAME"
 	StateRegFirstName        = "REG_FIRST_NAME"
 	StateRegSecondName       = "REG_SECOND_NAME"
@@ -52,6 +53,7 @@ const (
 	StateRegAffiliationType  = "REG_AFFILIATION_TYPE"
 	StateRegEntity           = "REG_ENTITY"
 	StateRegZone             = "REG_ZONE"
+	StateRegSelectCorrection = "REG_SELECT_CORRECTION"
 	StateConfirmRegistration = "CONFIRM_REGISTRATION"
 	StateCreatePatient       = "CREATE_PATIENT"
 )
@@ -109,21 +111,21 @@ const (
 
 // === Búsqueda y Agendamiento ===
 const (
-	StateSearchSlots       = "SEARCH_SLOTS"
-	StateShowSlots         = "SHOW_SLOTS"
-	StateNoSlotsAvailable  = "NO_SLOTS_AVAILABLE"
-	StateOfferWaitingList  = "OFFER_WAITING_LIST"
-	StateConfirmBooking    = "CONFIRM_BOOKING"
-	StateCreateAppointment = "CREATE_APPOINTMENT"
-	StateBookingSuccess    = "BOOKING_SUCCESS"
-	StateBookingFailed     = "BOOKING_FAILED"
+	StateSearchSlots        = "SEARCH_SLOTS"
+	StateShowSlots          = "SHOW_SLOTS"
+	StateNoSlotsAvailable   = "NO_SLOTS_AVAILABLE"
+	StateOfferWaitingList   = "OFFER_WAITING_LIST"
+	StateConfirmBooking     = "CONFIRM_BOOKING"
+	StateReconfirmBooking   = "RECONFIRM_BOOKING"
+	StateCreateAppointment  = "CREATE_APPOINTMENT"
+	StateBookingSuccess     = "BOOKING_SUCCESS"
+	StateBookingFailed      = "BOOKING_FAILED"
 )
 
 // === Post-Acción y Cierre ===
 const (
 	StatePostActionMenu  = "POST_ACTION_MENU"
 	StateFallbackMenu    = "FALLBACK_MENU"
-	StateChangePatient   = "CHANGE_PATIENT"
 	StateFarewell        = "FAREWELL"
 	StateTerminated      = "TERMINATED"
 	StateOutOfHours      = "OUT_OF_HOURS"
@@ -168,8 +170,9 @@ var stateTypes = map[string]StateType{
 
 	// Registro
 	StateRegistrationStart:   StateTypeInteractive,
-	StateRegDocumentType:     StateTypeInteractive,
-	StateRegFirstSurname:     StateTypeInteractive,
+	StateRegDocumentType:         StateTypeInteractive,
+	StateRegDocumentIssuePlace:   StateTypeInteractive,
+	StateRegFirstSurname:         StateTypeInteractive,
 	StateRegSecondSurname:    StateTypeInteractive,
 	StateRegFirstName:        StateTypeInteractive,
 	StateRegSecondName:       StateTypeInteractive,
@@ -188,6 +191,7 @@ var stateTypes = map[string]StateType{
 	StateRegAffiliationType:  StateTypeInteractive,
 	StateRegEntity:           StateTypeInteractive,
 	StateRegZone:             StateTypeInteractive,
+	StateRegSelectCorrection: StateTypeInteractive,
 	StateConfirmRegistration: StateTypeInteractive,
 	StateCreatePatient:       StateTypeAutomatic,
 
@@ -195,7 +199,7 @@ var stateTypes = map[string]StateType{
 	StateFetchAppointments: StateTypeAutomatic,
 	StateListAppointments:  StateTypeInteractive,
 	StateAppointmentAction: StateTypeInteractive,
-	StateNoAppointments:    StateTypeAutomatic,
+	StateNoAppointments:    StateTypeInteractive,
 
 	// Confirmación / Cancelación
 	StateConfirmAppointment:   StateTypeInteractive,
@@ -239,7 +243,8 @@ var stateTypes = map[string]StateType{
 	StateShowSlots:         StateTypeInteractive,
 	StateNoSlotsAvailable:  StateTypeAutomatic,
 	StateOfferWaitingList:  StateTypeInteractive,
-	StateConfirmBooking:    StateTypeInteractive,
+	StateConfirmBooking:     StateTypeInteractive,
+	StateReconfirmBooking:   StateTypeInteractive,
 	StateCreateAppointment: StateTypeAutomatic,
 	StateBookingSuccess:    StateTypeAutomatic,
 	StateBookingFailed:     StateTypeAutomatic,
@@ -247,7 +252,6 @@ var stateTypes = map[string]StateType{
 	// Post-Acción y Cierre
 	StatePostActionMenu:  StateTypeInteractive,
 	StateFallbackMenu:    StateTypeInteractive,
-	StateChangePatient:   StateTypeAutomatic,
 	StateFarewell:        StateTypeAutomatic,
 	StateTerminated:      StateTypeAutomatic,
 	StateOutOfHours:      StateTypeAutomatic,

@@ -74,8 +74,25 @@ func (r *PatientRepo) Create(ctx context.Context, input domain.CreatePatientInpu
 		countryCode = "170" // Colombia
 	}
 
+	// Integer columns require numeric values — default to "0" when empty.
+	level := input.Level
+	if level == "" {
+		level = "0"
+	}
+	educationLevel := input.EducationLevel
+	if educationLevel == "" {
+		educationLevel = "0"
+	}
+
+	// Truncate strings to match DB column char limits (STRICT_TRANS_TABLES rejects overflow).
+	firstName := truncate(input.FirstName, 20)
+	secondName := truncate(input.SecondName, 20)
+	address := truncate(input.Address, 59)
+	occupation := truncate(input.Occupation, 30)
+	fullName = truncate(fullName, 80)
+
 	query := `INSERT INTO pacientes (
-		TipoID, IDPaciente,
+		TipoID, IDPaciente, LugarExpedicion,
 		Apellido1, Apellido2, Nombre1, Nombre2, NCompleto,
 		TipoAfiliacion, TipoUsuario,
 		FechaNacimiento, SexoPaciente,
@@ -84,18 +101,18 @@ func (r *PatientRepo) Create(ctx context.Context, input domain.CreatePatientInpu
 		EntidadPaciente, Nivel, EstadoCivil,
 		LugarNacimiento, Escolaridad, codPaisOrigen,
 		FechaCreado, CreadoPor
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	result, err := r.db.ExecContext(ctx, query,
-		input.DocumentType, input.DocumentNumber,
-		input.FirstSurname, input.SecondSurname, input.FirstName, input.SecondName, fullName,
+		input.DocumentType, input.DocumentNumber, input.DocumentIssuePlace,
+		input.FirstSurname, input.SecondSurname, firstName, secondName, fullName,
 		input.AffiliationType, input.UserType,
 		input.BirthDate, input.Gender,
-		input.Address, input.CityCode, input.Zone,
-		input.Phone, input.Email, input.Occupation,
-		input.EntityCode, input.Level, input.MaritalStatus,
-		input.BirthPlace, input.EducationLevel, countryCode,
-		now, "BOT-WHATSAPP",
+		address, input.CityCode, input.Zone,
+		input.Phone, input.Email, occupation,
+		input.EntityCode, level, input.MaritalStatus,
+		input.BirthPlace, educationLevel, countryCode,
+		now, 0,
 	)
 	if err != nil {
 		return "", fmt.Errorf("insert pacientes: %w", err)
@@ -126,4 +143,13 @@ func (r *PatientRepo) UpdateContactInfo(ctx context.Context, patientID, phone, e
 		return fmt.Errorf("update contact info: %w", err)
 	}
 	return nil
+}
+
+// truncate returns s trimmed to maxLen characters (rune-safe).
+func truncate(s string, maxLen int) string {
+	r := []rune(s)
+	if len(r) > maxLen {
+		return string(r[:maxLen])
+	}
+	return s
 }

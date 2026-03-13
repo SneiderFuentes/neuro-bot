@@ -28,7 +28,7 @@ func RegisterMedicalOrderHandlers(m *sm.Machine, ocrSvc *services.OCRService, pr
 func askMedicalOrderHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		return sm.NewResult(sm.StateUploadMedicalOrder).
-			WithText("Envía una *foto clara* de tu orden médica.\n\nAsegúrate de que:\n- Se vean bien los procedimientos\n- La foto no esté borrosa\n- Se lea el texto").
+			WithText("Envía una *foto clara* o *PDF* de tu orden médica.\n\nAsegúrate de que:\n- Se vean bien los procedimientos\n- La foto no esté borrosa\n- Se lea el texto").
 			WithEvent("order_photo_requested", nil), nil
 	}
 }
@@ -37,17 +37,21 @@ func askMedicalOrderHandler() sm.StateHandler {
 func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		switch msg.MessageType {
-		case "image":
-			if msg.ImageURL == "" {
+		case "image", "document":
+			mediaURL := msg.ImageURL
+			if msg.MessageType == "document" {
+				mediaURL = msg.DocumentURL
+			}
+			if mediaURL == "" {
 				return sm.NewResult(sess.CurrentState).
-					WithText("No pude obtener la imagen. Por favor envía otra foto."), nil
+					WithText("No pude obtener el archivo. Por favor envía otra foto o PDF."), nil
 			}
 
-			ocrResult, err := ocrSvc.AnalyzeImage(ctx, msg.ImageURL)
+			ocrResult, err := ocrSvc.AnalyzeDocument(ctx, mediaURL)
 			if err != nil {
 				return sm.NewResult(sess.CurrentState).
 					WithButtons("Error al procesar la imagen. ¿Qué deseas hacer?",
-						sm.Button{Text: "Enviar otra foto", Payload: "retry_photo"},
+						sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
 						sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
 					).
 					WithEvent("ocr_error", map[string]interface{}{"error": err.Error()}), nil
@@ -60,7 +64,7 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				}
 				return sm.NewResult(sess.CurrentState).
 					WithButtons(errorMsg+"\n\n¿Qué deseas hacer?",
-						sm.Button{Text: "Enviar otra foto", Payload: "retry_photo"},
+						sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
 						sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
 					).
 					WithEvent("ocr_failed", map[string]interface{}{"error": ocrResult.Error}), nil
@@ -91,7 +95,7 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				switch msg.PostbackPayload {
 				case "retry_photo":
 					return sm.NewResult(sess.CurrentState).
-						WithText("Envía otra foto de tu orden médica."), nil
+						WithText("Envía otra foto o PDF de tu orden médica."), nil
 				case "escalate_agent":
 					return sm.NewResult(sm.StateEscalateToAgent).
 						WithText("Te voy a comunicar con uno de nuestros agentes para que pueda ayudarte con tu orden médica.").
@@ -99,7 +103,7 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				}
 			}
 
-			return sm.RetryOrEscalate(sess, "Estoy esperando una *foto* de tu orden médica. Por favor envía la imagen."), nil
+			return sm.RetryOrEscalate(sess, "Estoy esperando una *foto o PDF* de tu orden médica. Por favor envía el archivo."), nil
 		}
 	}
 }
@@ -176,11 +180,15 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 					WithEvent("ocr_parse_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 
-			// Preservar is_sedated del OCR antes de GroupByService (la IA no devuelve is_sedated)
+			// Preservar is_sedated e is_contrasted del OCR antes de GroupByService (la IA no los devuelve)
 			sedatedByCode := make(map[string]bool)
+			contrastedByCode := make(map[string]bool)
 			for _, c := range cups {
 				if c.IsSedated {
 					sedatedByCode[c.Code] = true
+				}
+				if c.IsContrasted {
+					contrastedByCode[c.Code] = true
 				}
 			}
 
@@ -199,14 +207,40 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				}
 			}
 
-			// Restaurar is_sedated en los grupos (la IA no lo propaga)
+			// Restaurar is_sedated e is_contrasted en los grupos (la IA no los propaga)
 			for i := range groups {
 				for j := range groups[i].Cups {
 					if sedatedByCode[groups[i].Cups[j].Code] {
 						groups[i].Cups[j].IsSedated = true
 					}
+					if contrastedByCode[groups[i].Cups[j].Code] {
+						groups[i].Cups[j].IsContrasted = true
+					}
 				}
 			}
+
+			// Separar grupos con múltiples CUPS en grupos individuales.
+			// Cada CUPS necesita su propia cita (slot, doctor, agenda).
+			// Excepción: Fisiatría agrupa EMG+NC en la misma cita.
+			var splitGroups []services.CUPSGroup
+			for _, g := range groups {
+				if strings.EqualFold(g.ServiceType, "Fisiatria") || strings.EqualFold(g.ServiceType, "Fisiatría") || len(g.Cups) <= 1 {
+					splitGroups = append(splitGroups, g)
+					continue
+				}
+				for _, c := range g.Cups {
+					espacios := c.Quantity
+					if espacios < 1 {
+						espacios = 1
+					}
+					splitGroups = append(splitGroups, services.CUPSGroup{
+						ServiceType: g.ServiceType,
+						Cups:        []services.CUPSEntry{c},
+						Espacios:    espacios,
+					})
+				}
+			}
+			groups = splitGroups
 
 			groupsJSON, _ := json.Marshal(groups)
 
@@ -235,10 +269,16 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				WithContext("cups_name", firstGroup.Cups[0].Name).
 				WithContext("espacios", fmt.Sprintf("%d", firstGroup.Espacios))
 
-			// Propagar is_sedated del primer grupo si algún CUPS lo tiene
+			// Propagar is_sedated y is_contrasted del primer grupo si algún CUPS lo tiene
 			for _, c := range firstGroup.Cups {
 				if c.IsSedated {
 					r.WithContext("ocr_is_sedated", "1")
+					break
+				}
+			}
+			for _, c := range firstGroup.Cups {
+				if c.IsContrasted {
+					r.WithContext("ocr_is_contrasted", "1")
 					break
 				}
 			}
@@ -248,7 +288,7 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 		case "ocr_incorrect":
 			return sm.NewResult(sm.StateUploadMedicalOrder).
 				WithButtons("Entendido. ¿Qué deseas hacer?",
-					sm.Button{Text: "Enviar otra foto", Payload: "retry_photo"},
+					sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
 					sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
 				).
 				WithClearCtx("ocr_cups_json").
@@ -264,7 +304,7 @@ func ocrFailedHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		return sm.NewResult(sm.StateUploadMedicalOrder).
 			WithButtons("No pudimos procesar tu orden médica. ¿Qué deseas hacer?",
-				sm.Button{Text: "Enviar otra foto", Payload: "retry_photo"},
+				sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
 				sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
 			).
 			WithEvent("ocr_failed_redirect", nil), nil

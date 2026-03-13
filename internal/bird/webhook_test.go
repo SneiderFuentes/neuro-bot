@@ -157,6 +157,129 @@ func TestParseInboundMessage_Postback(t *testing.T) {
 	}
 }
 
+func TestParseInboundMessage_InteractivePostback(t *testing.T) {
+	event := WebhookEvent{
+		Payload: WebhookPayload{
+			ID: "msg-interactive",
+			Sender: SenderInfo{
+				Contacts: []Contact{{IdentifierValue: "+573001234567"}},
+			},
+			Body: MessageBody{
+				Type: "interactive",
+				Text: TextBody{
+					Text: "Sí, registrarme",
+					Actions: []Action{
+						{Type: "postback", Postback: Postback{Text: "Sí, registrarme", Payload: "register_yes"}},
+					},
+				},
+			},
+		},
+	}
+
+	msg := ParseInboundMessage(event)
+	if msg.MessageType != "postback" {
+		t.Errorf("expected postback, got %s", msg.MessageType)
+	}
+	if !msg.IsPostback {
+		t.Error("expected IsPostback=true for interactive")
+	}
+	if msg.PostbackPayload != "register_yes" {
+		t.Errorf("expected register_yes, got %s", msg.PostbackPayload)
+	}
+}
+
+func TestParseInboundMessage_ListPostback(t *testing.T) {
+	event := WebhookEvent{
+		Payload: WebhookPayload{
+			ID: "msg-list",
+			Sender: SenderInfo{
+				Contacts: []Contact{{IdentifierValue: "+573001234567"}},
+			},
+			Body: MessageBody{
+				Type: "list",
+				Text: TextBody{
+					Text: "Agendar cita",
+					Actions: []Action{
+						{Type: "postback", Postback: Postback{Text: "Agendar cita", Payload: "agendar"}},
+					},
+				},
+			},
+		},
+	}
+
+	msg := ParseInboundMessage(event)
+	if msg.MessageType != "postback" {
+		t.Errorf("expected postback, got %s", msg.MessageType)
+	}
+	if !msg.IsPostback {
+		t.Error("expected IsPostback=true for list")
+	}
+	if msg.PostbackPayload != "agendar" {
+		t.Errorf("expected agendar, got %s", msg.PostbackPayload)
+	}
+}
+
+func TestParseInboundMessage_ListPostback_ListKey(t *testing.T) {
+	// Bird may place the postback under the "list" JSON key instead of "text"
+	event := WebhookEvent{
+		Payload: WebhookPayload{
+			ID: "msg-list-key",
+			Sender: SenderInfo{
+				Contacts: []Contact{{IdentifierValue: "+573001234567"}},
+			},
+			Body: MessageBody{
+				Type: "list",
+				List: TextBody{
+					Text: "Agendar cita",
+					Actions: []Action{
+						{Type: "postback", Postback: Postback{Text: "Agendar cita", Payload: "agendar"}},
+					},
+				},
+			},
+		},
+	}
+
+	msg := ParseInboundMessage(event)
+	if msg.MessageType != "postback" {
+		t.Errorf("expected postback, got %s", msg.MessageType)
+	}
+	if !msg.IsPostback {
+		t.Error("expected IsPostback=true for list under list key")
+	}
+	if msg.PostbackPayload != "agendar" {
+		t.Errorf("expected agendar, got %s", msg.PostbackPayload)
+	}
+}
+
+func TestParseInboundMessage_InteractivePostback_InteractiveKey(t *testing.T) {
+	// Bird may place the postback under the "interactive" JSON key
+	event := WebhookEvent{
+		Payload: WebhookPayload{
+			ID: "msg-interactive-key",
+			Sender: SenderInfo{
+				Contacts: []Contact{{IdentifierValue: "+573001234567"}},
+			},
+			Body: MessageBody{
+				Type: "interactive",
+				Interactive: TextBody{
+					Text: "Confirmar",
+					Actions: []Action{
+						{Type: "postback", Postback: Postback{Text: "Confirmar", Payload: "reg_confirm"}},
+					},
+				},
+			},
+		},
+	}
+
+	msg := ParseInboundMessage(event)
+	if msg.MessageType != "postback" {
+		t.Errorf("expected postback, got %s", msg.MessageType)
+	}
+	if msg.PostbackPayload != "reg_confirm" {
+		t.Errorf("expected reg_confirm, got %s", msg.PostbackPayload)
+	}
+}
+
 func TestParseInboundMessage_Image(t *testing.T) {
 	event := WebhookEvent{
 		Payload: WebhookPayload{

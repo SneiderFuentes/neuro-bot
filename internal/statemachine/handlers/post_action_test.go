@@ -38,23 +38,6 @@ func postbackM(payload string) bird.InboundMessage {
 	}
 }
 
-func TestPostActionMenu_OtraCita(t *testing.T) {
-	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
-
-	sess := testSess(sm.StatePostActionMenu)
-	result, err := m.Process(context.Background(), sess, postbackM("otra_cita"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateAskMedicalOrder {
-		t.Errorf("expected ASK_MEDICAL_ORDER, got %s", result.NextState)
-	}
-	if len(result.ClearCtx) == 0 {
-		t.Error("expected booking keys to be cleared")
-	}
-}
-
 func TestPostActionMenu_VerCitas(t *testing.T) {
 	m := sm.NewMachine()
 	RegisterPostActionHandlers(m)
@@ -66,30 +49,6 @@ func TestPostActionMenu_VerCitas(t *testing.T) {
 	}
 	if result.NextState != sm.StateFetchAppointments {
 		t.Errorf("expected FETCH_APPOINTMENTS, got %s", result.NextState)
-	}
-}
-
-func TestPostActionMenu_CambiarPaciente(t *testing.T) {
-	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
-
-	sess := testSess(sm.StatePostActionMenu)
-	result, err := m.Process(context.Background(), sess, postbackM("cambiar_paciente"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateAskDocument {
-		t.Errorf("expected ASK_DOCUMENT, got %s", result.NextState)
-	}
-	// Should clear all context
-	found := false
-	for _, k := range result.ClearCtx {
-		if k == "__all__" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected __all__ in ClearCtx")
 	}
 }
 
@@ -138,13 +97,13 @@ func TestPostActionMenu_Numeric(t *testing.T) {
 	RegisterPostActionHandlers(m)
 
 	sess := testSess(sm.StatePostActionMenu)
-	// "1" = otra_cita, "2" = ver_citas, "3" = cambiar_paciente
-	result, err := m.Process(context.Background(), sess, textM("2"))
+	// "1" = ver_citas, "2" = menu_principal, "3" = terminar_chat
+	result, err := m.Process(context.Background(), sess, textM("1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.NextState != sm.StateFetchAppointments {
-		t.Errorf("expected FETCH_APPOINTMENTS for numeric '2', got %s", result.NextState)
+		t.Errorf("expected FETCH_APPOINTMENTS for numeric '1', got %s", result.NextState)
 	}
 }
 
@@ -182,25 +141,3 @@ func TestTerminated(t *testing.T) {
 	}
 }
 
-func TestChangePatient(t *testing.T) {
-	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
-
-	sess := testSess(sm.StateChangePatient)
-	result, err := m.Process(context.Background(), sess, textM(""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.NextState != sm.StateAskDocument {
-		t.Errorf("expected ASK_DOCUMENT, got %s", result.NextState)
-	}
-	found := false
-	for _, k := range result.ClearCtx {
-		if k == "__all__" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected __all__ ClearCtx")
-	}
-}
