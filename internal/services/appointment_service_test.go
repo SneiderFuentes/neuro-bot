@@ -164,7 +164,7 @@ func TestFindConsecutiveBlock(t *testing.T) {
 func TestCheckSOATLimit_NonSOAT(t *testing.T) {
 	svc := NewAppointmentService(&mockAppointmentRepo{}, nil)
 
-	blocked, msg, err := svc.CheckSOATLimit(context.Background(), "890271", "EPS001")
+	blocked, msg, err := svc.CheckMRCLimit(context.Background(), "890271", "EPS001")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,12 +184,12 @@ func TestCheckSOATLimit_WithinLimit(t *testing.T) {
 	}
 	svc := NewAppointmentService(repo, nil)
 
-	blocked, _, err := svc.CheckSOATLimit(context.Background(), "861411", "SAN01")
+	blocked, _, err := svc.CheckMRCLimit(context.Background(), "861411", "SAN02")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if blocked {
-		t.Error("expected not blocked when within SOAT limit")
+		t.Error("expected not blocked when within MRC limit")
 	}
 }
 
@@ -201,34 +201,34 @@ func TestCheckSOATLimit_ExceedsLimit(t *testing.T) {
 	}
 	svc := NewAppointmentService(repo, nil)
 
-	blocked, msg, err := svc.CheckSOATLimit(context.Background(), "861411", "SAN01")
+	blocked, msg, err := svc.CheckMRCLimit(context.Background(), "861411", "SAN02")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !blocked {
-		t.Error("expected blocked when SOAT limit reached")
+		t.Error("expected blocked when MRC limit reached")
 	}
 	if msg == "" {
 		t.Error("expected non-empty message when blocked")
 	}
 }
 
-func TestCheckSOATLimit_SAN02_NotBlocked(t *testing.T) {
-	// SAN02 should NOT be checked anymore (only SAN01)
+func TestCheckSOATLimit_SAN01_NotBlocked(t *testing.T) {
+	// SAN01 (Sanitas Premium) is NOT subject to MRC limits
 	repo := &mockAppointmentRepo{
 		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
-			t.Fatal("CountMonthlyByGroup should not be called for SAN02")
+			t.Fatal("CountMonthlyByGroup should not be called for SAN01 (Sanitas Premium)")
 			return 999, nil
 		},
 	}
 	svc := NewAppointmentService(repo, nil)
 
-	blocked, msg, err := svc.CheckSOATLimit(context.Background(), "861411", "SAN02")
+	blocked, msg, err := svc.CheckMRCLimit(context.Background(), "861411", "SAN01")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if blocked {
-		t.Error("expected SAN02 NOT blocked — only SAN01 applies")
+		t.Error("expected SAN01 NOT blocked — MRC only applies to SAN02")
 	}
 	if msg != "" {
 		t.Errorf("expected empty message, got %q", msg)
@@ -236,7 +236,7 @@ func TestCheckSOATLimit_SAN02_NotBlocked(t *testing.T) {
 }
 
 func TestCheckSOATLimit_Disabled(t *testing.T) {
-	// With feature flag disabled, even SAN01 should not be checked
+	// With feature flag disabled, even SAN02 should not be checked
 	repo := &mockAppointmentRepo{
 		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
 			t.Fatal("CountMonthlyByGroup should not be called when disabled")
@@ -246,7 +246,7 @@ func TestCheckSOATLimit_Disabled(t *testing.T) {
 	cfg := &config.Config{CupsGroupLimitsEnabled: false}
 	svc := NewAppointmentService(repo, cfg)
 
-	blocked, msg, err := svc.CheckSOATLimit(context.Background(), "861411", "SAN01")
+	blocked, msg, err := svc.CheckMRCLimit(context.Background(), "861411", "SAN02")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestCheckSOATLimit_Disabled(t *testing.T) {
 	}
 }
 
-func TestCheckSOATLimitForMonth_WithinLimit(t *testing.T) {
+func TestCheckMRCLimitForMonth_WithinLimit(t *testing.T) {
 	repo := &mockAppointmentRepo{
 		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
 			if year != 2026 || month != 4 {
@@ -269,16 +269,16 @@ func TestCheckSOATLimitForMonth_WithinLimit(t *testing.T) {
 	}
 	svc := NewAppointmentService(repo, nil)
 
-	blocked, err := svc.CheckSOATLimitForMonth(context.Background(), "861411", "SAN01", 2026, 4)
+	blocked, err := svc.CheckMRCLimitForMonth(context.Background(), "861411", "SAN02", 2026, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if blocked {
-		t.Error("expected not blocked for April when under limit")
+		t.Error("expected not blocked for April when under MRC limit")
 	}
 }
 
-func TestCheckSOATLimitForMonth_AtLimit(t *testing.T) {
+func TestCheckMRCLimitForMonth_AtLimit(t *testing.T) {
 	repo := &mockAppointmentRepo{
 		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
 			return 20, nil
@@ -286,35 +286,35 @@ func TestCheckSOATLimitForMonth_AtLimit(t *testing.T) {
 	}
 	svc := NewAppointmentService(repo, nil)
 
-	blocked, err := svc.CheckSOATLimitForMonth(context.Background(), "861411", "SAN01", 2026, 3)
+	blocked, err := svc.CheckMRCLimitForMonth(context.Background(), "861411", "SAN02", 2026, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !blocked {
-		t.Error("expected blocked when at SOAT limit for month")
+		t.Error("expected blocked when at MRC limit for month")
 	}
 }
 
-func TestCheckSOATLimitForMonth_NonSAN01(t *testing.T) {
+func TestCheckMRCLimitForMonth_NonSAN02(t *testing.T) {
 	repo := &mockAppointmentRepo{
 		countMonthlyByGroupFn: func(ctx context.Context, cups []string, year, month int) (int, error) {
-			t.Fatal("CountMonthlyByGroup should not be called for non-SAN01")
+			t.Fatal("CountMonthlyByGroup should not be called for non-SAN02 entity")
 			return 999, nil
 		},
 	}
 	svc := NewAppointmentService(repo, nil)
 
-	blocked, err := svc.CheckSOATLimitForMonth(context.Background(), "861411", "EPS001", 2026, 3)
+	blocked, err := svc.CheckMRCLimitForMonth(context.Background(), "861411", "EPS001", 2026, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if blocked {
-		t.Error("expected not blocked for non-SAN01 entity")
+		t.Error("expected not blocked for non-SAN02 entity")
 	}
 }
 
-func TestIsSOATGroupCups(t *testing.T) {
-	groupName, maxPerMonth, found := IsSOATGroupCups("861411")
+func TestIsMRCGroupCups(t *testing.T) {
+	groupName, maxPerMonth, found := IsMRCGroupCups("861411")
 	if !found {
 		t.Error("expected 861411 to be in soat group")
 	}
@@ -325,7 +325,7 @@ func TestIsSOATGroupCups(t *testing.T) {
 		t.Errorf("expected max 20, got %d", maxPerMonth)
 	}
 
-	_, _, found2 := IsSOATGroupCups("890271")
+	_, _, found2 := IsMRCGroupCups("890271")
 	if found2 {
 		t.Error("890271 should not be in any soat group")
 	}

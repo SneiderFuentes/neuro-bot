@@ -36,7 +36,7 @@ func RegisterMedicalValidationHandlers(m *sm.Machine, gfrSvc *services.GFRServic
 	m.Register(sm.StateCheckExisting, checkExistingHandler(apptSvc))
 	m.Register(sm.StateAppointmentExists, appointmentExistsHandler())
 	m.Register(sm.StateCheckPriorConsult, checkPriorConsultHandler(apptSvc))
-	m.Register(sm.StateCheckSoatLimit, checkSoatLimitHandler(apptSvc))
+	m.Register(sm.StateCheckMRCLimit, checkMRCLimitHandler(apptSvc))
 	m.Register(sm.StateCheckAgeRestriction, checkAgeRestrictionHandler())
 }
 
@@ -494,7 +494,7 @@ func checkPriorConsultHandler(apptSvc *services.AppointmentService) sm.StateHand
 		blocked, message, err := apptSvc.CheckPriorConsultation(ctx, cupsCode, patientID)
 		if err != nil {
 			// No bloquear si falla la verificación
-			return sm.NewResult(sm.StateCheckSoatLimit), nil
+			return sm.NewResult(sm.StateCheckMRCLimit), nil
 		}
 
 		if blocked {
@@ -503,21 +503,22 @@ func checkPriorConsultHandler(apptSvc *services.AppointmentService) sm.StateHand
 				WithEvent("prior_consultation_required", map[string]interface{}{"cups_code": cupsCode}), nil
 		}
 
-		return sm.NewResult(sm.StateCheckSoatLimit), nil
+		return sm.NewResult(sm.StateCheckMRCLimit), nil
 	}
 }
 
-// CHECK_SOAT_LIMIT (automático) — marca flag para filtro mensual SOAT en búsqueda de slots.
+// CHECK_MRC_LIMIT (automático) — marca flag para filtro mensual MRC en búsqueda de slots.
 // Ya no bloquea aquí; el filtro se aplica en SEARCH_SLOTS via MonthFilter.
-func checkSoatLimitHandler(apptSvc *services.AppointmentService) sm.StateHandler {
+// Solo aplica para SAN02 (Sanitas con Modelo de Riesgo Compartido).
+func checkMRCLimitHandler(apptSvc *services.AppointmentService) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		cupsCode := sess.GetContext("cups_code")
 		entity := sess.GetContext("patient_entity")
 
-		if entity == "SAN01" {
-			if _, _, found := services.IsSOATGroupCups(cupsCode); found {
+		if entity == "SAN02" {
+			if _, _, found := services.IsMRCGroupCups(cupsCode); found {
 				return sm.NewResult(sm.StateCheckAgeRestriction).
-					WithContext("soat_limit_check", "1"), nil
+					WithContext("mrc_limit_check", "1"), nil
 			}
 		}
 
@@ -536,10 +537,17 @@ func checkAgeRestrictionHandler() sm.StateHandler {
 
 // --- Special CUPS Routing ---
 
-// Pregnancy ultrasound CUPS codes (ecografía obstétrica)
-var pregnancyUltrasoundCups = map[string]bool{
-	"881437": true, // Ecografía obstétrica con perfil biofísico
-	"881436": true, // Ecografía obstétrica detallada
+// Pregnancy ultrasound CUPS codes with their valid gestational week ranges.
+// Format: [minWeeksTenths, maxWeeksTenths] (weeks × 10, so 13.6 → 136)
+type gestationalRange struct {
+	label string // human-readable range for messages
+	min   int    // weeks × 10
+	max   int    // weeks × 10
+}
+
+var pregnancyUltrasoundCups = map[string]gestationalRange{
+	"881436": {label: "11 y 13 semanas + 6 días", min: 110, max: 136}, // Translucencia nucal
+	"881437": {label: "18 y 24 semanas", min: 180, max: 240},          // Detalle anatómico
 }
 
 // Sleep study CUPS codes (polisomnografía / estudios del sueño)
@@ -552,7 +560,8 @@ var sleepStudyCups = map[string]bool{
 
 // isPregnancyUltrasound checks if CUPS is a pregnancy ultrasound.
 func isPregnancyUltrasound(cupsCode string) bool {
-	return pregnancyUltrasoundCups[cupsCode]
+	_, ok := pregnancyUltrasoundCups[cupsCode]
+	return ok
 }
 
 // isSleepStudy checks if CUPS requires routing to an agent.
@@ -570,10 +579,9 @@ func checkSpecialCupsHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		cupsCode := sess.GetContext("cups_code")
 
-		// Pregnancy ultrasound → ask gestational weeks
-		if isPregnancyUltrasound(cupsCode) {
+		// Pregnancy ultrasound → confirm gestational week range
+		if _, ok := pregnancyUltrasoundCups[cupsCode]; ok {
 			return sm.NewResult(sm.StateAskGestationalWeeks).
-				WithText("Para la ecografía obstétrica, por favor indica las *semanas de gestación* (número).\n\nEjemplo: 20").
 				WithEvent("special_cups_pregnancy_ultrasound", map[string]interface{}{"cups_code": cupsCode}), nil
 		}
 
@@ -596,22 +604,50 @@ func checkSpecialCupsHandler() sm.StateHandler {
 	}
 }
 
-// ASK_GESTATIONAL_WEEKS (interactivo) — pide semanas de gestación para ecografía obstétrica.
+// ASK_GESTATIONAL_WEEKS (interactivo) — confirma si paciente está en el rango de semanas requerido.
+// Sigue el mismo patrón que askContrastedHandler: flag _prompted_weeks para separar primera llamada (mostrar botones) de segunda (validar).
 func askGestationalWeeksHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		input := strings.TrimSpace(msg.Text)
+		cupsCode := sess.GetContext("cups_code")
+		gr := pregnancyUltrasoundCups[cupsCode]
 
-		weeks, err := strconv.Atoi(input)
-		if err != nil || weeks < 1 || weeks > 42 {
-			retryResult := sm.ValidateWithRetry(sess, input, func(s string) bool {
-				w, e := strconv.Atoi(s)
-				return e == nil && w >= 1 && w <= 42
-			}, "Ingresa un número válido de semanas de gestación (1 a 42).")
-			return retryResult, nil
+		questionText := fmt.Sprintf("Para esta ecografía necesitas estar entre las *%s* de gestación.\n\n¿Estás actualmente en ese rango?", gr.label)
+		buttons := []sm.Button{
+			{Text: "Sí", Payload: "weeks_yes"},
+			{Text: "No", Payload: "weeks_no"},
 		}
 
-		return sm.NewResult(sm.StateAskContrasted).
-			WithContext("gestational_weeks", fmt.Sprintf("%d", weeks)).
-			WithEvent("gestational_weeks_entered", map[string]interface{}{"weeks": weeks}), nil
+		// Primera llamada (auto-chain desde CHECK_SPECIAL_CUPS): mostrar pregunta y detenerse
+		if sess.GetContext("_prompted_weeks") == "" {
+			return sm.NewResult(sess.CurrentState).
+				WithContext("_prompted_weeks", "1").
+				WithButtons(questionText, buttons...), nil
+		}
+
+		// Segunda llamada: validar respuesta del paciente
+		result, selected := sm.ValidateButtonResponse(sess, msg, "weeks_yes", "weeks_no")
+		if result != nil {
+			// Respuesta inválida: re-mostrar botones
+			result.Messages = append(result.Messages, &sm.ButtonMessage{
+				Text:    questionText,
+				Buttons: buttons,
+			})
+			return result, nil
+		}
+
+		switch selected {
+		case "weeks_yes":
+			return sm.NewResult(sm.StateAskContrasted).
+				WithClearCtx("_prompted_weeks").
+				WithEvent("gestational_weeks_confirmed", map[string]interface{}{"cups_code": cupsCode, "range": gr.label}), nil
+		default: // weeks_no
+			return sm.NewResult(sm.StatePostActionMenu).
+				WithClearCtx("_prompted_weeks").
+				WithText(fmt.Sprintf(
+					"Esta ecografía requiere estar entre las *%s* de gestación.\n\nCuando estés en ese rango, vuelve a contactarnos y con gusto te agendaremos.",
+					gr.label,
+				)).
+				WithEvent("gestational_weeks_out_of_range", map[string]interface{}{"cups_code": cupsCode, "range": gr.label}), nil
+		}
 	}
 }

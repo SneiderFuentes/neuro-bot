@@ -57,7 +57,8 @@ func advanceToNextProcedure(sess *session.Session) *sm.StateResult {
 			"selected_slot_id", "available_slots_json", "slots_after_date",
 			"preferred_doctor_doc", "ocr_is_sedated", "ocr_is_contrasted",
 			"_prompted_contrast", "_prompted_sedation", "_prompted_pregnancy",
-			"cups_preparation", "cups_video_url", "cups_audio_url")
+			"cups_preparation", "cups_video_url", "cups_audio_url",
+			"alternative_cups_codes", "created_appointment_id")
 
 	// Propagate OCR sedation/contrast detection for next group
 	for _, c := range nextGroup.Cups {
@@ -82,6 +83,7 @@ func RegisterSlotHandlers(
 	apptSvc *services.AppointmentService,
 	procRepo repository.ProcedureRepository,
 	soatRepo repository.SoatRepository,
+	entityRepo repository.EntityRepository,
 	waitingListRepo WaitingListCreator,
 	addrMapper *services.AddressMapper,
 ) {
@@ -112,7 +114,7 @@ func RegisterSlotHandlers(
 		Handler: confirmBookingHandler(),
 	})
 	m.Register(sm.StateReconfirmBooking, reconfirmBookingHandler(addrMapper))
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, soatRepo))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, soatRepo, entityRepo, procRepo))
 	m.Register(sm.StateBookingSuccess, bookingSuccessHandler(addrMapper))
 	m.Register(sm.StateBookingFailed, bookingFailedHandler())
 }
@@ -121,6 +123,7 @@ func RegisterSlotHandlers(
 func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		cupsCode := sess.GetContext("cups_code")
+		alternativeCodes := sess.GetContext("alternative_cups_codes")
 		age, _ := strconv.Atoi(sess.GetContext("patient_age"))
 		isContrasted := sess.GetContext("is_contrasted") == "1"
 		isSedated := sess.GetContext("is_sedated") == "1"
@@ -129,62 +132,94 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 			espacios = 1
 		}
 
-		// Look up procedure details (address, preparation, video, type)
-		var address string
-		var procedureType string
-		if procRepo != nil {
-			proc, _ := procRepo.FindByCode(ctx, cupsCode)
-			if proc != nil {
-				address = proc.Address
-				procedureType = proc.Type
-				if proc.Preparation != "" {
-					sess.SetContext("cups_preparation", proc.Preparation)
+		// Try to find slots with the primary CUPS code first, then alternatives
+		cupsCodesToTry := []string{cupsCode}
+		if alternativeCodes != "" {
+			cupsCodesToTry = append(cupsCodesToTry, strings.Split(alternativeCodes, ",")...)
+		}
+
+		var slots []services.AvailableSlot
+		var err error
+		var successfulCupsCode string
+
+		for _, code := range cupsCodesToTry {
+			// Look up procedure details (address, preparation, video, type)
+			var address string
+			var procedureType string
+			if procRepo != nil {
+				proc, _ := procRepo.FindByCode(ctx, code)
+				if proc != nil {
+					address = proc.Address
+					procedureType = proc.Type
+					if proc.Preparation != "" {
+						sess.SetContext("cups_preparation", proc.Preparation)
+					}
+					if proc.VideoURL != "" {
+						sess.SetContext("cups_video_url", proc.VideoURL)
+					}
+					if proc.AudioURL != "" {
+						sess.SetContext("cups_audio_url", proc.AudioURL)
+					}
 				}
-				if proc.VideoURL != "" {
-					sess.SetContext("cups_video_url", proc.VideoURL)
+			}
+
+			// Sedation override: force agenda type to "sedacion" (same as Laravel)
+			if isSedated {
+				procedureType = "sedacion"
+			}
+
+			// Bloqueo (053105): set preferred doctor to last doctor who attended this patient
+			if code == "053105" && apptSvc != nil && sess.GetContext("preferred_doctor_doc") == "" {
+				patientID := sess.GetContext("patient_id")
+				if patientID != "" {
+					lastDoc, err := apptSvc.FindLastDoctorForCups(ctx, patientID, []string{code})
+					if err != nil {
+						slog.Warn("bloqueo_last_doctor_lookup_error", "patient_id", patientID, "error", err)
+					} else if lastDoc != "" {
+						sess.SetContext("preferred_doctor_doc", lastDoc)
+						slog.Debug("bloqueo_preferred_doctor_set", "patient_id", patientID, "doctor_doc", lastDoc)
+					}
 				}
-				if proc.AudioURL != "" {
-					sess.SetContext("cups_audio_url", proc.AudioURL)
+			}
+
+			// Store procedure type in session for waiting list entries
+			if procedureType != "" {
+				sess.SetContext("procedure_type", procedureType)
+			}
+
+			query := services.SlotQuery{
+				CupsCode:        code,
+				PatientAge:      age,
+				IsContrasted:    isContrasted,
+				IsSedated:       isSedated,
+				Espacios:        espacios,
+				PreferredDoctor: sess.GetContext("preferred_doctor_doc"),
+				AfterDate:       sess.GetContext("slots_after_date"),
+				MaxSlots:        5,
+				ClinicAddress:   address,
+				ProcedureType:   procedureType,
+			}
+
+			// MRC monthly limit filter (SAN02 + mrcGroup CUPS)
+			if sess.GetContext("mrc_limit_check") == "1" && apptSvc != nil {
+				entity := sess.GetContext("patient_entity")
+				query.MonthFilter = func(year, month int) (bool, error) {
+					blocked, err := apptSvc.CheckMRCLimitForMonth(ctx, code, entity, year, month)
+					if err != nil {
+						return true, nil // fail-open
+					}
+					return !blocked, nil
 				}
+			}
+
+			slots, err = slotSvc.GetAvailableSlots(ctx, query)
+			if err == nil && len(slots) > 0 {
+				successfulCupsCode = code
+				slog.Debug("found_slots_with_alternative_code", "original", cupsCode, "used", code, "slots_found", len(slots))
+				break
 			}
 		}
 
-		// Sedation override: force agenda type to "sedacion" (same as Laravel)
-		if isSedated {
-			procedureType = "sedacion"
-		}
-
-		// Store procedure type in session for waiting list entries
-		if procedureType != "" {
-			sess.SetContext("procedure_type", procedureType)
-		}
-
-		query := services.SlotQuery{
-			CupsCode:        cupsCode,
-			PatientAge:      age,
-			IsContrasted:    isContrasted,
-			IsSedated:       isSedated,
-			Espacios:        espacios,
-			PreferredDoctor: sess.GetContext("preferred_doctor_doc"),
-			AfterDate:       sess.GetContext("slots_after_date"),
-			MaxSlots:        5,
-			ClinicAddress:   address,
-			ProcedureType:   procedureType,
-		}
-
-		// SOAT monthly limit filter (SAN01 + soatGroup CUPS)
-		if sess.GetContext("soat_limit_check") == "1" && apptSvc != nil {
-			entity := sess.GetContext("patient_entity")
-			query.MonthFilter = func(year, month int) (bool, error) {
-				blocked, err := apptSvc.CheckSOATLimitForMonth(ctx, cupsCode, entity, year, month)
-				if err != nil {
-					return true, nil // fail-open
-				}
-				return !blocked, nil
-			}
-		}
-
-		slots, err := slotSvc.GetAvailableSlots(ctx, query)
 		if err != nil {
 			r := sm.NewResult(sm.StatePostActionMenu).
 				WithText("Error al buscar horarios. Intenta más tarde.")
@@ -197,47 +232,71 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 				WithEvent("no_slots_found", map[string]interface{}{"cups_code": cupsCode}), nil
 		}
 
+		// Update cups_code in session to the one that actually found slots
+		if successfulCupsCode != "" && successfulCupsCode != cupsCode {
+			sess.SetContext("cups_code", successfulCupsCode)
+		}
+
 		slotsJSON, _ := json.Marshal(slots)
 		cupsName := sess.GetContext("cups_name")
+		
+		slog.Debug("search_slots_saving_json", "slots_count", len(slots), "json_length", len(slotsJSON))
 
-		// Build list for SHOW_SLOTS
-		rows := make([]sm.ListRow, 0, len(slots)+1)
-		for _, slot := range slots {
-			rows = append(rows, sm.ListRow{
-				ID:          slot.TimeSlot,
-				Title:       fmt.Sprintf("%s - %s", utils.FormatFriendlyDateShortStr(slot.Date), slot.TimeDisplay),
-				Description: fmt.Sprintf("Dr. %s", slot.DoctorName),
-			})
+		// Build numbered text list for SHOW_SLOTS
+		var msgText strings.Builder
+		msgText.WriteString(fmt.Sprintf("Horarios disponibles para *%s*:\n\n", cupsName))
+		
+		for i, slot := range slots {
+			optionNum := i + 1
+			dateStr := utils.FormatFriendlyDateShortStr(slot.Date)
+			doctorInfo := ""
+			if slot.DoctorName != "" {
+				doctorInfo = fmt.Sprintf(" con Dr. %s", slot.DoctorName)
+			}
+			msgText.WriteString(fmt.Sprintf("%d. %s a las %s%s\n", optionNum, dateStr, slot.TimeDisplay, doctorInfo))
 		}
-		rows = append(rows, sm.ListRow{
-			ID:          "more_slots",
-			Title:       "Ver más horarios",
-			Description: "Buscar horarios adicionales",
-		})
+		
+		msgText.WriteString(fmt.Sprintf("\n%d. Ver más horarios\n", len(slots)+1))
+		msgText.WriteString("\n💬 Escribe el número de tu opción:")
 
 		return sm.NewResult(sm.StateShowSlots).
 			WithContext("available_slots_json", string(slotsJSON)).
-			WithList(
-				fmt.Sprintf("Horarios disponibles para *%s*:\n\nSelecciona el que prefieras:", cupsName),
-				"Ver horarios",
-				sm.ListSection{Title: "Horarios", Rows: rows},
-			).
+			WithText(msgText.String()).
 			WithEvent("slots_found", map[string]interface{}{"count": len(slots)}), nil
 	}
 }
 
-// SHOW_SLOTS (interactivo) — usuario selecciona un slot de la lista.
+// SHOW_SLOTS (interactivo) — usuario selecciona un slot de la lista numerada.
 func showSlotsHandler(addrMapper *services.AddressMapper) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		payload := strings.TrimSpace(msg.Text)
-		if msg.PostbackPayload != "" {
-			payload = msg.PostbackPayload
+		input := strings.TrimSpace(msg.Text)
+		
+		// Parse number from input
+		optionNum, err := strconv.Atoi(input)
+		if err != nil || optionNum < 1 {
+			return sm.NewResult(sess.CurrentState).
+				WithText("Por favor escribe solo el número de tu opción (ejemplo: 1, 2, 3...)"), nil
 		}
 
-		// "Ver más" — pagination
-		if payload == "more_slots" {
-			var slots []services.AvailableSlot
-			json.Unmarshal([]byte(sess.GetContext("available_slots_json")), &slots)
+		// Load available slots
+		var slots []services.AvailableSlot
+		slotsJSON := sess.GetContext("available_slots_json")
+		slog.Debug("show_slots_input", "input", input, "option_num", optionNum, "slots_json_length", len(slotsJSON))
+		
+		if err := json.Unmarshal([]byte(slotsJSON), &slots); err != nil {
+			preview := slotsJSON
+			if len(preview) > 100 {
+				preview = preview[:100]
+			}
+			slog.Error("failed_to_unmarshal_slots", "error", err, "json_preview", preview)
+			return sm.NewResult(sess.CurrentState).
+				WithText("Hubo un error al cargar los horarios. Por favor intenta de nuevo."), nil
+		}
+		
+		slog.Debug("show_slots_parsed", "slots_count", len(slots), "option_num", optionNum)
+
+		// Check if user wants "Ver más"
+		if optionNum == len(slots)+1 {
 			if len(slots) > 0 {
 				lastSlot := slots[len(slots)-1]
 				return sm.NewResult(sm.StateSearchSlots).
@@ -249,47 +308,14 @@ func showSlotsHandler(addrMapper *services.AddressMapper) sm.StateHandler {
 				WithClearCtx("available_slots_json"), nil
 		}
 
-		// Validate selection against available slots
-		var slots []services.AvailableSlot
-		json.Unmarshal([]byte(sess.GetContext("available_slots_json")), &slots)
-
-		var selected *services.AvailableSlot
-		for _, s := range slots {
-			if s.TimeSlot == payload {
-				sel := s
-				selected = &sel
-				break
-			}
-		}
-
-		if selected == nil {
-			retryResult := sm.RetryOrEscalate(sess, "Selecciona un horario de la lista.")
-			if retryResult.NextState == sm.StateEscalateToAgent {
-				return retryResult, nil
-			}
-			// Invalid selection → re-show list
-			cupsName := sess.GetContext("cups_name")
-			rows := make([]sm.ListRow, 0, len(slots)+1)
-			for _, slot := range slots {
-				rows = append(rows, sm.ListRow{
-					ID:          slot.TimeSlot,
-					Title:       fmt.Sprintf("%s - %s", utils.FormatFriendlyDateShortStr(slot.Date), slot.TimeDisplay),
-					Description: fmt.Sprintf("Dr. %s", slot.DoctorName),
-				})
-			}
-			rows = append(rows, sm.ListRow{
-				ID:          "more_slots",
-				Title:       "Ver más horarios",
-				Description: "Buscar horarios adicionales",
-			})
-
+		// Validate selection
+		if optionNum > len(slots) {
 			return sm.NewResult(sess.CurrentState).
-				WithList(
-					fmt.Sprintf("Selecciona un horario para *%s*:", cupsName),
-					"Ver horarios",
-					sm.ListSection{Title: "Horarios", Rows: rows},
-				), nil
+				WithText(fmt.Sprintf("Opción inválida. Por favor escribe un número entre 1 y %d", len(slots)+1)), nil
 		}
+
+		// Get selected slot (convert 1-based to 0-based index)
+		selected := slots[optionNum-1]
 
 		// Valid selection → show confirmation
 		dateDisplay := selected.Date
@@ -317,12 +343,12 @@ func showSlotsHandler(addrMapper *services.AddressMapper) sm.StateHandler {
 		summary += "\n\n¿Confirmas esta cita?"
 
 		return sm.NewResult(sm.StateConfirmBooking).
-			WithContext("selected_slot_id", payload).
+			WithContext("selected_slot_id", selected.TimeSlot).
 			WithButtons(summary,
 				sm.Button{Text: "Confirmar cita", Payload: "booking_confirm"},
 				sm.Button{Text: "Elegir otro", Payload: "booking_change"},
 			).
-			WithEvent("slot_selected", map[string]interface{}{"time_slot": payload}), nil
+			WithEvent("slot_selected", map[string]interface{}{"time_slot": selected.TimeSlot}), nil
 	}
 }
 
@@ -639,6 +665,11 @@ func reconfirmBookingHandler(addrMapper *services.AddressMapper) sm.StateHandler
 
 		switch selected {
 		case "reconfirm_yes":
+			slog.Info("reconfirm_yes_received",
+				"session_id", sess.ID,
+				"phone", sess.PhoneNumber,
+				"selected_slot_id", sess.GetContext("selected_slot_id"),
+			)
 			return sm.NewResult(sm.StateCreateAppointment).
 				WithEvent("booking_confirmed", nil), nil
 
@@ -663,10 +694,25 @@ func reconfirmBookingHandler(addrMapper *services.AddressMapper) sm.StateHandler
 }
 
 // CREATE_APPOINTMENT (automático) — crea la cita en la BD externa.
-func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo repository.SoatRepository) sm.StateHandler {
+func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo repository.SoatRepository, entityRepo repository.EntityRepository, procRepo repository.ProcedureRepository) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		slog.Info("create_appointment_handler_started",
+			"session_id", sess.ID,
+			"phone", sess.PhoneNumber,
+			"selected_slot_id", sess.GetContext("selected_slot_id"),
+			"available_slots_len", len(sess.GetContext("available_slots_json")),
+		)
 		slot := findSelectedSlot(sess)
 		if slot == nil {
+			preview := sess.GetContext("available_slots_json")
+			if len(preview) > 200 {
+				preview = preview[:200] + "..."
+			}
+			slog.Warn("create_appointment_slot_not_found",
+				"session_id", sess.ID,
+				"selected_slot_id", sess.GetContext("selected_slot_id"),
+				"available_slots_json_preview", preview,
+			)
 			return sm.NewResult(sm.StateBookingFailed).
 				WithContext("booking_failure_reason", "slot_not_found"), nil
 		}
@@ -676,18 +722,147 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 		isSedated := sess.GetContext("is_sedated") == "1"
 		observations := buildObservations(isContrasted, isSedated)
 
-		cupsCode := sess.GetContext("cups_code")
 		entity := sess.GetContext("patient_entity")
-
-		// Get SOAT price (best effort, defaults to 0)
-		var unitValue float64
-		if soatRepo != nil {
-			price, _ := soatRepo.FindPrice(ctx, cupsCode, entity)
-			unitValue = price
+		
+		// Get current procedure group (already processed by grouper)
+		proceduresJSON := sess.GetContext("procedures_json")
+		var groups []services.CUPSGroup
+		if err := json.Unmarshal([]byte(proceduresJSON), &groups); err != nil {
+			slog.Error("create_appointment_invalid_procedures_json",
+				"session_id", sess.ID,
+				"error", err,
+				"procedures_json_preview", truncate(proceduresJSON, 150),
+			)
+			return sm.NewResult(sm.StateBookingFailed).
+				WithContext("booking_failure_reason", "error").
+				WithEvent("appointment_create_error", map[string]interface{}{"error": "invalid procedures_json"}), nil
 		}
+		
+		currentIdx, _ := strconv.Atoi(sess.GetContext("current_procedure_idx"))
+		if currentIdx >= len(groups) {
+			return sm.NewResult(sm.StateBookingFailed).
+				WithContext("booking_failure_reason", "error").
+				WithEvent("appointment_create_error", map[string]interface{}{"error": "invalid procedure index"}), nil
+		}
+		
+		currentGroup := groups[currentIdx]
+		
+		// Build map of original quantities from OCR (optional — absent in manual CUPS path)
+		originalQuantities := make(map[string]int)
+		if ocrJSON := sess.GetContext("ocr_cups_json"); ocrJSON != "" {
+			var originalCups []services.CUPSEntry
+			if err := json.Unmarshal([]byte(ocrJSON), &originalCups); err == nil {
+				for _, cup := range originalCups {
+					originalQuantities[cup.Code] = cup.Quantity
+				}
+				slog.Debug("OCR original CUPS before grouping", "original_cups", originalCups)
+			}
+		}
+		
+		// Build procedures list with ONLY CUPS from current group, but use original quantities
+		procedures := make([]domain.CreateProcedureInput, 0, len(currentGroup.Cups))
+		for _, cupEntry := range currentGroup.Cups {
+			// Get procedure data to obtain service_id
+			var serviceID int
+			if procRepo != nil {
+				procData, err := procRepo.FindByCode(ctx, cupEntry.Code)
+				if err != nil {
+					slog.Warn("FindByCode error for pxcita service_id",
+						"cup_code", cupEntry.Code,
+						"error", err,
+					)
+				}
+				if procData != nil {
+					serviceID = procData.ServiceID
+					slog.Debug("FindByCode result for pxcita",
+						"cup_code", cupEntry.Code,
+						"service_id", procData.ServiceID,
+						"service_name", procData.ServiceName,
+					)
+				} else {
+					slog.Warn("FindByCode returned nil for pxcita",
+						"cup_code", cupEntry.Code,
+					)
+				}
+			} else {
+				slog.Warn("procRepo is nil, cannot get service_id")
+			}
+			
+			// Get price from SOAT table based on entity's price type
+			var unitValue float64
+			if soatRepo != nil && entityRepo != nil {
+				entityData, entityErr := entityRepo.FindByCode(ctx, entity)
+				if entityErr != nil {
+					slog.Warn("entity_lookup_error_for_price",
+						"entity_code", entity,
+						"cup_code", cupEntry.Code,
+						"error", entityErr,
+					)
+				} else if entityData == nil {
+					slog.Warn("entity_not_found_for_price",
+						"entity_code", entity,
+						"cup_code", cupEntry.Code,
+					)
+				} else {
+					// Normalize price type: "1" -> "01"
+					priceType := entityData.PriceType
+					if len(priceType) == 1 {
+						priceType = "0" + priceType
+					}
+					price, priceErr := soatRepo.FindPrice(ctx, cupEntry.Code, priceType)
+					if priceErr != nil {
+						slog.Warn("soat_price_lookup_error",
+							"entity_code", entity,
+							"price_type", priceType,
+							"cup_code", cupEntry.Code,
+							"error", priceErr,
+						)
+					}
+					unitValue = price
+					slog.Debug("soat_price_resolved",
+						"entity_code", entity,
+						"price_type", priceType,
+						"cup_code", cupEntry.Code,
+						"unit_value", unitValue,
+					)
+				}
+			}
+	
+	// Use quantity from original OCR if available, otherwise from grouped data
+	quantity := cupEntry.Quantity
+	if origQty, found := originalQuantities[cupEntry.Code]; found && origQty > 0 {
+		quantity = origQty
+		slog.Debug("Using original OCR quantity",
+			"cup_code", cupEntry.Code,
+			"grouped_quantity", cupEntry.Quantity,
+			"original_quantity", origQty,
+		)
+	} else {
+		slog.Debug("Using grouped quantity (not found in OCR)",
+			"cup_code", cupEntry.Code,
+			"grouped_quantity", cupEntry.Quantity,
+		)
+	}
+	if quantity == 0 {
+		quantity = 1
+	}
+	
+	procedures = append(procedures, domain.CreateProcedureInput{
+		CupCode:   cupEntry.Code,
+		Quantity:  quantity,
+		UnitValue: unitValue,
+		ServiceID: serviceID,
+	})
+}
 
-		// Parse date
-		date, _ := time.Parse("2006-01-02", slot.Date)
+	// Parse date
+	date, _ := time.Parse("2006-01-02", slot.Date)
+
+	slog.Debug("Creating appointment with CUPS from current group only",
+		"procedures_count", len(procedures),
+		"current_group_service", currentGroup.ServiceType,
+		"current_group_cups", currentGroup.Cups,
+	)
 
 		input := domain.CreateAppointmentInput{
 			Date:         date,
@@ -698,18 +873,18 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 			AgendaID:     slot.AgendaID,
 			CreatedBy:    "0", // Bot-created
 			Observations: observations,
-			Procedures: []domain.CreateProcedureInput{
-				{
-					CupCode:   cupsCode,
-					Quantity:  1,
-					UnitValue: unitValue,
-				},
-			},
+			Procedures:   procedures,
 		}
 
 		espacios, _ := strconv.Atoi(sess.GetContext("espacios"))
 		apptID, err := apptSvc.CreateWithConsecutive(ctx, input, espacios, slot.Duration)
 		if err != nil {
+			slog.Error("create_appointment_create_failed",
+				"session_id", sess.ID,
+				"time_slot", slot.TimeSlot,
+				"agenda_id", slot.AgendaID,
+				"error", err,
+			)
 			if strings.Contains(err.Error(), "slot_taken") {
 				return sm.NewResult(sm.StateBookingFailed).
 					WithContext("booking_failure_reason", "slot_taken"), nil
@@ -718,6 +893,11 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 				WithContext("booking_failure_reason", "error").
 				WithEvent("appointment_create_error", map[string]interface{}{"error": err.Error()}), nil
 		}
+		slog.Info("create_appointment_success",
+			"session_id", sess.ID,
+			"appointment_id", apptID,
+			"time_slot", slot.TimeSlot,
+		)
 
 		// Cancel old appointment if this is a self-service reschedule
 		rescheduleApptID := sess.GetContext("reschedule_appt_id")
@@ -741,7 +921,7 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 			WithContext("created_appointment_id", apptID).
 			WithEvent("appointment_created", map[string]interface{}{
 				"appointment_id":  apptID,
-				"cups_code":       cupsCode,
+				"cups_codes":      len(procedures),
 				"date":            slot.Date,
 				"time":            slot.TimeDisplay,
 				"doctor":          slot.DoctorName,

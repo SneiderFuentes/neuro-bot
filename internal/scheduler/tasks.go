@@ -68,16 +68,21 @@ func (t *Tasks) RegisterAll(s *Scheduler) {
 		Fn: t.sendWhatsAppReminders,
 	})
 
-	// 08:00 — Waiting list check (Phase 13)
-	s.AddTask(ScheduledTask{
-		Name: "waiting_list_check",
-		Hour: 8, Minute: 0,
-		Weekdays: []time.Weekday{
-			time.Monday, time.Tuesday, time.Wednesday,
-			time.Thursday, time.Friday,
-		},
-		Fn: t.checkWaitingList,
-	})
+	// 08:00 y 14:00 — Waiting list check (mañana y tarde)
+	wlWeekdays := []time.Weekday{
+		time.Monday, time.Tuesday, time.Wednesday,
+		time.Thursday, time.Friday,
+	}
+	for _, hour := range []int{8, 14} {
+		h := hour
+		s.AddTask(ScheduledTask{
+			Name:     fmt.Sprintf("waiting_list_check_%02d", h),
+			Hour:     h,
+			Minute:   0,
+			Weekdays: wlWeekdays,
+			Fn:       t.checkWaitingList,
+		})
+	}
 
 	// 15:00 — IVR calls for non-responders
 	s.AddTask(ScheduledTask{
@@ -92,6 +97,11 @@ func (t *Tasks) RegisterAll(s *Scheduler) {
 }
 
 // === Task 07:00: WhatsApp Reminders ===
+
+// SendWhatsAppReminders is the public entry point for manual/test triggers.
+func (t *Tasks) SendWhatsAppReminders(ctx context.Context) error {
+	return t.sendWhatsAppReminders(ctx)
+}
 
 func (t *Tasks) sendWhatsAppReminders(ctx context.Context) error {
 	tomorrow := time.Now().AddDate(0, 0, 1).Format("2006-01-02")
@@ -159,6 +169,7 @@ func (t *Tasks) sendWhatsAppReminders(ctx context.Context) error {
 			slog.Error("send reminder failed", "phone", phone, "error", err)
 			continue
 		}
+		slog.Info("reminder template sent", "phone", phone, "bird_msg_id", msgID)
 
 		// Try to get conversationID for Bird Inbox visibility
 		convID := t.BirdClient.GetCachedConversationID(phone)
@@ -342,11 +353,11 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 			MaxSlots:      20, // Buscar más slots para saber cuántos pacientes notificar
 		}
 
-		// SOAT monthly limit filter for SAN01 WL entries
-		if t.AppointmentSvc != nil && firstEntry.PatientEntity == "SAN01" {
-			if _, _, found := services.IsSOATGroupCups(cupsCode); found {
+		// MRC monthly limit filter for SAN02 (Sanitas Modelo de Riesgo Compartido) WL entries
+		if t.AppointmentSvc != nil && firstEntry.PatientEntity == "SAN02" {
+			if _, _, found := services.IsMRCGroupCups(cupsCode); found {
 				query.MonthFilter = func(year, month int) (bool, error) {
-					blocked, err := t.AppointmentSvc.CheckSOATLimitForMonth(ctx, cupsCode, firstEntry.PatientEntity, year, month)
+					blocked, err := t.AppointmentSvc.CheckMRCLimitForMonth(ctx, cupsCode, firstEntry.PatientEntity, year, month)
 					if err != nil {
 						return true, nil // fail-open
 					}
@@ -398,6 +409,7 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 					{Type: "string", Key: "patient_name", Value: entry.PatientName},
 					{Type: "string", Key: "procedure_name", Value: entry.CupsName},
 					{Type: "string", Key: "cups_code", Value: entry.CupsCode},
+					{Type: "string", Key: "clinic_name", Value: t.Cfg.CenterName},
 				},
 			}
 

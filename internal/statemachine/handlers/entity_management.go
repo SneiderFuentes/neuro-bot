@@ -24,6 +24,7 @@ func RegisterEntityManagementHandlers(
 	m.Register(sm.StateAskClientType, askClientTypeHandler())
 	m.Register(sm.StateShowEntityList, showEntityListHandler(entityRepo))
 	m.Register(sm.StateAskEntityNumber, askEntityNumberHandler(entityRepo))
+	m.Register(sm.StateAskSanitasPlan, askSanitasPlanHandler())
 	// Legacy handlers kept for backwards compatibility
 	m.Register(sm.StateCheckEntity, checkEntityHandler(entityRepo))
 	m.Register(sm.StateConfirmEntity, confirmEntityHandler())
@@ -163,6 +164,18 @@ func askEntityNumberHandler(entityRepo repository.EntityRepository) sm.StateHand
 			}
 		}
 
+		// Sanitas submenu: distinguish between SAN01 (Premium) and SAN02 (MRC)
+		if entityCode == "SAN01" || entityCode == "SAN02" {
+			return sm.NewResult(sm.StateAskSanitasPlan).
+				WithContext("entity_number", fmt.Sprintf("%d", index)).
+				WithContext("menu_option", "agendar").
+				WithButtons("Selecciona tu plan de Sanitas:",
+					sm.Button{Text: "Sanitas Premium", Payload: "sanitas_premium"},
+					sm.Button{Text: "Sanitas", Payload: "sanitas_regular"},
+				).
+				WithEvent("sanitas_plan_prompted", nil), nil
+		}
+
 		r := sm.NewResult(sm.StateAskDocument).
 			WithContext("entity_number", fmt.Sprintf("%d", index)).
 			WithContext("menu_option", "agendar").
@@ -175,6 +188,40 @@ func askEntityNumberHandler(entityRepo repository.EntityRepository) sm.StateHand
 		}
 
 		return r, nil
+	}
+}
+
+// ASK_SANITAS_PLAN (interactivo) — submenú para distinguir Sanitas Premium (SAN01) de Sanitas MRC (SAN02).
+func askSanitasPlanHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		result, selected := sm.ValidateButtonResponse(sess, msg, "sanitas_premium", "sanitas_regular")
+		if result != nil {
+			result.Messages = append(result.Messages, &sm.ButtonMessage{
+				Text: "Selecciona tu plan de Sanitas:",
+				Buttons: []sm.Button{
+					{Text: "Sanitas Premium", Payload: "sanitas_premium"},
+					{Text: "Sanitas", Payload: "sanitas_regular"},
+				},
+			})
+			return result, nil
+		}
+
+		var entityCode, entityName string
+		switch selected {
+		case "sanitas_premium":
+			entityCode = "SAN01"
+			entityName = "Sanitas Premium"
+		case "sanitas_regular":
+			entityCode = "SAN02"
+			entityName = "Sanitas"
+		}
+
+		return sm.NewResult(sm.StateAskDocument).
+			WithContext("menu_option", "agendar").
+			WithContext("selected_entity_code", entityCode).
+			WithContext("selected_entity_name", entityName).
+			WithText("Por favor ingresa tu número de documento de identidad (sin puntos ni espacios):").
+			WithEvent("entity_number_selected", map[string]interface{}{"code": entityCode}), nil
 	}
 }
 

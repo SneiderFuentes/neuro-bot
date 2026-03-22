@@ -66,11 +66,11 @@ func (m *NotificationManager) CheckWaitingListForCups(ctx context.Context, cupsC
 		query.PreferredDoctor = entry.PreferredDoctorDoc
 	}
 
-	// SOAT monthly limit filter for SAN01 WL entries
-	if m.apptSvc != nil && entry.PatientEntity == "SAN01" {
-		if _, _, found := services.IsSOATGroupCups(cupsCode); found {
+	// MRC monthly limit filter for SAN02 (Sanitas Modelo de Riesgo Compartido) WL entries
+	if m.apptSvc != nil && entry.PatientEntity == "SAN02" {
+		if _, _, found := services.IsMRCGroupCups(cupsCode); found {
 			query.MonthFilter = func(year, month int) (bool, error) {
-				blocked, err := m.apptSvc.CheckSOATLimitForMonth(ctx, cupsCode, entry.PatientEntity, year, month)
+				blocked, err := m.apptSvc.CheckMRCLimitForMonth(ctx, cupsCode, entry.PatientEntity, year, month)
 				if err != nil {
 					return true, nil // fail-open
 				}
@@ -98,6 +98,7 @@ func (m *NotificationManager) CheckWaitingListForCups(ctx context.Context, cupsC
 			{Type: "string", Key: "patient_name", Value: entry.PatientName},
 			{Type: "string", Key: "procedure_name", Value: entry.CupsName},
 			{Type: "string", Key: "cups_code", Value: entry.CupsCode},
+			{Type: "string", Key: "clinic_name", Value: m.cfg.CenterName},
 		},
 	}
 

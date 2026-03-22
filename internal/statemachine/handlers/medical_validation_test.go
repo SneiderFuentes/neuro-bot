@@ -803,20 +803,20 @@ func TestCheckPriorConsult_NotBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateCheckSoatLimit {
+	if result.NextState != sm.StateCheckMRCLimit {
 		t.Errorf("expected CHECK_SOAT_LIMIT, got %s", result.NextState)
 	}
 }
 
 // ==================== CheckSoatLimit ====================
 
-func TestCheckSoatLimit_NotBlocked(t *testing.T) {
+func TestCheckMRCLimit_NotBlocked(t *testing.T) {
 	apptSvc := services.NewAppointmentService(&mockApptRepo{}, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCheckSoatLimit, checkSoatLimitHandler(apptSvc))
+	m.Register(sm.StateCheckMRCLimit, checkMRCLimitHandler(apptSvc))
 
-	sess := testSess(sm.StateCheckSoatLimit)
+	sess := testSess(sm.StateCheckMRCLimit)
 	sess.Context["cups_code"] = "890271"
 	sess.Context["patient_entity"] = "OTRA" // Not SAN01/SAN02 → not blocked
 
@@ -829,15 +829,15 @@ func TestCheckSoatLimit_NotBlocked(t *testing.T) {
 	}
 }
 
-func TestCheckSoatLimit_SAN01_SetsFlag(t *testing.T) {
+func TestCheckMRCLimit_SAN02_SetsFlag(t *testing.T) {
 	apptSvc := services.NewAppointmentService(&mockApptRepo{}, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCheckSoatLimit, checkSoatLimitHandler(apptSvc))
+	m.Register(sm.StateCheckMRCLimit, checkMRCLimitHandler(apptSvc))
 
-	sess := testSess(sm.StateCheckSoatLimit)
-	sess.Context["cups_code"] = "861411" // aplicacion_sustancia → in soatGroup
-	sess.Context["patient_entity"] = "SAN01"
+	sess := testSess(sm.StateCheckMRCLimit)
+	sess.Context["cups_code"] = "861411" // aplicacion_sustancia → in mrcGroup
+	sess.Context["patient_entity"] = "SAN02" // Sanitas MRC
 
 	result, err := m.Process(context.Background(), sess, textM(""))
 	if err != nil {
@@ -846,9 +846,9 @@ func TestCheckSoatLimit_SAN01_SetsFlag(t *testing.T) {
 	if result.NextState != sm.StateCheckAgeRestriction {
 		t.Errorf("expected CHECK_AGE_RESTRICTION, got %s", result.NextState)
 	}
-	// Should set flag, not block
-	if result.UpdateCtx == nil || result.UpdateCtx["soat_limit_check"] != "1" {
-		t.Error("expected soat_limit_check=1 in UpdateCtx for SAN01 + soatGroup CUPS")
+	// Should set MRC flag
+	if result.UpdateCtx == nil || result.UpdateCtx["mrc_limit_check"] != "1" {
+		t.Error("expected mrc_limit_check=1 in UpdateCtx for SAN02 + mrcGroup CUPS")
 	}
 }
 

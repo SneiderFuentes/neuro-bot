@@ -25,8 +25,9 @@ const (
 	StateChangeEntity    = "CHANGE_ENTITY"
 	StateAskClientType   = "ASK_CLIENT_TYPE"
 	StateShowEntityList  = "SHOW_ENTITY_LIST"
-	StateAskEntityNumber = "ASK_ENTITY_NUMBER"
-	StateOutOfHoursMenu  = "OUT_OF_HOURS_MENU"
+	StateAskEntityNumber  = "ASK_ENTITY_NUMBER"
+	StateAskSanitasPlan   = "ASK_SANITAS_PLAN"
+	StateOutOfHoursMenu   = "OUT_OF_HOURS_MENU"
 )
 
 // === Registro de Paciente Nuevo ===
@@ -75,6 +76,12 @@ const (
 	StateAppointmentCancelled = "APPOINTMENT_CANCELLED"
 )
 
+// === Confirmaciones desde notificaciones proactivas ===
+const (
+	StateConfirmRescheduleNotif = "CONFIRM_RESCHEDULE_NOTIF"
+	StateConfirmCancelNotif     = "CONFIRM_CANCEL_NOTIF"
+)
+
 // === Orden Médica y OCR ===
 const (
 	StateAskMedicalOrder    = "ASK_MEDICAL_ORDER"
@@ -105,7 +112,7 @@ const (
 	StateGfrNotEligible        = "GFR_NOT_ELIGIBLE"
 	StateAskSedation           = "ASK_SEDATION"
 	StateCheckPriorConsult     = "CHECK_PRIOR_CONSULTATION"
-	StateCheckSoatLimit        = "CHECK_SOAT_LIMIT"
+	StateCheckMRCLimit         = "CHECK_MRC_LIMIT"
 	StateCheckAgeRestriction   = "CHECK_AGE_RESTRICTION"
 )
 
@@ -166,6 +173,7 @@ var stateTypes = map[string]StateType{
 	StateAskClientType:   StateTypeInteractive,
 	StateShowEntityList:  StateTypeAutomatic,
 	StateAskEntityNumber: StateTypeInteractive,
+	StateAskSanitasPlan:  StateTypeInteractive,
 	StateOutOfHoursMenu:  StateTypeInteractive,
 
 	// Registro
@@ -202,11 +210,13 @@ var stateTypes = map[string]StateType{
 	StateNoAppointments:    StateTypeInteractive,
 
 	// Confirmación / Cancelación
-	StateConfirmAppointment:   StateTypeInteractive,
-	StateAppointmentConfirmed: StateTypeAutomatic,
-	StateCancelAppointment:    StateTypeInteractive,
-	StateCancelReason:         StateTypeInteractive,
-	StateAppointmentCancelled: StateTypeAutomatic,
+	StateConfirmAppointment:     StateTypeInteractive,
+	StateAppointmentConfirmed:   StateTypeAutomatic,
+	StateCancelAppointment:      StateTypeInteractive,
+	StateCancelReason:           StateTypeInteractive,
+	StateAppointmentCancelled:   StateTypeAutomatic,
+	StateConfirmRescheduleNotif: StateTypeInteractive,
+	StateConfirmCancelNotif:     StateTypeInteractive,
 
 	// Orden Médica y OCR
 	StateAskMedicalOrder:    StateTypeAutomatic,
@@ -220,7 +230,7 @@ var stateTypes = map[string]StateType{
 
 	// Validaciones Médicas
 	StateCheckSpecialCups:    StateTypeAutomatic,
-	StateAskGestationalWeeks: StateTypeInteractive,
+	StateAskGestationalWeeks: StateTypeAutomatic, // Auto-shows prompt first time; stops chain by returning self
 	StateCheckExisting:       StateTypeAutomatic,
 	StateAppointmentExists:   StateTypeAutomatic,
 	StateAskContrasted:       StateTypeAutomatic, // Auto-skips if not contrastable; prompts if contrastable
@@ -235,7 +245,7 @@ var stateTypes = map[string]StateType{
 	StateGfrNotEligible:      StateTypeAutomatic,
 	StateAskSedation:         StateTypeAutomatic, // Auto-skips if not sedatable; prompts if sedatable
 	StateCheckPriorConsult:   StateTypeAutomatic,
-	StateCheckSoatLimit:      StateTypeAutomatic,
+	StateCheckMRCLimit:       StateTypeAutomatic,
 	StateCheckAgeRestriction: StateTypeAutomatic,
 
 	// Búsqueda y Agendamiento

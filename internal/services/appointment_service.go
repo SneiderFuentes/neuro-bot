@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"time"
@@ -153,9 +154,9 @@ var cupsRequiresPreviousDoctor = map[string][]string{
 	"861402": {"890264", "890364"}, // Requiere cita previa de tipo 890264 o 890364
 }
 
-// SOAT group limits (máximo mensual por grupo, solo para SAN01/SAN02)
+// MRC group limits (máximo mensual por grupo — Modelo de Riesgo Compartido, aplica solo a SAN02)
 // Per R-PROC-09 in 02-BUSINESS-RULES.md
-var soatGroups = map[string]struct {
+var mrcGroups = map[string]struct {
 	MaxPerMonth int
 	CupsCodes   []string
 }{
@@ -167,9 +168,9 @@ var soatGroups = map[string]struct {
 	"otros_procedimientos":      {MaxPerMonth: 932, CupsCodes: []string{"891515", "891514", "930820", "891511", "891509", "930860", "891530", "952303", "954626", "952302", "930103", "930821", "954624", "954625", "952301", "930801", "891503", "891508"}},
 }
 
-// IsSOATGroupCups returns the group name, max per month, and whether the CUPS code belongs to a SOAT group.
-func IsSOATGroupCups(cupsCode string) (groupName string, maxPerMonth int, found bool) {
-	for name, group := range soatGroups {
+// IsMRCGroupCups returns the group name, max per month, and whether the CUPS code belongs to an MRC group.
+func IsMRCGroupCups(cupsCode string) (groupName string, maxPerMonth int, found bool) {
+	for name, group := range mrcGroups {
 		for _, code := range group.CupsCodes {
 			if code == cupsCode {
 				return name, group.MaxPerMonth, true
@@ -209,50 +210,50 @@ func (s *AppointmentService) CheckPriorConsultation(ctx context.Context, cupsCod
 	return true, "Este procedimiento requiere una *consulta previa* con el especialista. Por favor agenda primero la consulta y luego el examen.", nil
 }
 
-// CheckSOATLimit verifica si el grupo CUPS ha alcanzado el límite mensual (mes actual).
-// Solo aplica para entidad SAN01. Deshabilitado con CUPS_GROUP_LIMITS_ENABLED=false.
-func (s *AppointmentService) CheckSOATLimit(ctx context.Context, cupsCode, entity string) (bool, string, error) {
+// CheckMRCLimit verifica si el grupo CUPS ha alcanzado el límite mensual (mes actual).
+// Solo aplica para entidad SAN02 (Modelo de Riesgo Compartido). Deshabilitado con CUPS_GROUP_LIMITS_ENABLED=false.
+func (s *AppointmentService) CheckMRCLimit(ctx context.Context, cupsCode, entity string) (bool, string, error) {
 	if s.cfg != nil && !s.cfg.CupsGroupLimitsEnabled {
 		return false, "", nil
 	}
-	if entity != "SAN01" {
+	if entity != "SAN02" {
 		return false, "", nil
 	}
 
-	groupName, maxPerMonth, found := IsSOATGroupCups(cupsCode)
+	groupName, maxPerMonth, found := IsMRCGroupCups(cupsCode)
 	if !found {
 		return false, "", nil
 	}
 
 	now := time.Now()
-	count, err := s.repo.CountMonthlyByGroup(ctx, soatGroups[groupName].CupsCodes, now.Year(), int(now.Month()))
+	count, err := s.repo.CountMonthlyByGroup(ctx, mrcGroups[groupName].CupsCodes, now.Year(), int(now.Month()))
 	if err != nil {
 		return false, "", err
 	}
 
 	if count >= maxPerMonth {
-		return true, fmt.Sprintf("Se ha alcanzado el límite mensual de %d citas para %s (SOAT). Por favor contacta a la clínica.", maxPerMonth, groupName), nil
+		return true, fmt.Sprintf("Se ha alcanzado el límite mensual de %d citas para %s (MRC). Por favor contacta a la clínica.", maxPerMonth, groupName), nil
 	}
 
 	return false, "", nil
 }
 
-// CheckSOATLimitForMonth verifica si el grupo CUPS ha alcanzado el límite para un mes específico.
-// Retorna true si está bloqueado (al límite).
-func (s *AppointmentService) CheckSOATLimitForMonth(ctx context.Context, cupsCode, entity string, year, month int) (bool, error) {
+// CheckMRCLimitForMonth verifica si el grupo CUPS ha alcanzado el límite MRC para un mes específico.
+// Retorna true si está bloqueado (al límite). Solo aplica para SAN02.
+func (s *AppointmentService) CheckMRCLimitForMonth(ctx context.Context, cupsCode, entity string, year, month int) (bool, error) {
 	if s.cfg != nil && !s.cfg.CupsGroupLimitsEnabled {
 		return false, nil
 	}
-	if entity != "SAN01" {
+	if entity != "SAN02" {
 		return false, nil
 	}
 
-	groupName, maxPerMonth, found := IsSOATGroupCups(cupsCode)
+	groupName, maxPerMonth, found := IsMRCGroupCups(cupsCode)
 	if !found {
 		return false, nil
 	}
 
-	count, err := s.repo.CountMonthlyByGroup(ctx, soatGroups[groupName].CupsCodes, year, month)
+	count, err := s.repo.CountMonthlyByGroup(ctx, mrcGroups[groupName].CupsCodes, year, month)
 	if err != nil {
 		return false, err
 	}
@@ -278,11 +279,18 @@ func GetDoctorAgeRestriction(doctorDoc string) (minAge int, reason string, exist
 // For consecutive blocks, pxcita is only inserted on the first appointment.
 // Duration is the slot length in minutes (from ScheduleConfig.AppointmentDuration).
 func (s *AppointmentService) CreateWithConsecutive(ctx context.Context, input domain.CreateAppointmentInput, espacios, durationMinutes int) (string, error) {
+	// Single appointment case
 	if espacios <= 1 || durationMinutes <= 0 {
 		appt, err := s.repo.Create(ctx, input)
 		if err != nil {
 			return "", err
 		}
+		
+		// Create pxcita records for each procedure
+		if err := s.createPxCitaRecords(ctx, appt.ID, input.Procedures); err != nil {
+			return "", fmt.Errorf("create pxcita: %w", err)
+		}
+		
 		return appt.ID, nil
 	}
 
@@ -312,13 +320,63 @@ func (s *AppointmentService) CreateWithConsecutive(ctx context.Context, input do
 
 		if i == 0 {
 			firstID = appt.ID
+			// Create pxcita records only for the FIRST appointment
+			if err := s.createPxCitaRecords(ctx, appt.ID, input.Procedures); err != nil {
+				return "", fmt.Errorf("create pxcita: %w", err)
+			}
 		}
 	}
 
 	return firstID, nil
 }
 
+// createPxCitaRecords creates a pxcita record for each procedure in the appointment
+func (s *AppointmentService) createPxCitaRecords(ctx context.Context, appointmentID string, procedures []domain.CreateProcedureInput) error {
+	slog.Debug("createPxCitaRecords called",
+		"appointment_id", appointmentID,
+		"procedures_count", len(procedures),
+	)
+	
+	apptIDInt, err := strconv.Atoi(appointmentID)
+	if err != nil {
+		return fmt.Errorf("invalid appointment ID: %w", err)
+	}
+
+	for i, proc := range procedures {
+		slog.Debug("createPxCitaRecords iteration",
+			"appointment_id", appointmentID,
+			"iteration", i,
+			"cup_code", proc.CupCode,
+			"quantity", proc.Quantity,
+		)
+		
+		pxcitaInput := domain.CreatePxCitaInput{
+			AppointmentID: apptIDInt,
+			CupCode:       proc.CupCode,
+			Quantity:      proc.Quantity,
+			UnitValue:     proc.UnitValue,
+			ServiceID:     proc.ServiceID,
+		}
+
+		if err := s.repo.CreatePxCita(ctx, pxcitaInput); err != nil {
+			return fmt.Errorf("create pxcita for %s: %w", proc.CupCode, err)
+		}
+	}
+
+	slog.Debug("createPxCitaRecords completed",
+		"appointment_id", appointmentID,
+		"total_inserted", len(procedures),
+	)
+	
+	return nil
+}
+
 // FindBlockByAppointmentID fetches the full consecutive block for an appointment.
+// FindLastDoctorForCups returns the document of the last doctor who attended the patient for any of the given CUPS codes.
+func (s *AppointmentService) FindLastDoctorForCups(ctx context.Context, patientID string, cups []string) (string, error) {
+	return s.repo.FindLastDoctorForCups(ctx, patientID, cups)
+}
+
 func (s *AppointmentService) FindBlockByAppointmentID(ctx context.Context, apptID string) (*domain.Appointment, []domain.Appointment, error) {
 	appt, err := s.repo.FindByID(ctx, apptID)
 	if err != nil || appt == nil {

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -62,7 +63,12 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 	if err != nil {
 		return nil, fmt.Errorf("find doctors: %w", err)
 	}
+	for i, d := range doctors {
+		slog.Debug("doctor_found", "index", i, "document", d.Document, "full_name", d.FullName, "cup_id", d.CupID)
+	}
+	slog.Debug("slot_search_doctors_found", "cups_code", query.CupsCode, "doctor_count", len(doctors), "espacios", query.Espacios)
 	if len(doctors) == 0 {
+		slog.Warn("no_doctors_for_cups", "cups_code", query.CupsCode)
 		return nil, nil
 	}
 
@@ -91,6 +97,7 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 	}
 
 	if len(filteredDoctors) == 0 {
+		slog.Warn("no_doctors_after_age_filter", "cups_code", query.CupsCode, "patient_age", query.PatientAge, "original_count", len(doctors))
 		return nil, nil
 	}
 
@@ -107,7 +114,9 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 	if err != nil {
 		return nil, fmt.Errorf("find working days: %w", err)
 	}
+	slog.Debug("slot_search_working_days_found", "cups_code", query.CupsCode, "doctor_count", len(docDocs), "working_days_count", len(workingDays))
 	if len(workingDays) == 0 {
+		slog.Warn("no_working_days_found", "cups_code", query.CupsCode, "doctor_documents", docDocs)
 		return nil, nil
 	}
 
@@ -118,17 +127,20 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 	monthCache := make(map[string]bool) // "YYYY-MM" → allowed
 
 	for _, day := range workingDays {
+		slog.Debug("slot_day_processing", "agenda_id", day.AgendaID, "date", day.Date, "doctor", day.DoctorDocument, "morning", day.MorningEnabled, "afternoon", day.AfternoonEnabled)
+
 		// Skip if before pagination cursor
 		if query.AfterDate != "" && day.Date <= query.AfterDate {
 			continue
 		}
 
-		// SOAT monthly limit filter
+		// MRC monthly limit filter
 		if query.MonthFilter != nil {
 			dt, _ := time.Parse("2006-01-02", day.Date)
 			key := fmt.Sprintf("%d-%02d", dt.Year(), int(dt.Month()))
 			if allowed, ok := monthCache[key]; ok {
 				if !allowed {
+					slog.Debug("slot_skip_mrc_month_cached", "agenda_id", day.AgendaID, "date", day.Date, "month_key", key)
 					continue
 				}
 			} else {
@@ -137,6 +149,7 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 					ok2 = true // fail-open
 				}
 				monthCache[key] = ok2
+				slog.Debug("slot_mrc_month_check", "date", day.Date, "month_key", key, "allowed", ok2, "err", err2)
 				if !ok2 {
 					continue
 				}
@@ -155,12 +168,14 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 		if query.ProcedureType != "" {
 			if allowed, ok := agendaCache[day.AgendaID]; ok {
 				if !allowed {
+					slog.Debug("slot_skip_agenda_type_cached", "agenda_id", day.AgendaID, "procedure_type", query.ProcedureType)
 					continue
 				}
 			} else {
-				schedule, _ := s.scheduleRepo.FindByScheduleID(ctx, day.AgendaID, query.ProcedureType)
+				schedule, err2 := s.scheduleRepo.FindByScheduleID(ctx, day.AgendaID, query.ProcedureType)
 				match := schedule != nil
 				agendaCache[day.AgendaID] = match
+				slog.Debug("slot_agenda_type_check", "agenda_id", day.AgendaID, "procedure_type", query.ProcedureType, "match", match, "err", err2)
 				if !match {
 					continue
 				}
@@ -173,6 +188,7 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 		if !ok {
 			cfg, err = s.scheduleRepo.FindScheduleConfig(ctx, day.AgendaID, day.DoctorDocument)
 			if err != nil || cfg == nil {
+				slog.Debug("slot_skip_no_config", "agenda_id", day.AgendaID, "doctor", day.DoctorDocument, "date", day.Date)
 				continue
 			}
 			configCache[cacheKey] = cfg
@@ -181,14 +197,22 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 		// Get booked slots for this day+agenda
 		bookedSlots, err := s.scheduleRepo.FindBookedSlots(ctx, day.AgendaID, day.Date)
 		if err != nil {
+			slog.Warn("find_booked_slots_error", "agenda_id", day.AgendaID, "date", day.Date, "error", err)
 			continue
 		}
+		slog.Debug("booked_slots_fetched",
+			"agenda_id", day.AgendaID,
+			"date", day.Date,
+			"booked_count", len(bookedSlots),
+			"booked_slots", bookedSlots,
+		)
 		bookedSet := make(map[string]bool)
 		for _, ts := range bookedSlots {
 			bookedSet[ts] = true
 		}
 
 		doctor := docMap[day.DoctorDocument]
+		slog.Debug("slot_pre_calc", "date", day.Date, "agenda_id", day.AgendaID, "cfg_duration", cfg.AppointmentDuration, "morning_start_mon", cfg.MorningStart[1], "morning_end_mon", cfg.MorningEnd[1], "workday_mon", cfg.WorkDays[1], "workday_0", cfg.WorkDays[0], "workday_1", cfg.WorkDays[1], "workday_2", cfg.WorkDays[2], "workday_3", cfg.WorkDays[3], "workday_4", cfg.WorkDays[4], "workday_5", cfg.WorkDays[5], "workday_6", cfg.WorkDays[6])
 		daySlots := calculateDaySlots(cfg, day, query, doctor, bookedSet)
 		allSlots = append(allSlots, daySlots...)
 
@@ -201,6 +225,7 @@ func (s *SlotService) GetAvailableSlots(ctx context.Context, query SlotQuery) ([
 		allSlots = allSlots[:query.MaxSlots]
 	}
 
+	slog.Debug("slot_search_complete", "cups_code", query.CupsCode, "slots_found", len(allSlots), "espacios_required", query.Espacios)
 	return allSlots, nil
 }
 
@@ -209,7 +234,16 @@ func calculateDaySlots(cfg *domain.ScheduleConfig, day domain.WorkingDay, query 
 	dt, _ := time.Parse("2006-01-02", day.Date)
 	weekday := int(dt.Weekday()) // 0=Sunday
 
+	// For today: only show slots at least 3 hours from now
+	now := time.Now()
+	minMinutes := -1
+	if day.Date == now.Format("2006-01-02") {
+		minMinutes = now.Hour()*60 + now.Minute() + 3*60
+	}
+
+	slog.Debug("calc_day_slots_entry", "date", day.Date, "weekday", weekday, "workday_enabled", cfg.WorkDays[weekday], "morning_enabled", day.MorningEnabled, "afternoon_enabled", day.AfternoonEnabled, "duration", cfg.AppointmentDuration)
 	if !cfg.WorkDays[weekday] {
+		slog.Debug("calc_day_slots_skip_workday", "date", day.Date, "weekday", weekday)
 		return nil
 	}
 
@@ -264,6 +298,11 @@ func calculateDaySlots(cfg *domain.ScheduleConfig, day domain.WorkingDay, query 
 	var slots []AvailableSlot
 	for _, r := range ranges {
 		for minutes := r.start; minutes+duration <= r.end; minutes += duration {
+			// Skip past slots for today (minimum 3 hours from now)
+			if minMinutes >= 0 && minutes < minMinutes {
+				continue
+			}
+
 			timeSlot := fmt.Sprintf("%s%02d%02d", dateStr, minutes/60, minutes%60)
 
 			if booked[timeSlot] {
