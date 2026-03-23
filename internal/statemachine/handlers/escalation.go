@@ -239,9 +239,10 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 
 	case sm.StateConfirmIdentity:
 		situation = fmt.Sprintf("El paciente no pudo confirmar su identidad.\nPaciente: %s | Doc: %s", patientName, patientDoc)
-		actions = "- Verificale los datos y luego:\n" +
-			"  /bot resume CONFIRM_IDENTITY — Mostrar confirmacion de nuevo\n" +
-			"  /bot resume ASK_DOCUMENT — Reingresar documento"
+		actions = "- Verificale los datos con el paciente y responde por el:\n" +
+			"  /bot resume CONFIRM_IDENTITY identity_yes — Confirmar identidad\n" +
+			"  /bot resume CONFIRM_IDENTITY identity_no — Rechazar identidad\n" +
+			"  /bot resume CONFIRM_IDENTITY — Mostrar confirmacion de nuevo"
 
 	// --- Entity Management ---
 	case sm.StateAskClientType:
@@ -261,7 +262,9 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 		category := sess.GetContext("entity_category")
 		situation = fmt.Sprintf("El paciente no pudo seleccionar su entidad de la lista.\nTipo: %s | Categoria: %s\nPaciente: %s | Doc: %s",
 			clientType, category, patientName, patientDoc)
-		actions = "- Preguntale su entidad:\n" +
+		actions = "- Preguntale su entidad y selecciona por el (usa el numero de la lista):\n" +
+			"  /bot resume ASK_ENTITY_NUMBER 1 — Seleccionar entidad #1 de la lista\n" +
+			"  /bot resume ASK_ENTITY_NUMBER 5 — Seleccionar entidad #5 de la lista\n" +
 			"  /bot resume ASK_ENTITY_NUMBER — Mostrar lista de nuevo\n" +
 			"  /bot resume ASK_CLIENT_TYPE — Cambiar tipo de entidad"
 
@@ -269,16 +272,18 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 		patientEntity := sess.GetContext("patient_entity")
 		situation = fmt.Sprintf("El paciente no pudo confirmar su entidad.\nEntidad actual: %s\nPaciente: %s | Doc: %s",
 			patientEntity, patientName, patientDoc)
-		actions = "- Verificale la entidad y luego:\n" +
-			"  /bot resume CONFIRM_ENTITY — Preguntar confirmacion de nuevo\n" +
-			"  /bot resume CHANGE_ENTITY — Cambiar entidad"
+		actions = "- Verificale la entidad con el paciente y responde por el:\n" +
+			"  /bot resume CONFIRM_ENTITY entity_ok — Confirmar entidad\n" +
+			"  /bot resume CONFIRM_ENTITY entity_change — Cambiar entidad\n" +
+			"  /bot resume CONFIRM_ENTITY — Mostrar confirmacion de nuevo"
 
 	case sm.StateChangeEntity:
 		patientEntity := sess.GetContext("patient_entity")
 		situation = fmt.Sprintf("El paciente no encontro su entidad al buscarla.\nEntidad actual: %s\nPaciente: %s | Doc: %s",
 			patientEntity, patientName, patientDoc)
-		actions = "- Preguntale el nombre de su entidad:\n" +
-			"  /bot resume CHANGE_ENTITY — Reintentar busqueda\n" +
+		actions = "- Preguntale el nombre de su entidad y busca por el:\n" +
+			"  /bot resume CHANGE_ENTITY nombre de la entidad — Buscar entidad\n" +
+			"  Ej: /bot resume CHANGE_ENTITY SANITAS\n" +
 			"  /bot resume ASK_CLIENT_TYPE — Cambiar tipo de entidad"
 
 	case sm.StateShowEntityList:
@@ -293,9 +298,10 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 	// --- Registro de paciente ---
 	case sm.StateRegistrationStart:
 		situation = fmt.Sprintf("El paciente no decidio si registrarse como nuevo.\nDoc: %s", patientDoc)
-		actions = "- Preguntale si quiere registrarse:\n" +
+		actions = "- Preguntale si quiere registrarse y responde por el:\n" +
+			"  /bot resume REGISTRATION_START register_yes — Iniciar registro\n" +
+			"  /bot resume REGISTRATION_START register_no — No registrarse\n" +
 			"  /bot resume REGISTRATION_START — Preguntar de nuevo\n" +
-			"  /bot resume ASK_DOCUMENT — Reintentar con otro documento\n" +
 			"  /bot cerrar"
 
 	case sm.StateConfirmRegistration:
