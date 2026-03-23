@@ -479,11 +479,20 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume SEARCH_SLOTS — Buscar otros horarios"
 
 	// --- Citas Existentes ---
+	case sm.StateNoAppointments:
+		situation = fmt.Sprintf("El paciente no tiene citas pendientes o confirmadas.\nPaciente: %s | Doc: %s", patientName, patientDoc)
+		actions = "- Atiende al paciente y responde por el:\n" +
+			"  /bot resume NO_APPOINTMENTS no_appt_menu — Volver al menu principal\n" +
+			"  /bot resume NO_APPOINTMENTS no_appt_end — Terminar chat\n" +
+			"  /bot resume NO_APPOINTMENTS — Mostrar opciones de nuevo"
+
 	case sm.StateListAppointments:
 		situation = fmt.Sprintf("El paciente no logro seleccionar una cita de la lista.\nPaciente: %s | Doc: %s", patientName, patientDoc)
-		actions = "- Preguntale cual cita necesita gestionar:\n" +
-			"  /bot resume LIST_APPOINTMENTS — Mostrar citas de nuevo\n" +
-			"  /bot resume FETCH_APPOINTMENTS — Buscar citas de nuevo"
+		actions = "- Muestra la lista de nuevo para que el paciente seleccione:\n" +
+			"  /bot resume LIST_APPOINTMENTS — Mostrar lista de citas de nuevo\n" +
+			"  /bot resume FETCH_APPOINTMENTS — Recargar citas desde el sistema\n" +
+			"- Si el paciente te dice que accion quiere sin seleccionar, navega por el:\n" +
+			"  /bot resume FETCH_APPOINTMENTS — Recargar y mostrar lista"
 
 	case sm.StateAppointmentAction:
 		situation = fmt.Sprintf("El paciente no selecciono accion sobre su cita.\nPaciente: %s | Cita: %s",
@@ -518,6 +527,29 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 		actions = "- Preguntale el motivo:\n" +
 			"  /bot resume CANCEL_REASON — Mostrar motivos de nuevo\n" +
 			"  /bot resume LIST_APPOINTMENTS — Volver a lista"
+
+	// --- Notificaciones proactivas (reprogramar / cancelar desde template) ---
+	case sm.StateConfirmRescheduleNotif:
+		apptDate := sess.GetContext("notif_appt_date")
+		apptTime := sess.GetContext("notif_appt_time")
+		cupsNotif := sess.GetContext("notif_cups_name")
+		situation = fmt.Sprintf("El paciente recibio notificacion de reprogramacion y no respondio.\nCita: %s %s — %s\nPaciente: %s",
+			apptDate, apptTime, cupsNotif, patientName)
+		actions = "- Preguntale si desea reprogramar y responde por el:\n" +
+			"  /bot resume CONFIRM_RESCHEDULE_NOTIF reschedule_yes — Si, buscar nuevos horarios\n" +
+			"  /bot resume CONFIRM_RESCHEDULE_NOTIF reschedule_no — No, mantener la cita\n" +
+			"  /bot resume CONFIRM_RESCHEDULE_NOTIF — Mostrar confirmacion de nuevo"
+
+	case sm.StateConfirmCancelNotif:
+		apptDate := sess.GetContext("notif_appt_date")
+		apptTime := sess.GetContext("notif_appt_time")
+		cupsNotif := sess.GetContext("notif_cups_name")
+		situation = fmt.Sprintf("El paciente recibio notificacion de cancelacion y no respondio.\nCita: %s %s — %s\nPaciente: %s",
+			apptDate, apptTime, cupsNotif, patientName)
+		actions = "- Preguntale si desea cancelar y responde por el:\n" +
+			"  /bot resume CONFIRM_CANCEL_NOTIF cancel_yes — Si, cancelar la cita\n" +
+			"  /bot resume CONFIRM_CANCEL_NOTIF cancel_no — No, mantener la cita\n" +
+			"  /bot resume CONFIRM_CANCEL_NOTIF — Mostrar confirmacion de nuevo"
 
 	// --- Post-Accion y Cierre ---
 	case sm.StatePostActionMenu:
