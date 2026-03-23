@@ -94,7 +94,7 @@ func (r *ScheduleRepo) FindScheduleConfig(ctx context.Context, scheduleID int, d
 	            HInicioM5, HFinalM5, HInicioT5, HFinalT5,
 	            HInicioM6, HFinalM6, HInicioT6, HFinalT6
 	          FROM citas_conf
-	          WHERE IdAgenda = ? AND IdMedico = ? AND Activo = 1
+	          WHERE IdAgenda = ? AND IdMedico = ? AND Activo = -1
 	          LIMIT 1`
 
 	var cfg domain.ScheduleConfig
@@ -150,7 +150,10 @@ func (r *ScheduleRepo) FindByScheduleID(ctx context.Context, scheduleID int, sch
 	if scheduleType != "" {
 		st := strings.ToLower(scheduleType)
 		switch st {
-		case "procedimiento", "nocturno", "sedacion":
+		case "sedacion":
+			// Sedation: agenda name must contain "sedacion" OR "anestesia"
+			query += ` AND (LOWER(NombreAgenda) LIKE '%sedacion%' OR LOWER(NombreAgenda) LIKE '%anestesia%')`
+		case "procedimiento", "nocturno":
 			// Special types: agenda name MUST contain the keyword
 			query += ` AND LOWER(NombreAgenda) LIKE ?`
 			args = append(args, "%"+st+"%")
@@ -158,7 +161,8 @@ func (r *ScheduleRepo) FindByScheduleID(ctx context.Context, scheduleID int, sch
 			// Default types (consulta, examen, etc.): exclude special agendas
 			query += ` AND LOWER(NombreAgenda) NOT LIKE '%procedimiento%'
 			           AND LOWER(NombreAgenda) NOT LIKE '%nocturno%'
-			           AND LOWER(NombreAgenda) NOT LIKE '%sedacion%'`
+			           AND LOWER(NombreAgenda) NOT LIKE '%sedacion%'
+			           AND LOWER(NombreAgenda) NOT LIKE '%anestesia%'`
 		}
 	}
 
@@ -174,8 +178,11 @@ func (r *ScheduleRepo) FindByScheduleID(ctx context.Context, scheduleID int, sch
 }
 
 func (r *ScheduleRepo) FindBookedSlots(ctx context.Context, agendaID int, date string) ([]string, error) {
+	// Use LEFT(FechaCita, 8) = YYYYMMDD to match by date, avoiding reliance on FeCita
+	// which may have been stored with wrong timezone in legacy records.
 	query := `SELECT FechaCita FROM citas
-	          WHERE Agenda = ? AND FeCita = ? AND Cancelada = 0 AND Remonte = 0`
+	          WHERE Agenda = ? AND LEFT(FechaCita, 8) = REPLACE(?, '-', '')
+	            AND Cancelada = 0 AND (Remonte = 0 OR Remonte IS NULL)`
 
 	rows, err := r.db.QueryContext(ctx, query, agendaID, date)
 	if err != nil {

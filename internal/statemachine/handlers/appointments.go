@@ -27,6 +27,51 @@ func RegisterAppointmentHandlers(m *sm.Machine, apptSvc *services.AppointmentSer
 	m.Register(sm.StateConfirmAppointment, confirmAppointmentHandler(apptSvc, procRepo, addrMapper))
 	m.Register(sm.StateCancelAppointment, cancelAppointmentHandler(apptSvc, onCancel))
 	m.Register(sm.StateNoAppointments, noAppointmentsHandler())
+
+	// Flujos de confirmación desde notificaciones proactivas
+	confirmReschedulePrompt := func(sess *session.Session, result *sm.StateResult) {
+		result.WithText(fmt.Sprintf(
+			"¿Confirmas que deseas reprogramar tu cita?\n\n"+
+				"📅 *Fecha actual:* %s\n"+
+				"🕐 *Hora:* %s\n"+
+				"💊 *Procedimiento:* %s\n\n"+
+				"Responde con el número de tu elección:\n"+
+				"*1.* Sí, buscar nuevos horarios\n"+
+				"*2.* No, mantener mi cita",
+			sess.GetContext("notif_appt_date"),
+			sess.GetContext("notif_appt_time"),
+			sess.GetContext("notif_cups_name"),
+		))
+	}
+	m.RegisterWithConfig(sm.StateConfirmRescheduleNotif, sm.HandlerConfig{
+		InputType:   sm.InputButton,
+		Options:     []string{"reschedule_yes", "reschedule_no"},
+		ErrorMsg:    "Por favor responde 1 o 2.",
+		RetryPrompt: confirmReschedulePrompt,
+		Handler:     confirmRescheduleNotifHandler(),
+	})
+
+	confirmCancelPrompt := func(sess *session.Session, result *sm.StateResult) {
+		result.WithText(fmt.Sprintf(
+			"¿Confirmas que deseas cancelar tu cita?\n\n"+
+				"📅 *Fecha:* %s\n"+
+				"🕐 *Hora:* %s\n"+
+				"💊 *Procedimiento:* %s\n\n"+
+				"Responde con el número de tu elección:\n"+
+				"*1.* Sí, cancelar mi cita\n"+
+				"*2.* No, mantener mi cita",
+			sess.GetContext("notif_appt_date"),
+			sess.GetContext("notif_appt_time"),
+			sess.GetContext("notif_cups_name"),
+		))
+	}
+	m.RegisterWithConfig(sm.StateConfirmCancelNotif, sm.HandlerConfig{
+		InputType:   sm.InputButton,
+		Options:     []string{"cancel_yes", "cancel_no"},
+		ErrorMsg:    "Por favor responde 1 o 2.",
+		RetryPrompt: confirmCancelPrompt,
+		Handler:     confirmCancelNotifHandler(apptSvc, onCancel),
+	})
 }
 
 // FETCH_APPOINTMENTS (automático) — consulta citas del paciente y muestra la lista
@@ -326,6 +371,63 @@ func noAppointmentsHandler() sm.StateHandler {
 		}
 
 		return nil, fmt.Errorf("unreachable: selected=%s", selected)
+	}
+}
+
+// confirmRescheduleNotifHandler handles CONFIRM_RESCHEDULE_NOTIF state.
+// Patient pressed "Reprogramar" on the proactive confirmation template.
+// We ask them to confirm (1/2) before launching the slot search flow.
+func confirmRescheduleNotifHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		selected := sm.ValidatedPayload(ctx)
+		switch selected {
+		case "reschedule_yes":
+			return sm.NewResult(sm.StateSearchSlots).
+				WithEvent("notification_reschedule_confirmed", nil), nil
+		default: // reschedule_no
+			return sm.NewResult(sm.StateFarewell).
+				WithText("Entendido, tu cita queda vigente. ¡Te esperamos!").
+				WithEvent("notification_reschedule_declined", nil), nil
+		}
+	}
+}
+
+// confirmCancelNotifHandler handles CONFIRM_CANCEL_NOTIF state.
+// Patient pressed "Cancelar" on the proactive confirmation template.
+// We ask them to confirm (1/2) before executing the cancellation.
+func confirmCancelNotifHandler(apptSvc *services.AppointmentService, onCancel CancellationCallback) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		selected := sm.ValidatedPayload(ctx)
+		switch selected {
+		case "cancel_yes":
+			apptID := sess.GetContext("notif_appt_id")
+			appt, block, err := apptSvc.FindBlockByAppointmentID(ctx, apptID)
+			if err != nil || appt == nil {
+				return sm.NewResult(sm.StateFarewell).
+					WithText("No pudimos encontrar tu cita. Por favor contacta a la clínica."), nil
+			}
+			if err := apptSvc.CancelBlock(ctx, block, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
+				return sm.NewResult(sm.StateFarewell).
+					WithText("Error al cancelar la cita. Por favor contacta a la clínica.").
+					WithEvent("notification_cancel_error", map[string]interface{}{"error": err.Error()}), nil
+			}
+			if onCancel != nil {
+				for _, a := range block {
+					for _, proc := range a.Procedures {
+						if proc.CupCode != "" {
+							go onCancel(ctx, proc.CupCode)
+						}
+					}
+				}
+			}
+			return sm.NewResult(sm.StateFarewell).
+				WithText("Tu cita ha sido cancelada.\n\nSi deseas reagendar, puedes escribirnos cuando lo necesites.").
+				WithEvent("notification_cancel_confirmed", map[string]interface{}{"appointment_id": apptID}), nil
+		default: // cancel_no
+			return sm.NewResult(sm.StateFarewell).
+				WithText("Entendido, tu cita queda vigente. ¡Te esperamos!").
+				WithEvent("notification_cancel_declined", nil), nil
+		}
 	}
 }
 

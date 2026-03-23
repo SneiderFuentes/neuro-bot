@@ -76,7 +76,7 @@ func (r *EntityRepo) GetCodeByIndexAndCategory(ctx context.Context, index int, c
 }
 
 func (r *EntityRepo) FindByCode(ctx context.Context, code string) (*domain.Entity, error) {
-	query := `SELECT NoRegistro, IDEntidad, NombreEntidad, TipoPrecio, contratoactivo
+	query := `SELECT NoRegistro, IDEntidad, NombreEntidad, COALESCE(TipoPrecio, ''), contratoactivo
 	          FROM entidades WHERE IDEntidad = ?`
 
 	var e domain.Entity

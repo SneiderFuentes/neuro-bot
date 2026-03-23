@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/neuro-bot/neuro-bot/internal/domain"
@@ -180,9 +181,9 @@ func (r *AppointmentRepo) fetchProceduresBatch(ctx context.Context, appointmentI
 		args[i] = id
 	}
 
-	query := fmt.Sprintf(`SELECT px.RegistroNo, px.IdCita, px.CUPS,
-	            COALESCE(cp.nombre, px.CUPS) AS CupName,
-	            px.Cantidad, px.VrUnitario, px.IdServicio
+	query := fmt.Sprintf(`SELECT px.RegistroNo, px.IdCita, COALESCE(px.CUPS, '') AS CUPS,
+	            COALESCE(cp.nombre, px.CUPS, '') AS CupName,
+	            COALESCE(px.Cantidad, 0), COALESCE(px.VrUnitario, 0), COALESCE(px.IdServicio, 0)
 	          FROM pxcita px
 	          LEFT JOIN cups_procedimientos cp ON cp.codigo_cups = px.CUPS
 	          WHERE px.IdCita IN (%s)`, strings.Join(placeholders, ","))
@@ -347,7 +348,7 @@ func (r *AppointmentRepo) Create(ctx context.Context, input domain.CreateAppoint
 	var existingCount int
 	err = tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM citas
-		 WHERE Agenda = ? AND FechaCita = ? AND Cancelada = 0 AND Remonte = 0
+		 WHERE Agenda = ? AND FechaCita = ? AND Cancelada = 0 AND (Remonte = 0 OR Remonte IS NULL)
 		 FOR UPDATE`,
 		input.AgendaID, input.TimeSlot).Scan(&existingCount)
 	if err != nil {
@@ -364,12 +365,13 @@ func (r *AppointmentRepo) Create(ctx context.Context, input domain.CreateAppoint
 	}
 
 	// Insert cita
+	dateStr := input.Date.Format("2006-01-02")
 	result, err := tx.ExecContext(ctx,
 		`INSERT INTO citas (FechaSolicitud, FeCita, FechaCita, IdMedico, NumeroPaciente,
-		  Entidad, Agenda, FechaPideUsuario, Cancelada, Confirmada, CreadoPor, Observaciones)
-		 VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
-		input.Date, input.TimeSlot, input.DoctorID, input.PatientID,
-		input.Entity, input.AgendaID, input.Date, input.CreatedBy, obsValue)
+		  Entidad, Agenda, FechaPideUsuario, Cancelada, Confirmada, CreadoPor, Observaciones, Remonte)
+		 VALUES (NOW(), ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 0)`,
+		dateStr, input.TimeSlot, input.DoctorID, input.PatientID,
+		input.Entity, input.AgendaID, dateStr, input.CreatedBy, obsValue)
 	if err != nil {
 		return nil, fmt.Errorf("insert cita: %w", err)
 	}
@@ -379,17 +381,6 @@ func (r *AppointmentRepo) Create(ctx context.Context, input domain.CreateAppoint
 		return nil, fmt.Errorf("last insert id: %w", err)
 	}
 	apptID := fmt.Sprintf("%d", lastID)
-
-	// Insert procedures into pxcita
-	for _, proc := range input.Procedures {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO pxcita (FechaCreado, IdCita, CUPS, Cantidad, VrUnitario, IdServicio, Facturado, IdPaquete)
-			 VALUES (NOW(), ?, ?, ?, ?, ?, 0, 0)`,
-			apptID, proc.CupCode, proc.Quantity, proc.UnitValue, proc.ServiceID)
-		if err != nil {
-			return nil, fmt.Errorf("insert pxcita: %w", err)
-		}
-	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
@@ -565,4 +556,35 @@ func (r *AppointmentRepo) RescheduleDate(ctx context.Context, agendaID int, doct
 	}
 	rows, _ := result.RowsAffected()
 	return int(rows), nil
+}
+
+// CreatePxCita inserts a record into the pxcita table linking a CUPS procedure to an appointment.
+func (r *AppointmentRepo) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
+	slog.Debug("Creating pxcita record",
+		"appointment_id", input.AppointmentID,
+		"cup_code", input.CupCode,
+		"quantity", input.Quantity,
+		"unit_value", input.UnitValue,
+		"service_id", input.ServiceID,
+	)
+	
+	query := `INSERT INTO pxcita (IdCita, CUPS, Cantidad, VrUnitario, IdServicio, FechaCreado)
+	          VALUES (?, ?, ?, ?, ?, NOW())`
+
+	quantity := input.Quantity
+	if quantity == 0 {
+		quantity = 1
+	}
+
+	_, err := r.db.ExecContext(ctx, query,
+		input.AppointmentID,
+		input.CupCode,
+		quantity,
+		input.UnitValue,
+		input.ServiceID,
+	)
+	if err != nil {
+		return fmt.Errorf("create pxcita: %w", err)
+	}
+	return nil
 }

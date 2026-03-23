@@ -415,7 +415,7 @@ func (m *NotificationManager) handleTimeout(phone string) {
 	case "reschedule":
 		m.handleConfirmationTimeout(pending) // Same behavior
 	case "cancellation":
-		// No timeout action — already removed from sync.Map and DB
+		// No timeout action — patient didn't respond to confirmation step
 	case "waiting_list":
 		if m.waitingListRepo != nil {
 			m.handleWaitingListTimeout(pending)

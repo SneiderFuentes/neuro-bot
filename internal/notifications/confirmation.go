@@ -2,12 +2,16 @@ package notifications
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/neuro-bot/neuro-bot/internal/services"
+	"github.com/neuro-bot/neuro-bot/internal/session"
+	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
 	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
@@ -116,50 +120,10 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 			"block_size", len(block))
 
 	case "reschedule":
-		m.startSelfReschedule(phone, pending, false)
+		m.startConfirmRescheduleSession(phone, pending)
 
 	case "cancel":
-		appt, block, err := m.apptSvc.FindBlockByAppointmentID(ctx, pending.AppointmentID)
-		if err != nil || appt == nil {
-			slog.Error("cancel: find appointment", "error", err, "appointment_id", pending.AppointmentID)
-			return
-		}
-
-		if err := m.apptSvc.CancelBlock(ctx, block, "paciente via bot", "whatsapp_bot", pending.ConversationID); err != nil {
-			slog.Error("cancel: cancel block", "error", err)
-		}
-
-		m.birdClient.SendText(phone, pending.ConversationID, "Tu cita ha sido cancelada.\n\n"+
-			"Si deseas reagendar, puedes escribirnos cuando lo necesites.")
-
-		// Leave feed item open + assign to agent for follow-up
-		if pending.ConversationID != "" {
-			m.birdClient.UpdateFeedItem(pending.ConversationID, pending.BirdMessageID,
-				false, m.cfg.BirdTeamFallback, "")
-		}
-
-		// Cambio 13: Check waiting list for freed CUPS
-		for _, proc := range appt.Procedures {
-			if proc.CupCode != "" {
-				go m.CheckWaitingListForCups(ctx, proc.CupCode)
-			}
-		}
-
-		// Log event
-		if m.tracker != nil {
-			elapsed := time.Since(pending.CreatedAt).Minutes()
-			m.tracker.LogEvent(ctx, "", phone, "notification_cancelled",
-				map[string]interface{}{
-					"appointment_id":    pending.AppointmentID,
-					"response_time_min": int(elapsed),
-					"conversation_id":   pending.ConversationID,
-				})
-		}
-
-		slog.Info("proactive cancellation success",
-			"phone", phone,
-			"appointment_id", pending.AppointmentID,
-			"block_size", len(block))
+		m.startConfirmCancelSession(phone, pending)
 	}
 }
 
@@ -282,4 +246,170 @@ func (m *NotificationManager) escalateToAgent(pending *PendingNotification) {
 		"phone", pending.Phone,
 		"appointment_id", pending.AppointmentID,
 		"retry_count", pending.RetryCount)
+}
+
+// startConfirmRescheduleSession creates a new session at CONFIRM_RESCHEDULE_NOTIF
+// so the state machine handles the "1/2" confirmation with proper retry logic.
+func (m *NotificationManager) startConfirmRescheduleSession(phone string, pending *PendingNotification) {
+	ctx := context.Background()
+
+	appt, block, err := m.apptSvc.FindBlockByAppointmentID(ctx, pending.AppointmentID)
+	if err != nil || appt == nil {
+		slog.Error("startConfirmRescheduleSession: find appointment", "error", err, "appointment_id", pending.AppointmentID)
+		m.birdClient.SendText(phone, pending.ConversationID,
+			"No pudimos encontrar tu cita. Por favor contacta a la clinica.")
+		return
+	}
+
+	if m.sessionRepo == nil || m.workerPool == nil {
+		slog.Error("startConfirmRescheduleSession: missing session/worker dependencies")
+		m.birdClient.SendText(phone, pending.ConversationID,
+			"Servicio temporalmente no disponible. Por favor intenta mas tarde.")
+		return
+	}
+
+	cupsCode := ""
+	cupsName := ""
+	if len(appt.Procedures) > 0 {
+		cupsCode = appt.Procedures[0].CupCode
+		cupsName = appt.Procedures[0].CupName
+	}
+
+	isContrasted := "0"
+	if strings.Contains(appt.Observations, "Contrastada") {
+		isContrasted = "1"
+	}
+	isSedated := "0"
+	if strings.Contains(appt.Observations, "Sedacion") {
+		isSedated = "1"
+	}
+
+	// Build procedures_json required by createAppointmentHandler
+	cups := make([]services.CUPSEntry, 0, len(appt.Procedures))
+	for _, p := range appt.Procedures {
+		cups = append(cups, services.CUPSEntry{
+			Code:     p.CupCode,
+			Name:     p.CupName,
+			Quantity: 1,
+		})
+	}
+	if len(cups) == 0 && cupsCode != "" {
+		cups = []services.CUPSEntry{{Code: cupsCode, Name: cupsName, Quantity: 1}}
+	}
+	groups := []services.CUPSGroup{{
+		ServiceType: "general",
+		Cups:        cups,
+		Espacios:    len(block),
+	}}
+	proceduresJSON, _ := json.Marshal(groups)
+
+	sess := &session.Session{
+		ID:             uuid.New().String(),
+		PhoneNumber:    phone,
+		CurrentState:   sm.StateConfirmRescheduleNotif,
+		ConversationID: pending.ConversationID,
+		Status:         session.StatusActive,
+		ExpiresAt:      time.Now().Add(30 * time.Minute),
+	}
+
+	sessCtx := map[string]string{
+		// Patient data
+		"patient_id":     appt.PatientID,
+		"patient_name":   appt.PatientName,
+		"patient_entity": appt.Entity,
+		"patient_age":    "0",
+
+		// Procedure data
+		"cups_code":       cupsCode,
+		"cups_name":       cupsName,
+		"is_contrasted":   isContrasted,
+		"is_sedated":      isSedated,
+		"espacios":        fmt.Sprintf("%d", len(block)),
+		"procedures_json": string(proceduresJSON),
+
+		// Flow control
+		"total_procedures":      "1",
+		"current_procedure_idx": "0",
+		"menu_option":           "agendar",
+
+		// Reschedule keys (used by SEARCH_SLOTS if confirmed)
+		"reschedule_appt_id":         pending.AppointmentID,
+		"reschedule_skip_cancel":     "0",
+		"reschedule_conversation_id": pending.ConversationID,
+		"reschedule_bird_msg_id":     pending.BirdMessageID,
+		"preferred_doctor_doc":       appt.DoctorID,
+
+		// Display keys for confirmation prompt
+		"notif_appt_date": utils.FormatFriendlyDate(appt.Date),
+		"notif_appt_time": services.FormatTimeSlot(appt.TimeSlot),
+		"notif_cups_name": services.GetFirstCupName(*appt),
+	}
+
+	if err := m.sessionRepo.Create(ctx, sess); err != nil {
+		slog.Error("startConfirmRescheduleSession: create session", "error", err)
+		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
+		return
+	}
+	if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessCtx); err != nil {
+		slog.Error("startConfirmRescheduleSession: set context", "error", err)
+		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
+		return
+	}
+
+	m.workerPool.EnqueueVirtual(phone)
+	slog.Info("confirm_reschedule_session created", "phone", phone, "appointment_id", pending.AppointmentID)
+}
+
+// startConfirmCancelSession creates a new session at CONFIRM_CANCEL_NOTIF
+// so the state machine handles the "1/2" confirmation with proper retry logic.
+func (m *NotificationManager) startConfirmCancelSession(phone string, pending *PendingNotification) {
+	ctx := context.Background()
+
+	appt, _, err := m.apptSvc.FindBlockByAppointmentID(ctx, pending.AppointmentID)
+	if err != nil || appt == nil {
+		slog.Error("startConfirmCancelSession: find appointment", "error", err, "appointment_id", pending.AppointmentID)
+		m.birdClient.SendText(phone, pending.ConversationID,
+			"No pudimos encontrar tu cita. Por favor contacta a la clinica.")
+		return
+	}
+
+	if m.sessionRepo == nil || m.workerPool == nil {
+		slog.Error("startConfirmCancelSession: missing session/worker dependencies")
+		m.birdClient.SendText(phone, pending.ConversationID,
+			"Servicio temporalmente no disponible. Por favor intenta mas tarde.")
+		return
+	}
+
+	sess := &session.Session{
+		ID:             uuid.New().String(),
+		PhoneNumber:    phone,
+		CurrentState:   sm.StateConfirmCancelNotif,
+		ConversationID: pending.ConversationID,
+		Status:         session.StatusActive,
+		ExpiresAt:      time.Now().Add(30 * time.Minute),
+	}
+
+	sessCtx := map[string]string{
+		"patient_id":      appt.PatientID,
+		"patient_name":    appt.PatientName,
+		"notif_appt_id":   pending.AppointmentID,
+		"notif_appt_date": utils.FormatFriendlyDate(appt.Date),
+		"notif_appt_time": services.FormatTimeSlot(appt.TimeSlot),
+		"notif_cups_name": services.GetFirstCupName(*appt),
+		"notif_bird_msg_id": pending.BirdMessageID,
+	}
+
+	if err := m.sessionRepo.Create(ctx, sess); err != nil {
+		slog.Error("startConfirmCancelSession: create session", "error", err)
+		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
+		return
+	}
+	if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessCtx); err != nil {
+		slog.Error("startConfirmCancelSession: set context", "error", err)
+		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
+		return
+	}
+
+	m.workerPool.EnqueueVirtual(phone)
+	slog.Info("confirm_cancel_session created", "phone", phone, "appointment_id", pending.AppointmentID)
 }

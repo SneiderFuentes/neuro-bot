@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+      - .env.testing
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
     extra_hosts:
@@ -56,7 +57,7 @@ services:
       --table-open-cache=200
       --sort-buffer-size=256K
     ports:
-      - "${DB_PORT:-13308}:3306"
+      - "${DB_EXTERNAL_PORT:-13308}:3306"
     volumes:
       - botdbdata:/var/lib/mysql
       - ./docker/mysql/init:/docker-entrypoint-initdb.d

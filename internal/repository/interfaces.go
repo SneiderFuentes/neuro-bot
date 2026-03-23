@@ -24,6 +24,7 @@ type AppointmentRepository interface {
 	FindUpcomingByPatient(ctx context.Context, patientID string) ([]domain.Appointment, error)
 	FindByAgendaAndDate(ctx context.Context, agendaID int, date string) ([]domain.Appointment, error)
 	Create(ctx context.Context, input domain.CreateAppointmentInput) (*domain.Appointment, error)
+	CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error
 	Confirm(ctx context.Context, id string, channel, channelID string) error
 	Cancel(ctx context.Context, id string, reason, channel, channelID string) error
 	ConfirmBatch(ctx context.Context, ids []string, channel, channelID string) error
@@ -55,6 +56,12 @@ type ScheduleRepository interface {
 	DeleteWorkingDayException(ctx context.Context, agendaID int, doctorDoc, date string) (bool, error)
 }
 
+// SoatRepository — búsqueda de precios por CUPS según tarifa.
+// Implementación actual: datosipsndx (tabla: codigossoat)
+type SoatRepository interface {
+	FindPrice(ctx context.Context, cupCode, tariffType string) (float64, error)
+}
+
 // ProcedureRepository — catálogo de procedimientos CUPS.
 // Implementación actual: datosipsndx (tabla: cups_procedimientos)
 type ProcedureRepository interface {
@@ -77,12 +84,6 @@ type EntityRepository interface {
 // Implementación actual: datosipsndx (tabla: municipios)
 type MunicipalityRepository interface {
 	Search(ctx context.Context, name string) ([]domain.Municipality, error)
-}
-
-// SoatRepository — tarifas SOAT por procedimiento.
-// Implementación actual: datosipsndx (tabla: codigossoat)
-type SoatRepository interface {
-	FindPrice(ctx context.Context, cupCode, entityCode string) (float64, error)
 }
 
 // Repositories agrupa todas las interfaces para inyección de dependencias.

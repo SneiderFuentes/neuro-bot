@@ -173,7 +173,7 @@ func main() {
 	var slotSvc *services.SlotService
 	if repos != nil && appointmentSvc != nil {
 		slotSvc = services.NewSlotService(repos.Doctor, repos.Schedule)
-		handlers.RegisterSlotHandlers(machine, slotSvc, appointmentSvc, repos.Procedure, repos.Soat, waitingListRepo, addrMapper)
+		handlers.RegisterSlotHandlers(machine, slotSvc, appointmentSvc, repos.Procedure, repos.Soat, repos.Entity, waitingListRepo, addrMapper)
 	}
 	// Fase 11: Post-Acción y Escalación
 	handlers.RegisterPostActionHandlers(machine)
@@ -250,12 +250,13 @@ func main() {
 		notifyManager.SetWaitingListCheckDeps(slotSvc, repos.Appointment, waitingListRepo)
 	}
 
+	var schedulerTasks *scheduler.Tasks
 	if repos != nil && notifyManager != nil {
 		schedulerRunRepo := localrepo.NewSchedulerRunRepo(localDB)
 
 		sched := scheduler.NewScheduler(loc)
 		sched.SetRunRepo(schedulerRunRepo)
-		tasks := &scheduler.Tasks{
+		schedulerTasks = &scheduler.Tasks{
 			AppointmentRepo: repos.Appointment,
 			AppointmentSvc:  appointmentSvc,
 			BirdClient:      birdClient,
@@ -266,7 +267,7 @@ func main() {
 			Tracker:         tracker,
 			InboxRepo:       inboxRepo,
 		}
-		tasks.RegisterAll(sched)
+		schedulerTasks.RegisterAll(sched)
 		sched.RunMissedTasks(ctx) // Catch-up missed tasks before starting the regular loop
 		go sched.Start(ctx)
 	}
@@ -284,6 +285,9 @@ func main() {
 			birdClient, notifyManager, notifyManager, workerPool,
 			tracker, cfg, startTime,
 		)
+		if schedulerTasks != nil {
+			internalHandler.SetReminderRunner(schedulerTasks)
+		}
 	}
 
 	// HTTP Server
@@ -305,6 +309,7 @@ func main() {
 		internalMux.HandleFunc("GET /api/internal/kpis/funnel", internalHandler.HandleFunnel)
 		internalMux.HandleFunc("GET /api/internal/kpis/health", internalHandler.HandleHealthKPIs)
 		internalMux.HandleFunc("POST /api/internal/test-alert", internalHandler.HandleTestAlert)
+		internalMux.HandleFunc("POST /api/internal/send-reminders", internalHandler.HandleSendReminders)
 		mux.Handle("/api/internal/",
 			api.RateLimiter(30, time.Minute)(
 				api.MaxBodySize(

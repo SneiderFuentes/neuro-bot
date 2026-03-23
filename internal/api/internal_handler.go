@@ -25,6 +25,11 @@ type WorkerPoolStats interface {
 	QueueStats() (size, capacity int)
 }
 
+// ReminderRunner can send WhatsApp reminders on demand.
+type ReminderRunner interface {
+	SendWhatsAppReminders(ctx context.Context) error
+}
+
 // NotificationCounter provides pending notification count.
 type NotificationCounter interface {
 	PendingCount() int
@@ -62,6 +67,7 @@ type InternalHandler struct {
 	tracker         InternalEventLogger
 	cfg             *config.Config
 	startTime       time.Time
+	reminderRunner  ReminderRunner // optional: manual trigger for WA reminders
 }
 
 // NewInternalHandler creates a new internal handler.
@@ -91,6 +97,31 @@ func NewInternalHandler(
 		cfg:             cfg,
 		startTime:       startTime,
 	}
+}
+
+// SetReminderRunner injects the task runner for manual reminder triggers.
+func (h *InternalHandler) SetReminderRunner(r ReminderRunner) {
+	h.reminderRunner = r
+}
+
+// HandleSendReminders manually triggers the WhatsApp confirmation reminders task.
+// Useful for testing or catch-up without waiting for the 07:00 scheduler.
+func (h *InternalHandler) HandleSendReminders(w http.ResponseWriter, r *http.Request) {
+	if h.reminderRunner == nil {
+		http.Error(w, "reminder runner not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	slog.Info("manual send-reminders triggered", "remote", r.RemoteAddr)
+
+	go func() {
+		if err := h.reminderRunner.SendWhatsAppReminders(context.Background()); err != nil {
+			slog.Error("manual send-reminders failed", "error", err)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "reminders dispatched in background"})
 }
 
 // --- Cancel Agenda ---
@@ -542,24 +573,32 @@ func (h *InternalHandler) HandleWaitingListCheck(w http.ResponseWriter, r *http.
 	}
 
 	type cupsInfo struct {
-		CupsCode string `json:"cups_code"`
-		Waiting  int    `json:"waiting"`
+		CupsCode  string `json:"cups_code"`
+		Waiting   int    `json:"waiting"`
+		Notified  int    `json:"notified,omitempty"`
 	}
 	var results []cupsInfo
+	totalNotified := 0
 	for _, code := range cupsCodes {
 		entries, err := h.waitingListRepo.GetWaitingByCups(ctx, code, 100)
 		if err != nil {
 			continue
 		}
-		results = append(results, cupsInfo{CupsCode: code, Waiting: len(entries)})
+		info := cupsInfo{CupsCode: code, Waiting: len(entries)}
+		if !req.DryRun && len(entries) > 0 && h.notifyManager != nil {
+			info.Notified = h.notifyManager.CheckWaitingListForCups(ctx, code)
+			totalNotified += info.Notified
+		}
+		results = append(results, info)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "ok",
-		"dry_run": req.DryRun,
-		"cups":    results,
-		"total":   len(cupsCodes),
+		"status":         "ok",
+		"dry_run":        req.DryRun,
+		"cups":           results,
+		"total":          len(cupsCodes),
+		"total_notified": totalNotified,
 	})
 }
 

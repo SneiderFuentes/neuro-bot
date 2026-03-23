@@ -121,7 +121,11 @@ PROCEDIMIENTOS — PROCESO DE DECISIÓN (OBLIGATORIO):
    - Pon cups_code vacío ("") y cups_name con la descripción leída en la orden.
 
 DATOS POR PROCEDIMIENTO:
-- quantity: entero; si la orden no trae número, usa 1.
+- quantity: entero. REGLAS DE CANTIDAD (en orden de prioridad):
+  1. Si la fila contiene "(#N)" (ej: "(#4)", "(#16)"), usa ese N como quantity.
+  2. Si no hay (#N) pero hay un número explícito de sesiones/extremidades/nervios al final (ej: "/ 4 EXTREMIDADES", "4 SESIONES"), usa ese número.
+  3. Si no hay ningún indicador de cantidad, usa 1.
+  IMPORTANTE: En órdenes colombianas, (#N) es la notación estándar para indicar la cantidad del procedimiento. Siempre tiene prioridad sobre cualquier otro texto numérico en la misma fila.
 - is_sedated: busca en descripción y observaciones del procedimiento:
   "sedación", "sedacion", "bajo sedación", "bajo anestesia", "con anestesia", "anestesia general"
   Si encuentra alguna: true para ESE procedimiento. Si no: false.

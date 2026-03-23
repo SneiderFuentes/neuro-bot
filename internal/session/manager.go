@@ -114,18 +114,7 @@ func (m *SessionManager) SaveState(ctx context.Context, s *Session, nextState st
 		return err
 	}
 
-	// Actualizar contexto
-	if len(updateCtx) > 0 {
-		if err := m.repo.SetContextBatch(ctx, s.ID, updateCtx); err != nil {
-			return err
-		}
-		// Actualizar en memoria también
-		for k, v := range updateCtx {
-			s.SetContext(k, v)
-		}
-	}
-
-	// Borrar contexto
+	// Borrar contexto primero (para que un set posterior en la misma cadena tenga precedencia)
 	if len(clearCtx) > 0 {
 		if err := m.repo.ClearContext(ctx, s.ID, clearCtx...); err != nil {
 			return err
@@ -133,6 +122,17 @@ func (m *SessionManager) SaveState(ctx context.Context, s *Session, nextState st
 		// Borrar en memoria también
 		for _, k := range clearCtx {
 			delete(s.Context, k)
+		}
+	}
+
+	// Actualizar contexto (después del clear, para que el set gane sobre el clear)
+	if len(updateCtx) > 0 {
+		if err := m.repo.SetContextBatch(ctx, s.ID, updateCtx); err != nil {
+			return err
+		}
+		// Actualizar en memoria también
+		for k, v := range updateCtx {
+			s.SetContext(k, v)
 		}
 	}
 

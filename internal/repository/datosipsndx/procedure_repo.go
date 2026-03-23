@@ -19,15 +19,16 @@ func NewProcedureRepo(db *sql.DB) *ProcedureRepo {
 }
 
 func (r *ProcedureRepo) FindByCode(ctx context.Context, code string) (*domain.Procedure, error) {
-	query := `SELECT id, codigo_cups, nombre, COALESCE(descripcion, ''),
-	            COALESCE(especialidad_id, 0), COALESCE(servicio_id, 0),
-	            COALESCE(preparacion, ''), COALESCE(direccion, ''),
-	            COALESCE(video_url, ''), COALESCE(audio_url, ''),
-	            COALESCE(tipo, ''),
-	            COALESCE(horario_especifico_id, 0),
-	            COALESCE(activo, 1)
-	          FROM cups_procedimientos
-	          WHERE codigo_cups = ? AND activo = 1
+	query := `SELECT p.id, p.codigo_cups, p.nombre, COALESCE(p.descripcion, ''),
+	            COALESCE(p.especialidad_id, 0), COALESCE(CAST(p.servicio_id AS SIGNED), 0),
+	            COALESCE(p.servicio, ''),
+	            COALESCE(p.preparacion, ''), COALESCE(p.direccion, ''),
+	            COALESCE(p.video_url, ''), COALESCE(p.audio_url, ''),
+	            COALESCE(p.tipo, ''),
+	            COALESCE(p.horario_especifico_id, 0),
+	            COALESCE(p.activo, 1)
+	          FROM cups_procedimientos p
+	          WHERE p.codigo_cups = ? AND p.activo = 1
 	          LIMIT 1`
 
 	var p domain.Procedure
@@ -35,6 +36,7 @@ func (r *ProcedureRepo) FindByCode(ctx context.Context, code string) (*domain.Pr
 	err := r.db.QueryRowContext(ctx, query, code).Scan(
 		&p.ID, &p.Code, &p.Name, &p.Description,
 		&p.SpecialtyID, &p.ServiceID,
+		&p.ServiceName,
 		&p.Preparation, &p.Address,
 		&p.VideoURL, &p.AudioURL,
 		&p.Type,
@@ -52,15 +54,16 @@ func (r *ProcedureRepo) FindByCode(ctx context.Context, code string) (*domain.Pr
 }
 
 func (r *ProcedureRepo) FindByID(ctx context.Context, id int) (*domain.Procedure, error) {
-	query := `SELECT id, codigo_cups, nombre, COALESCE(descripcion, ''),
-	            COALESCE(especialidad_id, 0), COALESCE(servicio_id, 0),
-	            COALESCE(preparacion, ''), COALESCE(direccion, ''),
-	            COALESCE(video_url, ''), COALESCE(audio_url, ''),
-	            COALESCE(tipo, ''),
-	            COALESCE(horario_especifico_id, 0),
-	            COALESCE(activo, 1)
-	          FROM cups_procedimientos
-	          WHERE id = ?
+	query := `SELECT p.id, p.codigo_cups, p.nombre, COALESCE(p.descripcion, ''),
+	            COALESCE(p.especialidad_id, 0), COALESCE(CAST(p.servicio_id AS SIGNED), 0),
+	            COALESCE(p.servicio, ''),
+	            COALESCE(p.preparacion, ''), COALESCE(p.direccion, ''),
+	            COALESCE(p.video_url, ''), COALESCE(p.audio_url, ''),
+	            COALESCE(p.tipo, ''),
+	            COALESCE(p.horario_especifico_id, 0),
+	            COALESCE(p.activo, 1)
+	          FROM cups_procedimientos p
+	          WHERE p.id = ?
 	          LIMIT 1`
 
 	var p domain.Procedure
@@ -68,6 +71,7 @@ func (r *ProcedureRepo) FindByID(ctx context.Context, id int) (*domain.Procedure
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&p.ID, &p.Code, &p.Name, &p.Description,
 		&p.SpecialtyID, &p.ServiceID,
+		&p.ServiceName,
 		&p.Preparation, &p.Address,
 		&p.VideoURL, &p.AudioURL,
 		&p.Type,

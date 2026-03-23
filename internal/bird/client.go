@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,6 +198,11 @@ func (c *Client) messagesURL() string {
 	if base == "" {
 		base = "https://api.bird.com"
 	}
+	// If apiURL already contains the full channel path (e.g. BIRD_API_URL=https://api.bird.com/workspaces/{id}/channels/{id}),
+	// just append /messages instead of doubling the workspace/channel segments.
+	if strings.Contains(base, "/channels/") {
+		return base + "/messages"
+	}
 	return fmt.Sprintf("%s/workspaces/%s/channels/%s/messages", base, c.workspaceID, c.channelID)
 }
 
@@ -209,6 +215,13 @@ func (c *Client) templatesURL() string {
 	base := c.apiURL
 	if base == "" {
 		base = "https://api.bird.com"
+	}
+	// If apiURL already contains the full channel path, swap the channelID when needed.
+	if strings.Contains(base, "/channels/") {
+		if chID != c.channelID && c.channelID != "" {
+			base = strings.Replace(base, c.channelID, chID, 1)
+		}
+		return base + "/messages"
 	}
 	return fmt.Sprintf("%s/workspaces/%s/channels/%s/messages", base, c.workspaceID, chID)
 }
@@ -430,10 +443,15 @@ func (c *Client) SendTemplate(to string, tmpl TemplateConfig) (string, error) {
 	params := make([]map[string]string, len(tmpl.Params))
 	for i, p := range tmpl.Params {
 		params[i] = map[string]string{
-			"type":  p.Type,
+			"type":  "string",
 			"key":   p.Key,
 			"value": p.Value,
 		}
+	}
+
+	version := tmpl.VersionID
+	if version == "" {
+		version = "latest"
 	}
 
 	payload := map[string]interface{}{
@@ -444,11 +462,16 @@ func (c *Client) SendTemplate(to string, tmpl TemplateConfig) (string, error) {
 		},
 		"template": map[string]interface{}{
 			"projectId":  tmpl.ProjectID,
-			"version":    tmpl.VersionID,
+			"version":    version,
 			"locale":     tmpl.Locale,
 			"parameters": params,
 		},
 	}
+
+	if debugJSON, err := json.Marshal(payload); err == nil {
+		slog.Debug("send_template_payload", "to", to, "payload", string(debugJSON))
+	}
+
 	return c.sendMessage(c.templatesURL(), payload)
 }
 
@@ -1031,6 +1054,8 @@ func (c *Client) sendMessage(url string, payload interface{}) (string, error) {
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("bird api error: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
+
+	slog.Debug("bird_api_response", "status", resp.StatusCode, "body", string(respBody))
 
 	var result struct {
 		ID string `json:"id"`

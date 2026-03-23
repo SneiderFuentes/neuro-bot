@@ -255,18 +255,21 @@ func (h *WebhookHandler) HandleConversation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	signature := r.Header.Get("MessageBird-Signature")
-	timestamp := r.Header.Get("MessageBird-Request-Timestamp")
-	requestURL := reconstructFullURL(r)
-
-	if !h.birdClient.VerifyWebhookSignature(signature, timestamp, requestURL, body) {
-		slog.Warn("invalid conversation webhook signature",
-			"has_signature", signature != "",
-			"has_timestamp", timestamp != "",
-			"url", requestURL,
-		)
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
-		return
+	// Verify signature only if a separate conversations webhook secret is configured.
+	// If not configured, skip validation (conversations webhook only caches conversation IDs).
+	if h.cfg.BirdWebhookSecretConversations != "" {
+		signature := r.Header.Get("MessageBird-Signature")
+		timestamp := r.Header.Get("MessageBird-Request-Timestamp")
+		requestURL := reconstructFullURL(r)
+		if !bird.VerifySignatureWithKey(h.cfg.BirdWebhookSecretConversations, signature, timestamp, requestURL, body) {
+			slog.Warn("invalid conversation webhook signature",
+				"has_signature", signature != "",
+				"has_timestamp", timestamp != "",
+				"url", requestURL,
+			)
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -332,7 +335,8 @@ func reconstructFullURL(r *http.Request) string {
 // isNotificationPostback determina si un postback viene de un template proactivo
 func isNotificationPostback(payload string) bool {
 	switch payload {
-	case "confirm", "cancelar", "cancel", "understood", "reschedule", "wl_schedule", "wl_decline":
+	case "confirm", "cancelar", "cancel", "understood", "reschedule", "reprogramar",
+		"wl_schedule", "wl_decline":
 		return true
 	default:
 		return false

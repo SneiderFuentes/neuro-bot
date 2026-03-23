@@ -36,8 +36,9 @@ type Config struct {
 	BirdAPIURL        string
 	BirdAPIKeyWA      string
 	BirdAccessKeyID   string
-	BirdWebhookSecret         string
-	BirdWebhookSecretOutbound string // Separate signing key for outbound webhook (optional)
+	BirdWebhookSecret              string
+	BirdWebhookSecretOutbound      string // Separate signing key for outbound webhook (optional)
+	BirdWebhookSecretConversations string // Signing key for conversations API webhook (optional, skips validation if empty)
 	BirdWorkspaceID   string
 	BirdChannelID     string
 	BirdTeamGrupoA    string // Ecografías, RX, Resonancia, TAC
@@ -113,7 +114,7 @@ type Config struct {
 }
 
 func Load() *Config {
-	// APP_ENV=testing carga .env.testing primero, luego .env como fallback
+	// APP_ENV=testing carga .env.testing primero (override), luego .env como fallback
 	if os.Getenv("APP_ENV") == "testing" {
 		godotenv.Load(".env.testing", ".env")
 	} else {
@@ -147,8 +148,9 @@ func Load() *Config {
 		BirdAPIURL:        os.Getenv("BIRD_API_URL"),
 		BirdAPIKeyWA:      os.Getenv("BIRD_API_KEY_WA"),
 		BirdAccessKeyID:   os.Getenv("BIRD_ACCESS_KEY_ID"),
-		BirdWebhookSecret:         os.Getenv("BIRD_WEBHOOK_SECRET"),
-		BirdWebhookSecretOutbound: os.Getenv("BIRD_WEBHOOK_SECRET_OUTBOUND"),
+		BirdWebhookSecret:              os.Getenv("BIRD_WEBHOOK_SECRET"),
+		BirdWebhookSecretOutbound:      os.Getenv("BIRD_WEBHOOK_SECRET_OUTBOUND"),
+		BirdWebhookSecretConversations: os.Getenv("BIRD_WEBHOOK_SECRET_CONVERSATIONS"),
 		BirdWorkspaceID:   os.Getenv("BIRD_WORKSPACE_ID"),
 		BirdChannelID:     os.Getenv("BIRD_CHANNEL_ID"),
 		BirdTeamGrupoA:    os.Getenv("BIRD_TEAM_GRUPO_A"),

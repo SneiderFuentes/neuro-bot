@@ -130,8 +130,16 @@ func TestSendTemplate_PayloadCorrect(t *testing.T) {
 		t.Errorf("expected msg-tmpl, got %s", msgID)
 	}
 
-	if received["template"] == nil {
-		t.Error("expected template field in payload")
+	tmplField, ok := received["template"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected template field in payload")
+	}
+	params, ok := tmplField["parameters"].(map[string]interface{})
+	if !ok {
+		t.Error("expected parameters to be a map")
+	}
+	if params["name"] != "Juan" {
+		t.Errorf("expected parameters.name=Juan, got %v", params["name"])
 	}
 }
 

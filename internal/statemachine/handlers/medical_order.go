@@ -18,7 +18,7 @@ func RegisterMedicalOrderHandlers(m *sm.Machine, ocrSvc *services.OCRService, pr
 	m.Register(sm.StateAskMedicalOrder, askMedicalOrderHandler())
 	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
 	m.Register(sm.StateValidateOCR, validateOCRHandler(procedureRepo))
-	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(ocrSvc))
+	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(procedureRepo))
 	m.Register(sm.StateOCRFailed, ocrFailedHandler())
 	m.Register(sm.StateAskManualCups, askManualCupsHandler(procedureRepo))
 	m.Register(sm.StateSelectProcedure, selectProcedureHandler())
@@ -164,10 +164,17 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 }
 
 // CONFIRM_OCR_RESULT (interactivo) — usuario confirma o corrige
-func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
+func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "ocr_correct", "ocr_incorrect")
 		if result != nil {
+			result.Messages = append(result.Messages, &sm.ButtonMessage{
+				Text: "¿Es correcto?",
+				Buttons: []sm.Button{
+					{Text: "Sí, correcto", Payload: "ocr_correct"},
+					{Text: "No, corregir", Payload: "ocr_incorrect"},
+				},
+			})
 			return result, nil
 		}
 
@@ -180,23 +187,11 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 					WithEvent("ocr_parse_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 
-			// Preservar is_sedated e is_contrasted del OCR antes de GroupByService (la IA no los devuelve)
-			sedatedByCode := make(map[string]bool)
-			contrastedByCode := make(map[string]bool)
-			for _, c := range cups {
-				if c.IsSedated {
-					sedatedByCode[c.Code] = true
-				}
-				if c.IsContrasted {
-					contrastedByCode[c.Code] = true
-				}
-			}
-
-			// Agrupar por servicio usando IA con reglas institucionales
-			// TODO: Cuando DB tenga servicio/espacios_requeridos, migrar a GroupByServiceFromDB
-			groups, err := ocrSvc.GroupByService(ctx, cups)
+			// Agrupar por servicio usando reglas institucionales desde BD
+			// (Fisiatría EMG/NC + Resonancia magnética con reglas de espacios y combinaciones)
+			groups, err := services.GroupByServiceFromDB(ctx, cups, procedureRepo)
 			if err != nil || len(groups) == 0 {
-				// Si falla agrupación, cada CUPS es un grupo individual
+				// Fallback: cada CUPS es un grupo individual
 				groups = make([]services.CUPSGroup, len(cups))
 				for i, c := range cups {
 					groups[i] = services.CUPSGroup{
@@ -207,27 +202,19 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				}
 			}
 
-			// Restaurar is_sedated e is_contrasted en los grupos (la IA no los propaga)
-			for i := range groups {
-				for j := range groups[i].Cups {
-					if sedatedByCode[groups[i].Cups[j].Code] {
-						groups[i].Cups[j].IsSedated = true
-					}
-					if contrastedByCode[groups[i].Cups[j].Code] {
-						groups[i].Cups[j].IsContrasted = true
-					}
-				}
-			}
-
 			// Separar grupos con múltiples CUPS en grupos individuales.
-			// Cada CUPS necesita su propia cita (slot, doctor, agenda).
-			// Excepción: Fisiatría agrupa EMG+NC en la misma cita.
+			// Excepciones (se mantienen juntos en una sola cita):
+			//   - Fisiatría: EMG + NC van en la misma agenda
+			//   - Resonancia: combinaciones (ej. abdomen+pelvis) van en la misma cita
 			var splitGroups []services.CUPSGroup
 			for _, g := range groups {
-				if strings.EqualFold(g.ServiceType, "Fisiatria") || strings.EqualFold(g.ServiceType, "Fisiatría") || len(g.Cups) <= 1 {
+				isFisiatria := strings.EqualFold(g.ServiceType, "Fisiatria") || strings.EqualFold(g.ServiceType, "Fisiatría")
+				isResonancia := strings.EqualFold(g.ServiceType, "Resonancia")
+				if isFisiatria || isResonancia || len(g.Cups) <= 1 {
 					splitGroups = append(splitGroups, g)
 					continue
 				}
+				// Grupos de otros servicios con múltiples CUPS → una cita por CUPS
 				for _, c := range g.Cups {
 					espacios := c.Quantity
 					if espacios < 1 {
@@ -247,8 +234,7 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 			r := sm.NewResult(sm.StateCheckSpecialCups).
 				WithContext("procedures_json", string(groupsJSON)).
 				WithContext("total_procedures", fmt.Sprintf("%d", len(groups))).
-				WithContext("current_procedure_idx", "0").
-				WithClearCtx("ocr_cups_json")
+				WithContext("current_procedure_idx", "0")
 
 			if len(groups) > 1 {
 				summaryText := fmt.Sprintf("Tu orden tiene *%d grupo(s) de procedimientos*:\n\n", len(groups))
@@ -265,8 +251,25 @@ func confirmOCRResultHandler(ocrSvc *services.OCRService) sm.StateHandler {
 
 			// Cargar primer grupo como CUPS actual
 			firstGroup := groups[0]
-			r.WithContext("cups_code", firstGroup.Cups[0].Code).
-				WithContext("cups_name", firstGroup.Cups[0].Name).
+			
+			// Para grupos con múltiples CUPS (Fisiatría, Resonancia), guardar códigos alternativos
+			// para que la búsqueda de slots pueda probar con cualquiera del grupo.
+			cupsForSearch := firstGroup.Cups[0]
+			if len(firstGroup.Cups) > 1 {
+				alternativeCodes := make([]string, 0, len(firstGroup.Cups)-1)
+				for i, c := range firstGroup.Cups {
+					if i == 0 {
+						continue // El primero ya está en cups_code
+					}
+					alternativeCodes = append(alternativeCodes, c.Code)
+				}
+				if len(alternativeCodes) > 0 {
+					r.WithContext("alternative_cups_codes", strings.Join(alternativeCodes, ","))
+				}
+			}
+			
+			r.WithContext("cups_code", cupsForSearch.Code).
+				WithContext("cups_name", cupsForSearch.Name).
 				WithContext("espacios", fmt.Sprintf("%d", firstGroup.Espacios))
 
 			// Propagar is_sedated y is_contrasted del primer grupo si algún CUPS lo tiene
@@ -344,12 +347,22 @@ func askManualCupsHandler(procedureRepo repository.ProcedureRepository) sm.State
 				espacios = 1
 			}
 
+			// Construir procedures_json para evitar contexto stale de sesiones previas
+			singleGroup := services.CUPSGroup{
+				ServiceType: "General",
+				Cups:        []services.CUPSEntry{{Code: proc.Code, Name: proc.Name, Quantity: 1}},
+				Espacios:    espacios,
+			}
+			groupsJSON, _ := json.Marshal([]services.CUPSGroup{singleGroup})
+
 			return sm.NewResult(sm.StateCheckSpecialCups).
 				WithContext("cups_code", proc.Code).
 				WithContext("cups_name", proc.Name).
 				WithContext("espacios", fmt.Sprintf("%d", espacios)).
 				WithContext("total_procedures", "1").
 				WithContext("current_procedure_idx", "0").
+				WithContext("procedures_json", string(groupsJSON)).
+				WithClearCtx("ocr_cups_json").
 				WithText(fmt.Sprintf("Procedimiento seleccionado: *%s* (CUPS: %s)", proc.Name, proc.Code)).
 				WithEvent("manual_cups_selected", map[string]interface{}{
 					"code": proc.Code,
@@ -441,13 +454,22 @@ func selectProcedureHandler() sm.StateHandler {
 			espacios = 1
 		}
 
+		// Construir procedures_json para evitar contexto stale de sesiones previas
+		singleGroup := services.CUPSGroup{
+			ServiceType: "General",
+			Cups:        []services.CUPSEntry{{Code: selected.Code, Name: selected.Name, Quantity: 1}},
+			Espacios:    espacios,
+		}
+		groupsJSON, _ := json.Marshal([]services.CUPSGroup{singleGroup})
+
 		return sm.NewResult(sm.StateCheckSpecialCups).
 			WithContext("cups_code", selected.Code).
 			WithContext("cups_name", selected.Name).
 			WithContext("espacios", fmt.Sprintf("%d", espacios)).
 			WithContext("total_procedures", "1").
 			WithContext("current_procedure_idx", "0").
-			WithClearCtx("search_procedures_json").
+			WithContext("procedures_json", string(groupsJSON)).
+			WithClearCtx("search_procedures_json", "ocr_cups_json").
 			WithText(fmt.Sprintf("Procedimiento seleccionado: *%s* (CUPS: %s)", selected.Name, selected.Code)).
 			WithEvent("manual_cups_selected", map[string]interface{}{
 				"code": selected.Code,

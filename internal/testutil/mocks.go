@@ -58,6 +58,7 @@ type MockAppointmentRepo struct {
 	FindUpcomingByPatientFn func(ctx context.Context, patientID string) ([]domain.Appointment, error)
 	FindByAgendaAndDateFn   func(ctx context.Context, agendaID int, date string) ([]domain.Appointment, error)
 	CreateFn                func(ctx context.Context, input domain.CreateAppointmentInput) (*domain.Appointment, error)
+	CreatePxCitaFn          func(ctx context.Context, input domain.CreatePxCitaInput) error
 	ConfirmFn               func(ctx context.Context, id string, channel, channelID string) error
 	CancelFn                func(ctx context.Context, id string, reason, channel, channelID string) error
 	ConfirmBatchFn          func(ctx context.Context, ids []string, channel, channelID string) error
@@ -92,6 +93,12 @@ func (m *MockAppointmentRepo) Create(ctx context.Context, input domain.CreateApp
 		return m.CreateFn(ctx, input)
 	}
 	return &domain.Appointment{ID: "apt-new"}, nil
+}
+func (m *MockAppointmentRepo) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
+	if m.CreatePxCitaFn != nil {
+		return m.CreatePxCitaFn(ctx, input)
+	}
+	return nil
 }
 func (m *MockAppointmentRepo) Confirm(ctx context.Context, id string, channel, channelID string) error {
 	if m.ConfirmFn != nil {
