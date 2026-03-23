@@ -246,9 +246,15 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 	// --- Entity Management ---
 	case sm.StateAskClientType:
 		situation = fmt.Sprintf("El paciente no pudo seleccionar su tipo de entidad (EPS, PARTICULAR, etc.).\nPaciente: %s | Doc: %s", patientName, patientDoc)
-		actions = "- Preguntale su tipo de entidad:\n" +
-			"  /bot resume ASK_CLIENT_TYPE — Mostrar tipos de entidad de nuevo\n" +
-			"  /bot resume MAIN_MENU — Volver al menu principal"
+		actions = "- Preguntale su tipo de entidad y selecciona por el:\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_1 — PARTICULAR\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_2 — EPS\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_3 — PREPAGADA\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_4 — REGIMEN ESPECIAL\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_5 — SOAT\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_6 — ARL\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_7 — POLIZA\n" +
+			"  /bot resume ASK_CLIENT_TYPE — Mostrar opciones al paciente de nuevo"
 
 	case sm.StateAskEntityNumber:
 		clientType := sess.GetContext("client_type")
