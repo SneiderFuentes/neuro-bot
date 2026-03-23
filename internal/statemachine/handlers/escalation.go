@@ -229,9 +229,12 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume MAIN_MENU — Mostrar menu de nuevo"
 
 	case sm.StateOutOfHoursMenu:
-		situation = "El paciente intento usar el bot fuera de horario."
-		actions = "- Informale el horario de atencion:\n" +
-			"  /bot resume OUT_OF_HOURS_MENU — Mostrar opciones fuera de horario\n" +
+		situation = "El paciente intento usar el bot fuera de horario y no selecciono una opcion del menu."
+		actions = "- Atiendelo o selecciona por el:\n" +
+			"  /bot resume OUT_OF_HOURS_MENU ooh_resultados — Consultar resultados\n" +
+			"  /bot resume OUT_OF_HOURS_MENU ooh_ubicacion — Ver ubicaciones\n" +
+			"  /bot resume OUT_OF_HOURS_MENU ooh_ayuda — Ver ayuda\n" +
+			"  /bot resume OUT_OF_HOURS_MENU — Mostrar menu fuera de horario de nuevo\n" +
 			"  /bot cerrar"
 
 	// --- Identificacion ---
@@ -249,6 +252,13 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume CONFIRM_IDENTITY — Mostrar confirmacion de nuevo"
 
 	// --- Entity Management ---
+	case sm.StateAskSanitasPlan:
+		situation = fmt.Sprintf("El paciente no selecciono su plan de Sanitas (Premium o regular).\nPaciente: %s | Doc: %s", patientName, patientDoc)
+		actions = "- Preguntale si tiene Sanitas Premium o Sanitas regular:\n" +
+			"  /bot resume ASK_SANITAS_PLAN sanitas_premium — Sanitas Premium (SAN01, sin limite MRC)\n" +
+			"  /bot resume ASK_SANITAS_PLAN sanitas_regular — Sanitas (SAN02, con limite MRC)\n" +
+			"  /bot resume ASK_SANITAS_PLAN — Mostrar opciones de nuevo"
+
 	case sm.StateAskClientType:
 		situation = fmt.Sprintf("El paciente no pudo seleccionar su tipo de entidad (EPS, PARTICULAR, etc.).\nPaciente: %s | Doc: %s", patientName, patientDoc)
 		actions = "- Preguntale su tipo de entidad y selecciona por el:\n" +
@@ -311,9 +321,10 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 	case sm.StateConfirmRegistration:
 		situation = fmt.Sprintf("El paciente no confirmo sus datos de registro.\nPaciente: %s | Doc: %s",
 			sess.GetContext("reg_first_name")+" "+sess.GetContext("reg_first_surname"), patientDoc)
-		actions = "- Verificale los datos y luego:\n" +
-			"  /bot resume CONFIRM_REGISTRATION — Mostrar resumen de nuevo\n" +
-			"  /bot resume REG_DOCUMENT_TYPE — Corregir desde el inicio"
+		actions = "- Verificale los datos con el paciente y responde por el:\n" +
+			"  /bot resume CONFIRM_REGISTRATION reg_confirm — Confirmar y crear paciente\n" +
+			"  /bot resume CONFIRM_REGISTRATION reg_correct — Corregir algun dato\n" +
+			"  /bot resume CONFIRM_REGISTRATION — Mostrar resumen de nuevo"
 
 	// --- Orden Medica ---
 	case sm.StateAskMedicalOrder:
@@ -336,7 +347,9 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 		ocrCups := sess.GetContext("ocr_cups_json")
 		situation = fmt.Sprintf("El paciente no confirmo el resultado del reconocimiento de la orden.\nCUPS detectados: %s\nPaciente: %s | Doc: %s",
 			ocrCups, patientName, patientDoc)
-		actions = "- Verificale los procedimientos detectados:\n" +
+		actions = "- Verificale los procedimientos detectados con el paciente y responde por el:\n" +
+			"  /bot resume CONFIRM_OCR_RESULT ocr_correct — Los procedimientos son correctos\n" +
+			"  /bot resume CONFIRM_OCR_RESULT ocr_incorrect — Los procedimientos son incorrectos\n" +
 			"  /bot resume CONFIRM_OCR_RESULT — Mostrar resultado de nuevo\n" +
 			"- Si puedes ver la orden o el paciente te la describe:\n" +
 			"  /bot orden <descripcion de procedimientos con codigos y cantidades>"
@@ -442,7 +455,9 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 	// --- Slots y Reserva ---
 	case sm.StateShowSlots:
 		situation = fmt.Sprintf("El paciente no logro seleccionar un horario para su cita.\nProcedimiento: %s (%s)", cupsName, cupsCode)
-		actions = "- Preguntale que horario prefiere:\n" +
+		actions = "- Preguntale que horario prefiere y selecciona por el (usa el numero del horario):\n" +
+			"  /bot resume SHOW_SLOTS 1 — Seleccionar horario #1 de la lista\n" +
+			"  /bot resume SHOW_SLOTS 3 — Seleccionar horario #3 de la lista\n" +
 			"  /bot resume SHOW_SLOTS — Mostrar horarios de nuevo\n" +
 			"  /bot resume SEARCH_SLOTS — Buscar nuevos horarios"
 
@@ -457,8 +472,10 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 	case sm.StateConfirmBooking:
 		situation = fmt.Sprintf("El paciente no confirmo la reserva del horario seleccionado.\nProcedimiento: %s\nPaciente: %s",
 			cupsName, patientName)
-		actions = "- Preguntale si confirma:\n" +
-			"  /bot resume CONFIRM_BOOKING booking_confirm — Confirmar\n" +
+		actions = "- Preguntale si confirma el horario y responde por el:\n" +
+			"  /bot resume CONFIRM_BOOKING booking_confirm — Confirmar reserva\n" +
+			"  /bot resume CONFIRM_BOOKING booking_change — Cambiar horario\n" +
+			"  /bot resume CONFIRM_BOOKING — Mostrar confirmacion de nuevo\n" +
 			"  /bot resume SEARCH_SLOTS — Buscar otros horarios"
 
 	// --- Citas Existentes ---
@@ -471,20 +488,28 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 	case sm.StateAppointmentAction:
 		situation = fmt.Sprintf("El paciente no selecciono accion sobre su cita.\nPaciente: %s | Cita: %s",
 			patientName, sess.GetContext("selected_appointment_id"))
-		actions = "- Preguntale que quiere hacer con la cita:\n" +
+		actions = "- Preguntale que quiere hacer con la cita y selecciona por el:\n" +
 			"  /bot resume APPOINTMENT_ACTION appt_confirm — Confirmar cita\n" +
 			"  /bot resume APPOINTMENT_ACTION appt_cancel — Cancelar cita\n" +
-			"  /bot resume LIST_APPOINTMENTS — Volver a lista de citas"
+			"  /bot resume APPOINTMENT_ACTION appt_reschedule — Reagendar cita\n" +
+			"  /bot resume APPOINTMENT_ACTION appt_preparation — Ver preparacion\n" +
+			"  /bot resume APPOINTMENT_ACTION appt_back — Volver a lista de citas\n" +
+			"  /bot resume APPOINTMENT_ACTION appt_menu — Ir al menu principal\n" +
+			"  /bot resume LIST_APPOINTMENTS — Mostrar lista de citas de nuevo"
 
 	case sm.StateConfirmAppointment:
 		situation = fmt.Sprintf("El paciente no confirmo la accion de confirmar cita.\nPaciente: %s", patientName)
-		actions = "- Preguntale si confirma:\n" +
+		actions = "- Preguntale si confirma la cita y responde por el:\n" +
+			"  /bot resume CONFIRM_APPOINTMENT confirm_yes — Si, confirmar cita\n" +
+			"  /bot resume CONFIRM_APPOINTMENT confirm_no — No, cancelar accion\n" +
 			"  /bot resume CONFIRM_APPOINTMENT — Mostrar confirmacion de nuevo\n" +
 			"  /bot resume LIST_APPOINTMENTS — Volver a lista"
 
 	case sm.StateCancelAppointment:
 		situation = fmt.Sprintf("El paciente no confirmo la cancelacion de su cita.\nPaciente: %s", patientName)
-		actions = "- Preguntale si desea cancelar:\n" +
+		actions = "- Preguntale si desea cancelar y responde por el:\n" +
+			"  /bot resume CANCEL_APPOINTMENT cancel_yes — Si, cancelar cita\n" +
+			"  /bot resume CANCEL_APPOINTMENT cancel_no — No, mantener cita\n" +
 			"  /bot resume CANCEL_APPOINTMENT — Mostrar confirmacion de nuevo\n" +
 			"  /bot resume LIST_APPOINTMENTS — Volver a lista"
 
@@ -507,9 +532,12 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			}
 			situation += "\n" + strings.Join(details, " | ")
 		}
-		actions = "- Atiende al paciente y luego:\n" +
-			"  /bot cerrar — Cerrar conversacion\n" +
-			"  /bot resume POST_ACTION_MENU — Devolver al menu de acciones"
+		actions = "- Atiende al paciente. Cuando termines puedes:\n" +
+			"  /bot resume POST_ACTION_MENU ver_citas — Devolver a consulta de citas\n" +
+			"  /bot resume POST_ACTION_MENU menu_principal — Devolver al menu principal\n" +
+			"  /bot resume POST_ACTION_MENU terminar_chat — Finalizar conversacion\n" +
+			"  /bot resume POST_ACTION_MENU — Mostrar menu de acciones de nuevo\n" +
+			"  /bot cerrar — Cerrar conversacion"
 
 	case sm.StateFallbackMenu:
 		situation = "El paciente llego al menu de recuperacion (reintentos agotados o error)."
