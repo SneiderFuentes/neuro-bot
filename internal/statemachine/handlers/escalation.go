@@ -220,9 +220,13 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 	// --- Menu Principal ---
 	case sm.StateMainMenu:
 		situation = "El paciente no pudo seleccionar una opcion del menu principal."
-		actions = "- Preguntale que necesita y usa el comando correspondiente:\n" +
-			"  /bot resume MAIN_MENU — Mostrar menu de nuevo\n" +
-			"  /bot resume ASK_DOCUMENT — Si quiere agendar o consultar citas"
+		actions = "- Preguntale que necesita y selecciona por el:\n" +
+			"  /bot resume MAIN_MENU agendar — Agendar cita\n" +
+			"  /bot resume MAIN_MENU consultar — Consultar/cancelar citas\n" +
+			"  /bot resume MAIN_MENU resultados — Ver resultados\n" +
+			"  /bot resume MAIN_MENU ubicacion — Ver ubicaciones\n" +
+			"  /bot resume MAIN_MENU ayuda — Ayuda\n" +
+			"  /bot resume MAIN_MENU — Mostrar menu de nuevo"
 
 	case sm.StateOutOfHoursMenu:
 		situation = "El paciente intento usar el bot fuera de horario."
