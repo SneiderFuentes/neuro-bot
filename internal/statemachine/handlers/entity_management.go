@@ -118,15 +118,40 @@ func showEntityListHandler(entityRepo repository.EntityRepository) sm.StateHandl
 				WithEvent("no_entities_found", map[string]interface{}{"category": category}), nil
 		}
 
-		// Build numbered list text (matching Laravel's GetActiveEntitiesController format)
+		// Si tanto SAN01 como SAN02 están en la lista, eliminar SAN01 del display.
+		// El submenú de Sanitas (ASK_SANITAS_PLAN) ya distingue entre Premium y regular.
+		// De esta forma el paciente solo ve una entrada "SANITAS" en la lista numerada.
+		hasSAN01, hasSAN02 := false, false
+		for _, e := range entities {
+			if e.Code == "SAN01" {
+				hasSAN01 = true
+			}
+			if e.Code == "SAN02" {
+				hasSAN02 = true
+			}
+		}
+		if hasSAN01 && hasSAN02 {
+			filtered := entities[:0]
+			for _, e := range entities {
+				if e.Code != "SAN01" {
+					filtered = append(filtered, e)
+				}
+			}
+			entities = filtered
+		}
+
+		// Build numbered list and store ordered codes so ASK_ENTITY_NUMBER can resolve
+		// by display index (independent of DB ordering after the filter above).
+		codes := make([]string, len(entities))
 		var sb strings.Builder
 		for i, e := range entities {
-			name := e.DisplayName()
-			sb.WriteString(fmt.Sprintf("%d - %s\n", i+1, name))
+			codes[i] = e.Code
+			sb.WriteString(fmt.Sprintf("%d - %s\n", i+1, e.DisplayName()))
 		}
 
 		return sm.NewResult(sm.StateAskEntityNumber).
 			WithContext("entity_list_count", fmt.Sprintf("%d", len(entities))).
+			WithContext("entity_list_codes", strings.Join(codes, ",")).
 			WithText(fmt.Sprintf("Escribe el *número* de tu entidad de la siguiente lista:\n\n%s", sb.String())).
 			WithEvent("entity_list_shown", map[string]interface{}{"count": len(entities), "category": category}), nil
 	}
@@ -153,10 +178,24 @@ func askEntityNumberHandler(entityRepo repository.EntityRepository) sm.StateHand
 
 		category := sess.GetContext("entity_category")
 
-		// Resolve entity code by index within category
+		// Resolve entity code by display index.
+		// Prefer the ordered list stored in session (set by showEntityListHandler after filtering),
+		// which ensures indices match exactly what the patient saw on screen.
+		// Fall back to DB lookup if session list is absent.
 		var entityCode string
 		var entityName string
-		if entityRepo != nil && category != "" {
+		if stored := sess.GetContext("entity_list_codes"); stored != "" {
+			parts := strings.Split(stored, ",")
+			if index >= 1 && index <= len(parts) {
+				entityCode = parts[index-1]
+				if entityRepo != nil {
+					entity, _ := entityRepo.FindByCode(ctx, entityCode)
+					if entity != nil {
+						entityName = entity.DisplayName()
+					}
+				}
+			}
+		} else if entityRepo != nil && category != "" {
 			code, codeErr := entityRepo.GetCodeByIndexAndCategory(ctx, index, category)
 			if codeErr == nil {
 				entityCode = code
