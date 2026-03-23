@@ -97,6 +97,9 @@ func outOfHoursMenuHandler(cfg *config.Config, locationRepo LocationReader) sm.S
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "ooh_resultados", "ooh_ubicacion", "ooh_ayuda")
 		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
 			// Clear default error text — combine into list body (1 message)
 			result.Messages = nil
 			result.Messages = append(result.Messages, &sm.ListMessage{

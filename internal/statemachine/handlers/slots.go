@@ -487,6 +487,9 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "wl_yes", "wl_no")
 		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
 			cupsName := sess.GetContext("cups_name")
 			result.Messages = append(result.Messages, &sm.ButtonMessage{
 				Text: fmt.Sprintf("No hay horarios disponibles para *%s*.\n\n¿Deseas que te avisemos cuando haya disponibilidad?", cupsName),

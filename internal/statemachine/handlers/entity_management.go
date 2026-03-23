@@ -42,6 +42,9 @@ func askClientTypeHandler() sm.StateHandler {
 
 		result, selected := sm.ValidateButtonResponse(sess, msg, validPayloads...)
 		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
 			result.Messages = append(result.Messages, buildEntityTypeList())
 			return result, nil
 		}
@@ -196,6 +199,9 @@ func askSanitasPlanHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "sanitas_premium", "sanitas_regular")
 		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
 			result.Messages = append(result.Messages, &sm.ButtonMessage{
 				Text: "Selecciona tu plan de Sanitas:",
 				Buttons: []sm.Button{
@@ -277,6 +283,9 @@ func confirmEntityHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "entity_ok", "entity_change")
 		if result != nil {
+			if result.NextState == sm.StateEscalateToAgent {
+				return result, nil
+			}
 			entityName := sess.GetContext("entity_name")
 			if entityName == "" {
 				entityName = sess.GetContext("patient_entity")
