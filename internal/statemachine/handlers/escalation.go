@@ -173,7 +173,8 @@ func buildAgentSummary(sess *session.Session, cupsCode, teamName string) string 
 
 // regFieldLabels maps registration states to human-readable field descriptions for agent commands.
 var regFieldLabels = map[string]string{
-	sm.StateRegDocumentType:    "tipo de documento (CC, TI, CE, PA, RC, MS, AS)",
+	sm.StateRegDocumentType:       "tipo de documento (CC, TI, CE, PA, RC, MS, AS)",
+	sm.StateRegDocumentIssuePlace: "ciudad donde se expidio el documento (ej: Bogota)",
 	sm.StateRegFirstSurname:    "primer apellido",
 	sm.StateRegSecondSurname:   "segundo apellido (o NA si no tiene)",
 	sm.StateRegFirstName:       "primer nombre",
@@ -251,6 +252,28 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume CONFIRM_IDENTITY identity_no — Rechazar identidad\n" +
 			"  /bot resume CONFIRM_IDENTITY — Mostrar confirmacion de nuevo"
 
+	case sm.StateConfirmContactInfo:
+		phone := sess.GetContext("patient_phone")
+		email := sess.GetContext("patient_email")
+		situation = fmt.Sprintf("El paciente no confirmo si sus datos de contacto son correctos.\nPaciente: %s | Doc: %s\nTelefono: %s | Email: %s",
+			patientName, patientDoc, phone, email)
+		actions = "- Verificale los datos y responde por el:\n" +
+			"  /bot resume CONFIRM_CONTACT_INFO contact_ok — Los datos son correctos\n" +
+			"  /bot resume CONFIRM_CONTACT_INFO contact_update — Actualizar datos de contacto\n" +
+			"  /bot resume CONFIRM_CONTACT_INFO — Mostrar datos de nuevo"
+
+	case sm.StateAskUpdatePhone:
+		situation = fmt.Sprintf("El paciente no logro actualizar su numero de telefono.\nPaciente: %s | Doc: %s", patientName, patientDoc)
+		actions = "- Preguntale su telefono y envialo por el:\n" +
+			"  /bot resume ASK_UPDATE_PHONE 3001234567 — Enviar telefono\n" +
+			"  (reemplaza con el telefono real del paciente)"
+
+	case sm.StateAskUpdateEmail:
+		situation = fmt.Sprintf("El paciente no logro actualizar su correo electronico.\nPaciente: %s | Doc: %s", patientName, patientDoc)
+		actions = "- Preguntale su email y envialo por el:\n" +
+			"  /bot resume ASK_UPDATE_EMAIL correo@ejemplo.com — Enviar email\n" +
+			"  /bot resume ASK_UPDATE_EMAIL NA — Si no tiene email"
+
 	// --- Entity Management ---
 	case sm.StateAskSanitasPlan:
 		situation = fmt.Sprintf("El paciente no selecciono su plan de Sanitas (Premium o regular).\nPaciente: %s | Doc: %s", patientName, patientDoc)
@@ -325,6 +348,22 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume CONFIRM_REGISTRATION reg_confirm — Confirmar y crear paciente\n" +
 			"  /bot resume CONFIRM_REGISTRATION reg_correct — Corregir algun dato\n" +
 			"  /bot resume CONFIRM_REGISTRATION — Mostrar resumen de nuevo"
+
+	case sm.StateRegSelectCorrection:
+		situation = fmt.Sprintf("El paciente no selecciono que dato desea corregir.\nPaciente: %s | Doc: %s",
+			sess.GetContext("reg_first_name")+" "+sess.GetContext("reg_first_surname"), patientDoc)
+		actions = "- Preguntale que dato quiere corregir y selecciona por el:\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_first_name — Primer nombre\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_first_surname — Primer apellido\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_birth_date — Fecha de nacimiento\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_address — Direccion\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_phone — Telefono\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_email — Email\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_document_type — Tipo de documento\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_marital_status — Estado civil\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_user_type — Tipo de usuario\n" +
+			"  /bot resume REG_SELECT_CORRECTION corr_restart — Empezar registro de nuevo\n" +
+			"  /bot resume REG_SELECT_CORRECTION — Mostrar lista de campos de nuevo"
 
 	// --- Orden Medica ---
 	case sm.StateAskMedicalOrder:
@@ -477,6 +516,14 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume CONFIRM_BOOKING booking_change — Cambiar horario\n" +
 			"  /bot resume CONFIRM_BOOKING — Mostrar confirmacion de nuevo\n" +
 			"  /bot resume SEARCH_SLOTS — Buscar otros horarios"
+
+	case sm.StateReconfirmBooking:
+		situation = fmt.Sprintf("El paciente no reconfirmo la reserva (segunda confirmacion).\nProcedimiento: %s\nPaciente: %s",
+			cupsName, patientName)
+		actions = "- Preguntale si confirma definitivamente y responde por el:\n" +
+			"  /bot resume RECONFIRM_BOOKING reconfirm_yes — Si, confirmar definitivamente\n" +
+			"  /bot resume RECONFIRM_BOOKING reconfirm_no — No, volver a horarios\n" +
+			"  /bot resume RECONFIRM_BOOKING — Mostrar confirmacion de nuevo"
 
 	// --- Citas Existentes ---
 	case sm.StateNoAppointments:
