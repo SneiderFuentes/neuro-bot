@@ -39,6 +39,7 @@ type Config struct {
 	BirdWebhookSecret              string
 	BirdWebhookSecretOutbound      string // Separate signing key for outbound webhook (optional)
 	BirdWebhookSecretConversations string // Signing key for conversations API webhook (optional, skips validation if empty)
+	BirdWebhookSecretVoice         string // Signing key for voice webhook (optional, falls back to BirdWebhookSecret)
 	BirdWorkspaceID   string
 	BirdChannelID     string
 	BirdTeamGrupoA    string // Ecografías, RX, Resonancia, TAC
@@ -64,8 +65,11 @@ type Config struct {
 	BirdChannelIDTemplates string
 
 	// Bird Voice
-	BirdAPIKeyVoice string
-	BirdVoiceFlowID string
+	BirdAPIKeyVoice    string // AccessKey para el canal de voz (puede diferir del WA key)
+	BirdVoiceChannelID string // UUID del canal de voz Bird
+	BirdVoiceNumber    string // número "from" para llamadas salientes
+	BirdVoiceFlowID    string // UUID del Bird Flow IVR (tiene paso webhook para DTMF result)
+	ServerPublicURL    string // URL pública del servidor (para webhooks Bird)
 
 	// OpenAI
 	OpenAIAPIKey string
@@ -151,6 +155,7 @@ func Load() *Config {
 		BirdWebhookSecret:              os.Getenv("BIRD_WEBHOOK_SECRET"),
 		BirdWebhookSecretOutbound:      os.Getenv("BIRD_WEBHOOK_SECRET_OUTBOUND"),
 		BirdWebhookSecretConversations: os.Getenv("BIRD_WEBHOOK_SECRET_CONVERSATIONS"),
+		BirdWebhookSecretVoice:         os.Getenv("BIRD_WEBHOOK_SECRET_VOICE"),
 		BirdWorkspaceID:   os.Getenv("BIRD_WORKSPACE_ID"),
 		BirdChannelID:     os.Getenv("BIRD_CHANNEL_ID"),
 		BirdTeamGrupoA:    os.Getenv("BIRD_TEAM_GRUPO_A"),
@@ -177,7 +182,11 @@ func Load() *Config {
 
 		// Bird Voice
 		BirdAPIKeyVoice: os.Getenv("BIRD_API_KEY_VOICE"),
-		BirdVoiceFlowID: os.Getenv("BIRD_VOICE_FLOW_ID"),
+		BirdVoiceChannelID: os.Getenv("BIRD_VOICE_CHANNEL_ID"),
+		BirdVoiceNumber:    os.Getenv("BIRD_VOICE_NUMBER"),
+		BirdVoiceFlowID:    os.Getenv("BIRD_VOICE_FLOW_ID"),
+		ServerPublicURL:    os.Getenv("SERVER_PUBLIC_URL"),
+
 
 		// OpenAI
 		OpenAIAPIKey: os.Getenv("OPENAI_API_KEY"),

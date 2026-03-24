@@ -190,8 +190,10 @@ func main() {
 
 	// Fase 22: Notification persistence + preparations + tracking
 	notifRepo := localrepo.NewNotificationRepo(localDB)
+	callRepo := localrepo.NewCallRepo(localDB)
 	if notifyManager != nil {
 		notifyManager.SetPersister(notifRepo)
+		notifyManager.SetCallTracker(callRepo)
 		notifyManager.SetTracker(tracker)
 		if repos != nil {
 			notifyManager.SetProcedureRepo(repos.Procedure)
@@ -221,6 +223,9 @@ func main() {
 	workerPool.SetTracker(tracker)
 	workerPool.SetOCRService(ocrSvc)
 	workerPool.SetInboxRepo(inboxRepo)
+	if notifyManager != nil {
+		workerPool.SetNotifyResponder(notifyManager)
+	}
 	workerPool.Start(ctx)
 
 	// WAL replay: re-process messages that weren't completed before last shutdown/crash
@@ -263,6 +268,7 @@ func main() {
 			NotifyManager:   notifyManager,
 			WaitingListRepo: waitingListRepo,
 			SlotService:     slotSvc,
+			ProcedureRepo:   repos.Procedure,
 			Cfg:             cfg,
 			Tracker:         tracker,
 			InboxRepo:       inboxRepo,
@@ -296,6 +302,8 @@ func main() {
 	mux.HandleFunc("POST /api/webhooks/whatsapp", webhookHandler.HandleWhatsApp)
 	mux.HandleFunc("POST /api/webhooks/whatsapp/outbound", webhookHandler.HandleWhatsAppOutbound)
 	mux.HandleFunc("POST /api/webhooks/conversations", webhookHandler.HandleConversation)
+	mux.HandleFunc("POST /api/webhooks/voice", webhookHandler.HandleVoiceWebhook)
+	mux.HandleFunc("POST /api/webhooks/voice/dtmf", webhookHandler.HandleVoiceDTMF)
 
 	if internalHandler != nil {
 		internalMux := http.NewServeMux()
@@ -310,6 +318,7 @@ func main() {
 		internalMux.HandleFunc("GET /api/internal/kpis/health", internalHandler.HandleHealthKPIs)
 		internalMux.HandleFunc("POST /api/internal/test-alert", internalHandler.HandleTestAlert)
 		internalMux.HandleFunc("POST /api/internal/send-reminders", internalHandler.HandleSendReminders)
+		internalMux.HandleFunc("POST /api/internal/test-voice-call", internalHandler.HandleTestVoiceCall)
 		mux.Handle("/api/internal/",
 			api.RateLimiter(30, time.Minute)(
 				api.MaxBodySize(

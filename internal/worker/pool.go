@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,6 +64,14 @@ type OCRAnalyzer interface {
 	AnalyzeText(ctx context.Context, description string) (*services.OCRResult, error)
 }
 
+// NotificationResponder processes responses to proactive notification templates.
+type NotificationResponder interface {
+	HandleResponse(phone, payload, conversationID string)
+	// HandleNotifPendingCommand processes a /bot resume NOTIF_PENDING command from an agent.
+	// Used when the pending notification was already removed from memory (escalated path).
+	HandleNotifPendingCommand(phone, action, convID, appointmentID, notifType string)
+}
+
 // InboxMarker marks messages as processed in the inbox (WAL pattern).
 type InboxMarker interface {
 	MarkDone(ctx context.Context, id string) error
@@ -78,12 +87,13 @@ type MessageWorkerPool struct {
 	ctx            context.Context // stored from Start() for overflow goroutines
 
 	// Dependencias (inyectadas después de creación)
-	sessionManager SessionManagement
-	birdClient     MessageSender
-	machine        MessageProcessor
-	tracker        *tracking.EventTracker
-	ocrService     OCRAnalyzer
-	inboxRepo      InboxMarker // WAL crash recovery (optional)
+	sessionManager  SessionManagement
+	birdClient      MessageSender
+	machine         MessageProcessor
+	tracker         *tracking.EventTracker
+	ocrService      OCRAnalyzer
+	inboxRepo       InboxMarker // WAL crash recovery (optional)
+	notifyResponder NotificationResponder
 }
 
 func NewMessageWorkerPool(workers, queueSize int) *MessageWorkerPool {
@@ -121,6 +131,11 @@ func (p *MessageWorkerPool) SetOCRService(svc OCRAnalyzer) {
 // SetInboxRepo sets the inbox repo for WAL crash recovery.
 func (p *MessageWorkerPool) SetInboxRepo(repo InboxMarker) {
 	p.inboxRepo = repo
+}
+
+// SetNotifyResponder injects the notification responder for NOTIF_PENDING agent commands.
+func (p *MessageWorkerPool) SetNotifyResponder(nr NotificationResponder) {
+	p.notifyResponder = nr
 }
 
 // QueueStats returns the current queue size and capacity.
@@ -314,9 +329,11 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 				)
 			}
 			sess.ConversationID = looked
-		} else if sess.ConversationID != "" {
-			// No active conversation found — clear stale ID so messages
-			// go via Channels API until a new conversation is created.
+		} else if sess.ConversationID != "" && msg.ConversationID == "" {
+			// No active conversation found AND the current message has no conversationID
+			// → truly stale session ID (e.g. after session expired and new chat started).
+			// If the current message brought its own conversationID (set in 3b), trust it —
+			// the lookup may just be racing with Bird's conversation.created webhook.
 			slog.Warn("conversation_id_stale_cleared",
 				"session_id", sess.ID,
 				"phone", msg.Phone,
@@ -451,11 +468,39 @@ func (p *MessageWorkerPool) processAgentCommand(parentCtx context.Context, cmd A
 
 	case "orden":
 		p.handleAgentOrder(parentCtx, sess, cmd)
+
+	case "cups":
+		p.handleAgentCups(parentCtx, sess, cmd)
 	}
 }
 
 // handleAgentResume resumes a session from escalation at a specific state, optionally with corrected data.
 func (p *MessageWorkerPool) handleAgentResume(ctx context.Context, sess *session.Session, cmd AgentCommand) {
+	// Special case: NOTIF_PENDING — agent resolves a confirmation/reschedule/cancel directly.
+	// The pending notification was already removed from memory when escalation happened,
+	// so we must use the session context instead of HandleResponse (which needs in-memory pending).
+	if cmd.State == statemachine.StateNotifPending && cmd.Data != "" && p.notifyResponder != nil {
+		action := strings.TrimSpace(cmd.Data)
+		if action == "confirm" || action == "reschedule" || action == "cancel" {
+			appointmentID := sess.GetContext("notif_appointment_id")
+			notifType := sess.GetContext("notif_type")
+			convID := sess.ConversationID
+			if convID == "" {
+				convID = sess.GetContext("notif_conv_id")
+			}
+			p.sessionManager.Complete(ctx, sess)
+			p.birdClient.UnassignFeedItem(convID, false)
+			p.notifyResponder.HandleNotifPendingCommand(sess.PhoneNumber, action, convID, appointmentID, notifType)
+			slog.Info("agent resolved notif_pending",
+				"phone", cmd.Phone,
+				"action", action,
+				"session_id", sess.ID,
+				"appointment_id", appointmentID,
+			)
+			return
+		}
+	}
+
 	// Determine target state
 	targetState := cmd.State
 	if targetState == "" {
@@ -673,6 +718,88 @@ func (p *MessageWorkerPool) handleAgentOrder(ctx context.Context, sess *session.
 		p.tracker.LogEvent(ctx, sess.ID, cmd.Phone, "agent_orden_processed", map[string]interface{}{
 			"cups_count":  len(result.Cups),
 			"description": cmd.Data,
+		})
+	}
+}
+
+// handleAgentCups injects CUPS codes directly without AI extraction.
+// Syntax: /bot cups <code1>[:qty] <code2>[:qty] ...
+// Example: /bot cups 883141 930810:2
+// VALIDATE_OCR will automatically enrich names from the procedure DB.
+func (p *MessageWorkerPool) handleAgentCups(ctx context.Context, sess *session.Session, cmd AgentCommand) {
+	if cmd.Data == "" {
+		p.birdClient.SendInternalText(sess.ConversationID,
+			"Uso: /bot cups <codigo1>[:cantidad] <codigo2>[:cantidad] ...\n"+
+				"Ej: /bot cups 883141\n"+
+				"Ej: /bot cups 883141:1 930810:2")
+		return
+	}
+
+	// Parse each token: "883141" or "883141:2"
+	tokens := strings.Fields(cmd.Data)
+	var cups []services.CUPSEntry
+	for _, tok := range tokens {
+		parts := strings.SplitN(tok, ":", 2)
+		code := strings.TrimSpace(parts[0])
+		if code == "" {
+			continue
+		}
+		qty := 1
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil && n > 0 {
+				qty = n
+			}
+		}
+		cups = append(cups, services.CUPSEntry{
+			Code:     code,
+			Quantity: qty,
+			// Name is intentionally empty — VALIDATE_OCR enriches from procedure DB
+		})
+	}
+
+	if len(cups) == 0 {
+		p.birdClient.SendInternalText(sess.ConversationID, "No se encontraron codigos CUPS validos en el comando.")
+		return
+	}
+
+	cupsJSON, _ := json.Marshal(cups)
+	sess.SetContext("ocr_cups_json", string(cupsJSON))
+
+	if err := p.sessionManager.ResumeFromEscalation(ctx, sess, statemachine.StateValidateOCR); err != nil {
+		slog.Error("cups inject resume failed", "error", err, "phone", cmd.Phone)
+		p.birdClient.SendInternalText(sess.ConversationID, "Error al retomar sesion: "+err.Error())
+		return
+	}
+	p.birdClient.UnassignFeedItem(sess.ConversationID, false)
+
+	// Internal summary for agent
+	var summary strings.Builder
+	summary.WriteString("Codigos CUPS inyectados:\n")
+	for _, c := range cups {
+		fmt.Fprintf(&summary, "- %s (x%d)\n", c.Code, c.Quantity)
+	}
+	summary.WriteString("\nProcesando con el paciente...")
+	p.birdClient.SendInternalText(sess.ConversationID, summary.String())
+
+	// Notify patient and trigger VALIDATE_OCR
+	p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID,
+		"Hemos retomado tu atencion. Verificando tu orden medica...")
+
+	virtualMsg := bird.InboundMessage{
+		ID:          fmt.Sprintf("agent-cups-%s-%d", cmd.Phone, time.Now().UnixNano()),
+		Phone:       sess.PhoneNumber,
+		MessageType: "text",
+		ReceivedAt:  time.Now(),
+	}
+	r, err := p.machine.Process(ctx, sess, virtualMsg)
+	if err == nil && r != nil {
+		p.sendAndSave(ctx, sess, sess.PhoneNumber, r)
+	}
+
+	if p.tracker != nil {
+		p.tracker.LogEvent(ctx, sess.ID, cmd.Phone, "agent_cups_injected", map[string]interface{}{
+			"cups_count": len(cups),
+			"raw":        cmd.Data,
 		})
 	}
 }

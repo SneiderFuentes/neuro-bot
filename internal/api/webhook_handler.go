@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
@@ -26,6 +27,9 @@ type WebhookHandler struct {
 	notifyManager *notifications.NotificationManager
 	cfg           *config.Config
 	inboxRepo     InboxPersister // WAL for crash recovery (optional)
+	// voiceGatherCmds maps callId → gatherCommandId so we can query the DTMF result
+	// from GET /calls/{callId}/commands/{commandId} when the call completes.
+	voiceGatherCmds sync.Map
 }
 
 func NewWebhookHandler(birdClient *bird.Client, workerPool *worker.MessageWorkerPool, notifyManager *notifications.NotificationManager, cfg *config.Config) *WebhookHandler {
@@ -87,13 +91,19 @@ func (h *WebhookHandler) HandleWhatsApp(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 
 	// Clasificar: postback de notificación o mensaje de chatbot?
-	if msg.IsPostback && isNotificationPostback(msg.PostbackPayload) && h.notifyManager != nil && h.notifyManager.HasPending(msg.Phone) {
-		slog.Info("notification postback received",
-			"phone", msg.Phone,
-			"payload", msg.PostbackPayload,
-		)
-		go h.notifyManager.HandleResponse(msg.Phone, msg.PostbackPayload, msg.ConversationID)
-		return
+	if h.notifyManager != nil && h.notifyManager.HasPending(msg.Phone) {
+		if msg.IsPostback && isNotificationPostback(msg.PostbackPayload) {
+			slog.Info("notification postback received",
+				"phone", msg.Phone,
+				"payload", msg.PostbackPayload,
+			)
+			go h.notifyManager.HandleResponse(msg.Phone, msg.PostbackPayload, msg.ConversationID)
+			return
+		}
+		// Patient sent free text instead of pressing a button — retry the prompt
+		if h.notifyManager.HandleInvalidInput(msg.Phone, msg.ConversationID) {
+			return
+		}
 	}
 
 	// Mensaje normal -> Worker pool (state machine)
@@ -315,6 +325,192 @@ func (h *WebhookHandler) HandleConversation(w http.ResponseWriter, r *http.Reque
 			"conversation_id", convID,
 			"raw", string(body),
 		)
+	}
+}
+
+// HandleVoiceWebhook receives Bird voice call events (call_command_gather_finished, etc.)
+// and processes the DTMF result to confirm or ignore the appointment confirmation.
+func (h *WebhookHandler) HandleVoiceWebhook(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// Verify HMAC signature using voice secret (falls back to main webhook secret)
+	signature := r.Header.Get("MessageBird-Signature")
+	timestamp := r.Header.Get("MessageBird-Request-Timestamp")
+	if signature != "" {
+		requestURL := reconstructFullURL(r)
+		secret := h.cfg.BirdWebhookSecretVoice
+		if secret == "" {
+			secret = h.cfg.BirdWebhookSecret
+		}
+		if !bird.VerifySignatureWithKey(secret, signature, timestamp, requestURL, body) {
+			slog.Warn("invalid voice webhook signature")
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	// Bird sends two possible shapes for voice webhooks:
+	// 1. New format: {"service":"channels","event":"voice.outbound","payload":{"id":"callId","status":"..."}}
+	// 2. Legacy format: {"type":"call_command_gather_finished","callId":"...","callCommand":{...}}
+	var event struct {
+		// New format
+		Service string `json:"service"`
+		Event   string `json:"event"`
+		Payload struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+			// gather result may arrive here for mid-call gather API results
+			CallCommand struct {
+				Gather struct {
+					Keys string `json:"keys"`
+				} `json:"gather"`
+			} `json:"callCommand"`
+		} `json:"payload"`
+		// Legacy format
+		Type    string `json:"type"`
+		LegacyCallID string `json:"callId"`
+		LegacyCallCommand struct {
+			Gather struct {
+				Keys string `json:"keys"`
+			} `json:"gather"`
+		} `json:"callCommand"`
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		slog.Warn("voice webhook: invalid JSON", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// Log ALL voice events at INFO so we can observe Bird's exact event format
+	slog.Info("voice webhook event received",
+		"event", event.Event,
+		"type", event.Type,
+		"callId_new", event.Payload.ID,
+		"callId_legacy", event.LegacyCallID,
+		"status", event.Payload.Status,
+		"raw", string(body),
+	)
+
+	if h.notifyManager != nil {
+		// New format: voice.outbound lifecycle events
+		if event.Event == "voice.outbound" {
+			callID := event.Payload.ID
+			switch event.Payload.Status {
+			case "ongoing":
+				// Call is active — send mid-call gather command (two-phase IVR)
+				slog.Info("voice call ongoing, sending gather", "callId", callID)
+				go func() {
+					commandID, err := h.birdClient.SendGather(callID)
+					if err != nil {
+						slog.Error("send gather failed", "callId", callID, "error", err)
+						return
+					}
+					if commandID != "" {
+						h.voiceGatherCmds.Store(callID, commandID)
+					}
+				}()
+			case "completed":
+				// Call finished — query gather command result via GET /calls/{id}/commands/{cmdId}
+				go func() {
+					val, hasCmd := h.voiceGatherCmds.LoadAndDelete(callID)
+					if !hasCmd {
+						// Gather command never ran (call not answered, or gather failed)
+						h.notifyManager.HandleVoiceCallCompleted(callID)
+						return
+					}
+					commandID := val.(string)
+					keys, err := h.birdClient.GetGatherResult(callID, commandID)
+					if err != nil {
+						slog.Error("get gather result failed", "callId", callID, "commandId", commandID, "error", err)
+						h.notifyManager.HandleVoiceCallCompleted(callID)
+						return
+					}
+					slog.Info("IVR gather result retrieved", "callId", callID, "keys", keys)
+					h.notifyManager.HandleVoiceGatherResult(callID, keys)
+				}()
+			}
+			// gather result may also come inline if Bird ever includes it in the webhook
+			if keys := event.Payload.CallCommand.Gather.Keys; keys != "" || event.Payload.Status == "gather_finished" {
+				h.notifyManager.HandleVoiceGatherResult(callID, keys)
+			}
+		}
+
+		// Legacy format (kept in case gather result uses old event type)
+		switch event.Type {
+		case "call_command_gather_finished":
+			h.notifyManager.HandleVoiceGatherResult(event.LegacyCallID, event.LegacyCallCommand.Gather.Keys)
+		case "outgoing_call_completed":
+			h.notifyManager.HandleVoiceCallCompleted(event.LegacyCallID)
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+// HandleVoiceDTMF is called by Bird's fetchCallFlow mechanism after a gather completes.
+// Bird POSTs the call context (including gathered "keys") to this endpoint and executes
+// the callFlow JSON we return. We also process the DTMF result asynchronously.
+func (h *WebhookHandler) HandleVoiceDTMF(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// Bird sends call context as JSON: {callID, keys, ...}
+	var ctx struct {
+		CallID string `json:"callId"`
+		Keys   string `json:"keys"`
+	}
+	json.Unmarshal(body, &ctx) // best-effort; log raw for discovery
+
+	slog.Info("voice dtmf fetchCallFlow received",
+		"callId", ctx.CallID,
+		"keys", ctx.Keys,
+		"raw", string(body),
+	)
+
+	// Determine response TTS based on key pressed
+	var responseText string
+	switch ctx.Keys {
+	case "1":
+		responseText = "Gracias, su cita ha sido confirmada con exito. " +
+			"Para consultar las preparaciones para su cita comuniquese con nosotros a traves de WhatsApp. " +
+			"Hasta pronto."
+	case "":
+		responseText = "No hemos recibido su respuesta. Su cita queda pendiente de confirmacion. " +
+			"Puede confirmarla comunicandose con nosotros a traves de WhatsApp. Hasta pronto."
+	default:
+		responseText = "Entendido. Si desea reagendar su cita puede comunicarse con nosotros a traves de WhatsApp. " +
+			"Hasta pronto."
+	}
+
+	// Return callFlow to Bird: say response + hangup
+	responseFlow := []map[string]interface{}{
+		{
+			"command": "say",
+			"options": map[string]interface{}{
+				"locale": "es-MX",
+				"voice":  "female",
+				"text":   responseText,
+			},
+		},
+		{"command": "hangup"},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(responseFlow)
+
+	// Process DTMF result asynchronously (confirm/cancel in DB)
+	if h.notifyManager != nil && ctx.CallID != "" {
+		go h.notifyManager.HandleVoiceGatherResult(ctx.CallID, ctx.Keys)
 	}
 }
 

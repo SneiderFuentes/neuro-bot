@@ -34,6 +34,12 @@ type Client struct {
 	WebhookSecretOutbound string // Separate key for outbound webhook (Bird issues unique keys per subscription)
 	// Conversations API base URL (different from Channels API)
 	conversationsAPIURL string
+	// Voice
+	voiceChannelID  string
+	voiceNumber     string
+	voiceAPIKey     string
+	voiceFlowID     string // Bird Flow ID for IVR (has webhook step for DTMF result)
+	voiceWebhookURL string // notification URL for voice events (e.g. https://server/webhooks/voice)
 	// ConversationID cache: phone → conversationID (from conversation.created webhook).
 	// Self-replacing: new conversation.created overwrites the old entry automatically.
 	mu        sync.RWMutex
@@ -56,6 +62,11 @@ func NewClient(cfg *config.Config) *Client {
 		channelIDTemplates:  cfg.BirdChannelIDTemplates,
 		WebhookSecret:         cfg.BirdWebhookSecret,
 		WebhookSecretOutbound: cfg.ResolveOutboundWebhookSecret(),
+		voiceChannelID:  cfg.BirdVoiceChannelID,
+		voiceNumber:     cfg.BirdVoiceNumber,
+		voiceAPIKey:     cfg.BirdAPIKeyVoice,
+		voiceFlowID:     cfg.BirdVoiceFlowID,
+		voiceWebhookURL: voiceNotificationURL(cfg),
 		convCache: make(map[string]string),
 	}
 }
@@ -237,7 +248,7 @@ func (c *Client) FetchMessageText(messageID string) string {
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKeyWA)
+	req.Header.Set("Authorization", "AccessKey "+c.apiKeyWA)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -346,6 +357,13 @@ func (c *Client) SendButtons(to, conversationID, text string, buttons []Button) 
 			"text":    text,
 			"actions": actions,
 		},
+	}
+	// If no conversationID, try a fresh lookup before falling back to text
+	if conversationID == "" {
+		if fresh, err := c.LookupConversationByPhone(to); err == nil && fresh != "" {
+			conversationID = fresh
+			c.CacheConversationID(to, fresh)
+		}
 	}
 	if id, _, ok := c.trySendToConversation(to, conversationID, body); ok {
 		return id, nil
@@ -475,18 +493,377 @@ func (c *Client) SendTemplate(to string, tmpl TemplateConfig) (string, error) {
 	return c.sendMessage(c.templatesURL(), payload)
 }
 
-// PlaceCall inicia una llamada IVR via Bird Voice
+// voiceNotificationURL builds the voice event notification URL.
+// Prefers SERVER_PUBLIC_URL; falls back to NGROK_HOSTNAME.
+func voiceNotificationURL(cfg *config.Config) string {
+	base := cfg.ServerPublicURL
+	if base == "" && cfg.NgrokHostname != "" {
+		base = "https://" + cfg.NgrokHostname
+	}
+	if base == "" {
+		return ""
+	}
+	return strings.TrimRight(base, "/") + "/api/webhooks/voice"
+}
+
+// PlaceCall inicia una llamada IVR via Bird Voice API.
+// Params esperados: patient_name, appointment_date, appointment_time, clinic_name, clinic_address.
+// Retorna el callId de Bird para correlacionar con el webhook DTMF posterior.
 func (c *Client) PlaceCall(to string, params map[string]string) (string, error) {
-	// Se implementará completamente en Fase 12 (Notificaciones)
-	return "", nil
+	if c.voiceChannelID == "" {
+		return "", fmt.Errorf("voice channel not configured (BIRD_VOICE_CHANNEL_ID missing)")
+	}
+
+	var greeting string
+	if addr := params["clinic_address"]; addr != "" {
+		greeting = fmt.Sprintf(
+			"Hola %s, te hablamos desde %s para recordarte tu cita el día %s a las %s en la dirección %s.",
+			params["patient_name"], params["clinic_name"],
+			params["appointment_date"], params["appointment_time"], addr,
+		)
+	} else {
+		greeting = fmt.Sprintf(
+			"Hola %s, te hablamos desde %s para recordarte tu cita el día %s a las %s.",
+			params["patient_name"], params["clinic_name"],
+			params["appointment_date"], params["appointment_time"],
+		)
+	}
+
+	// Build call payload.
+	// If a Bird Flow ID is configured, use it (the flow has a webhook step that POSTs
+	// DTMF results to our server). Otherwise fall back to inline callFlow (greeting +
+	// gather only — no DTMF result delivery, but still plays reminder to patient).
+	payload := map[string]interface{}{
+		"to":          to,
+		"from":        c.voiceNumber,
+		"maxDuration": 120,
+		"ringTimeout": 30,
+		"record":      true,
+		"recordStart": "record-from-answer",
+	}
+
+	if c.voiceFlowID != "" {
+		// Bird Flow mode: pass flow ID + dynamic variables for TTS substitution.
+		// The flow must be configured in the Bird dashboard with a webhook step that
+		// POSTs DTMF results to /api/webhooks/voice/dtmf on our server.
+		payload["flowId"] = c.voiceFlowID
+		payload["variables"] = map[string]string{
+			"patient_name":     params["patient_name"],
+			"clinic_name":      params["clinic_name"],
+			"appointment_date": params["appointment_date"],
+			"appointment_time": params["appointment_time"],
+			"clinic_address":   params["clinic_address"],
+		}
+		slog.Info("voice call using Bird Flow", "flowId", c.voiceFlowID)
+	} else {
+		// Inline callFlow fallback: greeting + gather.
+		// DTMF result is NOT delivered to the server (Bird API limitation).
+		// Call still plays the reminder and gather prompt to the patient.
+		callFlow := []map[string]interface{}{
+			{
+				"command": "say",
+				"options": map[string]interface{}{
+					"locale": "es-MX", "voice": "female", "text": greeting,
+				},
+			},
+			{
+				"command": "gather",
+				"options": map[string]interface{}{
+					"maxNumKeys": 1,
+					"timeout":    10,
+					"retries":    4,
+					"input":      "dtmf",
+					"say": map[string]interface{}{
+						"locale": "es-MX", "voice": "female",
+						"text": "Para confirmar su cita, oprima 1. Para cancelar, oprima 2.",
+					},
+				},
+			},
+			{"command": "hangup"},
+		}
+		payload["callFlow"] = callFlow
+		slog.Warn("voice call using inline callFlow (no DTMF result) — set BIRD_VOICE_FLOW_ID to enable DTMF webhook")
+	}
+
+	if c.voiceWebhookURL != "" {
+		payload["notification"] = map[string]interface{}{
+			"url": c.voiceWebhookURL,
+		}
+		slog.Info("voice call notification URL set", "url", c.voiceWebhookURL)
+	} else {
+		slog.Warn("voice call placed WITHOUT notification URL — DTMF webhook will not be received")
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal voice call payload: %w", err)
+	}
+
+	slog.Debug("voice call payload", "body", string(body))
+
+	url := fmt.Sprintf("%s/workspaces/%s/channels/%s/calls",
+		c.conversationsBase(), c.workspaceID, c.voiceChannelID)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create voice call request: %w", err)
+	}
+	authKey := c.voiceAPIKey
+	if authKey == "" {
+		authKey = c.accessKeyID
+	}
+	req.Header.Set("Authorization", "AccessKey "+authKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("voice call http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("voice call API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse voice call response: %w", err)
+	}
+
+	slog.Info("voice call placed", "to", to, "callId", result.ID)
+	return result.ID, nil
+}
+
+// SendGather sends a mid-call DTMF gather command to an already-active call.
+// Called when the voice.outbound webhook reports status="ongoing".
+// Returns the gather commandId, which can later be queried via GetGatherResult.
+func (c *Client) SendGather(callID string) (commandID string, err error) {
+	if c.voiceChannelID == "" {
+		return "", fmt.Errorf("voice channel not configured")
+	}
+
+	payload := map[string]interface{}{
+		"maxNumKeys": 1,
+		"timeout":    10,
+		"retries":    4,
+		"input":      "dtmf",
+		"say": map[string]interface{}{
+			"locale": "es-MX",
+			"voice":  "female",
+			"text":   "Para confirmar su cita, oprima 1. Para cancelar, oprima 2.",
+		},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal gather payload: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/workspaces/%s/channels/%s/calls/%s/gather",
+		c.conversationsBase(), c.workspaceID, c.voiceChannelID, callID)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create gather request: %w", err)
+	}
+	authKey := c.voiceAPIKey
+	if authKey == "" {
+		authKey = c.accessKeyID
+	}
+	req.Header.Set("Authorization", "AccessKey "+authKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("gather http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("gather API error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(respBody, &result) // best-effort; commandId may be empty
+
+	slog.Info("voice gather sent", "callId", callID, "commandId", result.ID)
+
+	// Schedule hangup after max gather duration: retries(4) × timeout(10s) + 15s buffer.
+	// Bird keeps the call alive after gather — we must explicitly hang it up.
+	// The completed webhook will then trigger GetGatherResult.
+	go func() {
+		time.Sleep(55 * time.Second)
+		if err := c.HangupCall(callID); err != nil {
+			slog.Debug("hangup after gather (may already be closed)", "callId", callID, "error", err)
+		}
+	}()
+
+	return result.ID, nil
+}
+
+// GetGatherResult queries a gather command's result via GET /calls/{callId}/commands/{commandId}.
+// Returns the DTMF keys pressed, or "" if the patient did not press anything.
+func (c *Client) GetGatherResult(callID, commandID string) (string, error) {
+	if commandID == "" {
+		return "", fmt.Errorf("commandId is empty")
+	}
+
+	url := fmt.Sprintf("%s/workspaces/%s/channels/%s/calls/%s/commands/%s",
+		c.conversationsBase(), c.workspaceID, c.voiceChannelID, callID, commandID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("create get-command request: %w", err)
+	}
+	authKey := c.voiceAPIKey
+	if authKey == "" {
+		authKey = c.accessKeyID
+	}
+	req.Header.Set("Authorization", "AccessKey "+authKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("get command http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	slog.Info("get gather command result", "callId", callID, "commandId", commandID, "raw", string(body))
+
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("get command API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Command string `json:"command"`
+		Status  string `json:"status"`
+		Result  struct {
+			Keys string `json:"keys"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("parse command result: %w", err)
+	}
+	return result.Result.Keys, nil
+}
+
+// HangupCall sends a hangup command to an active call via Bird Voice API.
+func (c *Client) HangupCall(callID string) error {
+	url := fmt.Sprintf("%s/workspaces/%s/channels/%s/calls/%s/hangup",
+		c.conversationsBase(), c.workspaceID, c.voiceChannelID, callID)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return fmt.Errorf("create hangup request: %w", err)
+	}
+	authKey := c.voiceAPIKey
+	if authKey == "" {
+		authKey = c.accessKeyID
+	}
+	req.Header.Set("Authorization", "AccessKey "+authKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("hangup http: %w", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body) // drain
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("hangup API error %d", resp.StatusCode)
+	}
+	slog.Info("call hung up", "callId", callID)
+	return nil
+}
+
+// CallDetails holds the relevant fields from Bird's GET /calls/{id} response.
+type CallDetails struct {
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Duration int    `json:"duration"`
+	// callCommands contains the individual command results (gather keys, etc.)
+	CallCommands []struct {
+		Command string `json:"command"`
+		Status  string `json:"status"`
+		Result  struct {
+			Keys string `json:"keys"`
+		} `json:"result"`
+	} `json:"callCommands"`
+}
+
+// GetCallDetails fetches the full call object from Bird, including callCommands.
+// Used after a call completes to retrieve the gather (DTMF) result.
+func (c *Client) GetCallDetails(callID string) (*CallDetails, error) {
+	url := fmt.Sprintf("%s/workspaces/%s/channels/%s/calls/%s",
+		c.conversationsBase(), c.workspaceID, c.voiceChannelID, callID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get-call request: %w", err)
+	}
+	authKey := c.voiceAPIKey
+	if authKey == "" {
+		authKey = c.accessKeyID
+	}
+	req.Header.Set("Authorization", "AccessKey "+authKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get call http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("get call API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Log the full raw response so we can discover the exact structure Bird returns
+	slog.Info("get call details response", "callId", callID, "raw", string(body))
+
+	var details CallDetails
+	if err := json.Unmarshal(body, &details); err != nil {
+		return nil, fmt.Errorf("parse call details: %w", err)
+	}
+	return &details, nil
+}
+
+// GatherKeysFromCallDetails extracts the DTMF keys from a completed call's command results.
+func GatherKeysFromCallDetails(details *CallDetails) string {
+	for _, cmd := range details.CallCommands {
+		if cmd.Command == "gather" {
+			return cmd.Result.Keys
+		}
+	}
+	return ""
 }
 
 // ListActiveAgents returns all agents with status "active" from Bird Inbox.
 func (c *Client) ListActiveAgents() ([]AgentInfo, error) {
-	url := fmt.Sprintf("%s/workspaces/%s/agents?agentStatuses=active",
-		c.conversationsBase(), c.workspaceID)
+	return c.listAgents("active")
+}
 
-	req, err := http.NewRequest("GET", url, nil)
+// ListAllAgents returns all agents regardless of status from Bird Inbox.
+func (c *Client) ListAllAgents() ([]AgentInfo, error) {
+	return c.listAgents("")
+}
+
+// listAgents fetches agents from Bird Inbox. statusFilter limits by agentStatuses (e.g. "active");
+// pass "" to fetch all agents regardless of status.
+func (c *Client) listAgents(statusFilter string) ([]AgentInfo, error) {
+	reqURL := fmt.Sprintf("%s/workspaces/%s/agents", c.conversationsBase(), c.workspaceID)
+	if statusFilter != "" {
+		reqURL += "?agentStatuses=" + statusFilter
+	}
+
+	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create agents request: %w", err)
 	}
@@ -769,15 +1146,13 @@ func (c *Client) CloseFeedItems(conversationID string) error {
 	return nil
 }
 
-// pickLeastLoadedAgent filters agents by teamID and available activity,
-// then returns the one with the lowest workload (rootItemAssignedCount).
+// pickLeastLoadedAgent filters agents by teamID and returns the least loaded one.
+// Prefers agents with activity "available"; falls back to any active agent in the team.
 func pickLeastLoadedAgent(agents []AgentInfo, teamID string) *AgentInfo {
 	var best *AgentInfo
+	var bestFallback *AgentInfo
 	for i := range agents {
 		a := &agents[i]
-		if a.Availability.Activity != "available" {
-			continue
-		}
 		inTeam := false
 		for _, t := range a.Teams {
 			if t.ID == teamID {
@@ -788,11 +1163,21 @@ func pickLeastLoadedAgent(agents []AgentInfo, teamID string) *AgentInfo {
 		if !inTeam {
 			continue
 		}
-		if best == nil || a.RootItemAssignedCount < best.RootItemAssignedCount {
-			best = a
+		if a.Availability.Activity == "available" {
+			if best == nil || a.RootItemAssignedCount < best.RootItemAssignedCount {
+				best = a
+			}
+		} else {
+			// Non-available but active (logged in) — use as fallback
+			if bestFallback == nil || a.RootItemAssignedCount < bestFallback.RootItemAssignedCount {
+				bestFallback = a
+			}
 		}
 	}
-	return best
+	if best != nil {
+		return best
+	}
+	return bestFallback
 }
 
 // LookupConversationByPhone queries Bird's Conversations API to find the active
@@ -897,13 +1282,30 @@ func (c *Client) EscalateToAgent(conversationID, phone, teamID, teamName, patien
 		slog.Warn("mark escalated failed (non-blocking)", "error", err)
 	}
 
-	// 2. List active agents — error means nobody can handle the conversation
+	// 2. List active agents; if none active, fall back to all agents (pick least loaded)
 	agents, err := c.ListActiveAgents()
 	if err != nil {
-		return fmt.Errorf("no agents available (api error): %w", err)
+		slog.Warn("list active agents failed, falling back to all agents",
+			"conversation_id", conversationID,
+			"team_id", teamID,
+			"error", err,
+		)
+		agents, err = c.ListAllAgents()
+		if err != nil {
+			slog.Warn("list all agents failed, assigning to team only",
+				"conversation_id", conversationID,
+				"team_id", teamID,
+				"error", err,
+			)
+			return c.AssignFeedItem(conversationID, teamID, "")
+		}
 	}
 	if len(agents) == 0 {
-		return fmt.Errorf("no active agents online")
+		slog.Warn("no agents found at all, assigning to team only",
+			"conversation_id", conversationID,
+			"team_id", teamID,
+		)
+		return c.AssignFeedItem(conversationID, teamID, "")
 	}
 
 	// 3. Pick least loaded agent in target team

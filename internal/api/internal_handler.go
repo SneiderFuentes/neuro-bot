@@ -124,6 +124,69 @@ func (h *InternalHandler) HandleSendReminders(w http.ResponseWriter, r *http.Req
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "reminders dispatched in background"})
 }
 
+// --- Test Voice Call ---
+
+// HandleTestVoiceCall places a real IVR call with custom test data.
+// Useful for verifying the Bird Voice API integration and DTMF webhook flow.
+// POST /api/internal/test-voice-call
+// Body: { "phone": "+573001234567", "patient_name": "...", "appointment_date": "...", "appointment_time": "...", "clinic_address": "..." }
+func (h *InternalHandler) HandleTestVoiceCall(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Phone           string `json:"phone"`
+		PatientName     string `json:"patient_name"`
+		AppointmentDate string `json:"appointment_date"`
+		AppointmentTime string `json:"appointment_time"`
+		ClinicAddress   string `json:"clinic_address"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Phone == "" {
+		http.Error(w, "invalid request: phone is required", http.StatusBadRequest)
+		return
+	}
+
+	// Apply defaults for optional fields
+	if req.PatientName == "" {
+		req.PatientName = "Paciente de prueba"
+	}
+	if req.AppointmentDate == "" {
+		req.AppointmentDate = "mañana"
+	}
+	if req.AppointmentTime == "" {
+		req.AppointmentTime = "8:00 AM"
+	}
+	if req.ClinicAddress == "" {
+		req.ClinicAddress = h.cfg.CenterName
+	}
+
+	slog.Info("test voice call requested", "phone", req.Phone, "patient", req.PatientName)
+
+	callID, err := h.birdClient.PlaceCall(req.Phone, map[string]string{
+		"patient_name":     req.PatientName,
+		"appointment_date": req.AppointmentDate,
+		"appointment_time": req.AppointmentTime,
+		"clinic_name":      h.cfg.CenterName,
+		"clinic_address":   req.ClinicAddress,
+	})
+	if err != nil {
+		slog.Error("test voice call failed", "phone", req.Phone, "error", err)
+		http.Error(w, "call failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Register callId so the DTMF webhook can be processed
+	if callID != "" && h.notifyManager != nil {
+		h.notifyManager.RegisterCallID(callID, req.Phone)
+	}
+
+	slog.Info("test voice call placed", "phone", req.Phone, "callId", callID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "ok",
+		"call_id": callID,
+		"phone":   req.Phone,
+	})
+}
+
 // --- Cancel Agenda ---
 
 // CancelAgendaRequest is the request body for cancelling an agenda.

@@ -43,6 +43,7 @@ type Tasks struct {
 	NotifyManager   *notifications.NotificationManager
 	WaitingListRepo WaitingListRepo
 	SlotService     *services.SlotService
+	ProcedureRepo   repository.ProcedureRepository // for IVR address lookup
 	Cfg             *config.Config
 	Tracker         EventLogger
 	InboxRepo       InboxCleaner // WAL cleanup (optional)
@@ -248,14 +249,35 @@ func (t *Tasks) sendVoiceReminders(ctx context.Context) error {
 			continue // No matching appointment — may have been confirmed/cancelled meanwhile
 		}
 
-		_, err := t.BirdClient.PlaceCall(pending.Phone, map[string]string{
+		// Resolve address from first procedure in the appointment (cups_procedimientos.direccion)
+		clinicAddress := ""
+		if t.ProcedureRepo != nil {
+			for _, proc := range appt.Procedures {
+				if proc.CupCode == "" {
+					continue
+				}
+				if p, err := t.ProcedureRepo.FindByCode(ctx, proc.CupCode); err == nil && p != nil && p.Address != "" {
+					clinicAddress = p.Address
+					break
+				}
+			}
+		}
+
+		callID, err := t.BirdClient.PlaceCall(pending.Phone, map[string]string{
 			"patient_name":     appt.PatientName,
 			"appointment_date": utils.FormatFriendlyDate(appt.Date),
 			"appointment_time": services.FormatTimeSlot(appt.TimeSlot),
+			"clinic_name":      t.Cfg.CenterName,
+			"clinic_address":   clinicAddress,
 		})
 		if err != nil {
 			slog.Error("voice call failed", "phone", pending.Phone, "error", err)
 			continue
+		}
+
+		// Register callId → phone mapping for DTMF webhook correlation
+		if callID != "" {
+			t.NotifyManager.RegisterCallID(callID, pending.Phone)
 		}
 
 		// Mark IVR sent: stops old safety-net timer, sets retry=3, new post-IVR timer

@@ -107,26 +107,25 @@ func GroupByServiceFromDB(ctx context.Context, cups []CUPSEntry, procRepo reposi
 		return []CUPSGroup{{ServiceType: "General", Cups: cups, Espacios: 1}}, nil
 	}
 
-	// Enrich each CUPS with DB data
+	// Enrich each CUPS with DB data; skip inactive/unknown codes
 	enriched := make([]enrichedCup, 0, len(cups))
 	for _, c := range cups {
 		ec := enrichedCup{CUPSEntry: c, ServiceName: "General", RequiredSpaces: 1}
 		if c.Code != "" {
-			// Override: Force EMG/NC codes to Fisiatria service (regardless of DB value)
+			proc, err := procRepo.FindByCode(ctx, c.Code)
+			if err != nil || proc == nil {
+				// Code not found or inactive (activo=0) — skip it
+				continue
+			}
+			ec.Name = proc.Name
+			// Force EMG/NC codes to Fisiatria only if active in DB
 			if emgCodes[c.Code] || ncCodes[c.Code] || emgDependentCodes[c.Code] {
 				ec.ServiceName = "Fisiatria"
+			} else if proc.ServiceName != "" {
+				ec.ServiceName = proc.ServiceName
 			}
-			
-			proc, err := procRepo.FindByCode(ctx, c.Code)
-			if err == nil && proc != nil {
-				ec.Name = proc.Name // Enrich name from DB
-				// Only use DB ServiceName if not already set to Fisiatria
-				if ec.ServiceName != "Fisiatria" && proc.ServiceName != "" {
-					ec.ServiceName = proc.ServiceName
-				}
-				if proc.RequiredSpaces >= 1 {
-					ec.RequiredSpaces = proc.RequiredSpaces
-				}
+			if proc.RequiredSpaces >= 1 {
+				ec.RequiredSpaces = proc.RequiredSpaces
 			}
 		}
 		enriched = append(enriched, ec)

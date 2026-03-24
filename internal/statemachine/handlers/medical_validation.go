@@ -84,6 +84,13 @@ func askContrastedHandler() sm.StateHandler {
 				r.NextState = sm.StateAskPregnancy
 			} else if age < 1 {
 				r.NextState = sm.StateAskBabyWeight
+				r.Messages = append(r.Messages, &sm.ButtonMessage{
+					Text: "¿Cuál fue el peso del bebé al nacer?",
+					Buttons: []sm.Button{
+						{Text: "Bajo peso", Payload: "baby_low"},
+						{Text: "Peso normal", Payload: "baby_normal"},
+					},
+				})
 			} else {
 				r.NextState = sm.StateGfrCreatinine
 				r.Messages = append(r.Messages, &sm.TextMessage{Text: "Para el examen con contraste necesitamos verificar tu *función renal*.\n\nNecesitas un examen de laboratorio reciente (máximo 3 meses) llamado *\"Creatinina sérica\"* o *\"Creatinina en sangre\"*.\n\nEn tu resultado de laboratorio busca el valor que aparece junto a *Creatinina* en *mg/dL*.\n\n_Ejemplo de resultado:_\n_Creatinina .......... *0.96* mg/dL_\n\nEscribe solo el número, ej: *0.96*"})
@@ -130,6 +137,10 @@ func askContrastedHandler() sm.StateHandler {
 			} else if age < 1 {
 				// Bebé (any gender) → preguntar peso
 				r.NextState = sm.StateAskBabyWeight
+				r.WithButtons("¿Cuál fue el peso del bebé al nacer?",
+					sm.Button{Text: "Bajo peso", Payload: "baby_low"},
+					sm.Button{Text: "Peso normal", Payload: "baby_normal"},
+				)
 			} else {
 				// Hombre >= 1 → directo a creatinina
 				r.NextState = sm.StateGfrCreatinine
@@ -273,6 +284,11 @@ func gfrCreatinineHandler() sm.StateHandler {
 		case age < 40:
 			// 15-39: preguntar enfermedad
 			r.NextState = sm.StateGfrDisease
+			r.WithButtons("¿Padeces alguna de estas condiciones?",
+				sm.Button{Text: "Ninguna", Payload: "disease_none"},
+				sm.Button{Text: "Enfermedad renal", Payload: "disease_renal"},
+				sm.Button{Text: "Diabetes", Payload: "disease_diabetica"},
+			)
 		default:
 			// >= 40: Cockcroft-Gault necesita peso
 			r.NextState = sm.StateGfrWeight
@@ -622,6 +638,27 @@ func askGestationalWeeksHandler() sm.StateHandler {
 			return sm.NewResult(sess.CurrentState).
 				WithContext("_prompted_weeks", "1").
 				WithButtons(questionText, buttons...), nil
+		}
+
+		// Selección numérica de semanas por agente: /bot resume ASK_GESTATIONAL_WEEKS 19
+		// Convierte el número de semanas directamente a weeks_yes/weeks_no según el rango del CUPS.
+		if weeks, err := strconv.ParseFloat(strings.Replace(strings.TrimSpace(msg.Text), ",", ".", 1), 64); err == nil && weeks > 0 {
+			weeksInt := int(weeks * 10) // e.g. 19 → 190, 13.6 → 136
+			if weeksInt >= gr.min && weeksInt <= gr.max {
+				sess.RetryCount = 0
+				return sm.NewResult(sm.StateAskContrasted).
+					WithClearCtx("_prompted_weeks").
+					WithEvent("gestational_weeks_confirmed", map[string]interface{}{"cups_code": cupsCode, "range": gr.label, "weeks": weeks}), nil
+			}
+			// Número fuera de rango → tratar como weeks_no
+			sess.RetryCount = 0
+			return sm.NewResult(sm.StatePostActionMenu).
+				WithClearCtx("_prompted_weeks").
+				WithText(fmt.Sprintf(
+					"Esta ecografía requiere estar entre las *%s* de gestación.\n\nCuando estés en ese rango, vuelve a contactarnos y con gusto te agendaremos.",
+					gr.label,
+				)).
+				WithEvent("gestational_weeks_out_of_range", map[string]interface{}{"cups_code": cupsCode, "range": gr.label, "weeks": weeks}), nil
 		}
 
 		// Segunda llamada: validar respuesta del paciente

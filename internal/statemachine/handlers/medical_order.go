@@ -118,14 +118,26 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 				WithEvent("ocr_parse_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
-		// Validar CUPS contra la BD — enriquecer con nombre de BD si el código es conocido
-		for i, cup := range cups {
+		// Validar CUPS contra la BD — filtrar inactivos, enriquecer nombres
+		var skipped []string
+		valid := cups[:0]
+		for _, cup := range cups {
 			if cup.Code != "" {
 				proc, err := procedureRepo.FindByCode(ctx, cup.Code)
-				if err == nil && proc != nil {
-					cups[i].Name = proc.Name
+				if err != nil || proc == nil {
+					skipped = append(skipped, cup.Code)
+					continue
 				}
+				cup.Name = proc.Name
 			}
+			valid = append(valid, cup)
+		}
+		cups = valid
+
+		if len(cups) == 0 {
+			return sm.NewResult(sm.StateEscalateToAgent).
+				WithText("No encontré procedimientos válidos en tu orden. Te voy a comunicar con un agente para que pueda ayudarte.").
+				WithEvent("ocr_no_valid_cups", map[string]interface{}{"skipped": skipped}), nil
 		}
 
 		// Re-serializar con datos enriquecidos
@@ -139,10 +151,16 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 			} else {
 				summary += fmt.Sprintf("%d. *%s*", i+1, cup.Name)
 			}
-			if cup.Quantity > 1 {
-				summary += fmt.Sprintf(" x %d", cup.Quantity)
+			qty := cup.Quantity
+			if qty < 1 {
+				qty = 1
 			}
+			summary += fmt.Sprintf(" — Cantidad: *%d*", qty)
 			summary += "\n"
+		}
+
+		if len(skipped) > 0 {
+			summary += fmt.Sprintf("\n⚠️ Los siguientes códigos no están disponibles y fueron omitidos: %s\n", strings.Join(skipped, ", "))
 		}
 
 		// Verificar documento: comparar con el del paciente identificado

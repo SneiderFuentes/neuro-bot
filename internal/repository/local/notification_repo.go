@@ -18,6 +18,7 @@ func NewNotificationRepo(db *sql.DB) *NotificationRepo {
 }
 
 // Upsert inserts or updates a pending notification (keyed by phone).
+// call_id is NOT updated here — use UpdateCallID for that.
 func (r *NotificationRepo) Upsert(ctx context.Context, phone, nType, apptID, wlID, birdMsgID, convID string, retryCount int, expiresAt time.Time) error {
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO notification_pending (phone, type, appointment_id, waiting_list_id, bird_message_id, conversation_id, retry_count, expires_at)
@@ -34,6 +35,15 @@ func (r *NotificationRepo) Upsert(ctx context.Context, phone, nType, apptID, wlI
 	return err
 }
 
+// UpdateCallID persists the Bird IVR call ID to the pending notification row.
+// This enables callIDMap reconstruction after a server restart.
+func (r *NotificationRepo) UpdateCallID(ctx context.Context, phone, callID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE notification_pending SET call_id = ? WHERE phone = ?`,
+		callID, phone)
+	return err
+}
+
 // Delete removes a pending notification by phone.
 func (r *NotificationRepo) Delete(ctx context.Context, phone string) error {
 	_, err := r.db.ExecContext(ctx,
@@ -46,6 +56,7 @@ func (r *NotificationRepo) FindExpired(ctx context.Context) ([]notifications.Pen
 	return r.queryRows(ctx,
 		`SELECT phone, type, COALESCE(appointment_id, ''), COALESCE(waiting_list_id, ''),
 		        COALESCE(bird_message_id, ''), COALESCE(conversation_id, ''),
+		        COALESCE(call_id, ''),
 		        retry_count, expires_at, created_at
 		 FROM notification_pending
 		 WHERE expires_at < NOW()
@@ -57,6 +68,7 @@ func (r *NotificationRepo) FindAll(ctx context.Context) ([]notifications.Pending
 	return r.queryRows(ctx,
 		`SELECT phone, type, COALESCE(appointment_id, ''), COALESCE(waiting_list_id, ''),
 		        COALESCE(bird_message_id, ''), COALESCE(conversation_id, ''),
+		        COALESCE(call_id, ''),
 		        retry_count, expires_at, created_at
 		 FROM notification_pending
 		 ORDER BY created_at ASC`)
@@ -74,7 +86,7 @@ func (r *NotificationRepo) queryRows(ctx context.Context, query string) ([]notif
 		var row notifications.PendingRow
 		if err := rows.Scan(
 			&row.Phone, &row.Type, &row.AppointmentID, &row.WaitingListID,
-			&row.BirdMessageID, &row.ConversationID,
+			&row.BirdMessageID, &row.ConversationID, &row.CallID,
 			&row.RetryCount, &row.ExpiresAt, &row.CreatedAt,
 		); err != nil {
 			return nil, err

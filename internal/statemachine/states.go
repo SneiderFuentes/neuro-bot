@@ -80,6 +80,7 @@ const (
 const (
 	StateConfirmRescheduleNotif = "CONFIRM_RESCHEDULE_NOTIF"
 	StateConfirmCancelNotif     = "CONFIRM_CANCEL_NOTIF"
+	StateNotifPending           = "NOTIF_PENDING" // Escalación por texto libre durante confirmación proactiva
 )
 
 // === Orden Médica y OCR ===
@@ -217,6 +218,7 @@ var stateTypes = map[string]StateType{
 	StateAppointmentCancelled:   StateTypeAutomatic,
 	StateConfirmRescheduleNotif: StateTypeInteractive,
 	StateConfirmCancelNotif:     StateTypeInteractive,
+	StateNotifPending:           StateTypeInteractive,
 
 	// Orden Médica y OCR
 	StateAskMedicalOrder:    StateTypeAutomatic,

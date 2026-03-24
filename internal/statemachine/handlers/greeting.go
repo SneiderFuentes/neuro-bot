@@ -23,7 +23,7 @@ func RegisterGreetingHandlers(m *sm.Machine, cfg *config.Config, locationRepo Lo
 	m.Register(sm.StateGreeting, greetingHandler(cfg))
 	m.RegisterWithConfig(sm.StateMainMenu, sm.HandlerConfig{
 		InputType: sm.InputButton,
-		Options:   []string{"consultar", "agendar", "resultados", "ubicacion", "ayuda"},
+		Options:   []string{"agendar", "consultar", "resultados", "ubicacion", "ayuda"},
 		RetryPrompt: func(sess *session.Session, result *sm.StateResult) {
 			list := buildMainMenuList()
 			list.Body = "Por favor selecciona una opcion del menu.\n\n" + list.Body

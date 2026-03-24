@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
@@ -131,6 +132,22 @@ func listAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandl
 				}
 			}
 			// Invalid postback ID — fall through to retry + re-show list
+		}
+
+		// Selección numérica por agente: /bot resume LIST_APPOINTMENTS 1
+		if n, err := strconv.Atoi(strings.TrimSpace(msg.Text)); err == nil && n >= 1 {
+			var appts []domain.Appointment
+			if jsonErr := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appts); jsonErr == nil && n <= len(appts) {
+				selected := appts[n-1]
+				sess.RetryCount = 0
+				detail := buildAppointmentDetail(apptSvc, appts, selected.ID)
+				return sm.NewResult(sm.StateAppointmentAction).
+					WithContext("selected_appointment_id", selected.ID).
+					WithList(detail+"\n\n¿Qué deseas hacer con esta cita?", "Ver opciones",
+						sm.ListSection{Title: "Acciones", Rows: appointmentActionRows()},
+					).
+					WithEvent("appointment_selected", map[string]interface{}{"id": selected.ID}), nil
+			}
 		}
 
 		// Texto o postback inválido — retry antes de re-mostrar lista

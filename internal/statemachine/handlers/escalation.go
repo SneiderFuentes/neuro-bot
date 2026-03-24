@@ -152,10 +152,17 @@ func buildAgentSummary(sess *session.Session, cupsCode, teamName string) string 
 		prevState = sess.CurrentState
 	}
 
+	// Include custom escalation note if present (e.g., from identity free-text)
+	note := sess.GetContext("escalation_note")
+
 	summary := fmt.Sprintf("Transferencia de chatbot\n\n"+
 		"Paciente: %s\n"+
 		"Documento: %s\n",
 		patientName, patientDoc)
+
+	if note != "" {
+		summary += fmt.Sprintf("Nota: %s\n", note)
+	}
 
 	if serviceName != "" {
 		summary += fmt.Sprintf("Servicio: %s\n", serviceName)
@@ -370,17 +377,24 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 		situation = fmt.Sprintf("El paciente necesita enviar su orden medica.\nPaciente: %s | Doc: %s", patientName, patientDoc)
 		actions = "- Pidele que envie la foto de la orden:\n" +
 			"  /bot resume UPLOAD_MEDICAL_ORDER — Pedir foto de orden\n" +
-			"- Si puedes ver la imagen o el paciente te describe la orden:\n" +
-			"  /bot orden <descripcion de procedimientos con codigos y cantidades>\n" +
+			"- Si conoces el codigo CUPS directamente:\n" +
+			"  /bot cups <codigo>[:cantidad] ...\n" +
+			"  Ej: /bot cups 883141\n" +
+			"  Ej: /bot cups 883141:1 930810:2\n" +
+			"- Si el paciente te describe la orden (sin codigo):\n" +
+			"  /bot orden <descripcion de procedimientos>\n" +
 			"  Ej: /bot orden Resonancia cerebral simple codigo 883141, cantidad 1"
 
 	case sm.StateUploadMedicalOrder:
 		situation = fmt.Sprintf("El paciente no logro enviar la foto de su orden medica o el bot no la reconocio.\nPaciente: %s | Doc: %s", patientName, patientDoc)
 		actions = "- Pidele que envie la foto de la orden:\n" +
 			"  /bot resume UPLOAD_MEDICAL_ORDER — Reintentar subida de orden\n" +
-			"- Si puedes ver la imagen o el paciente te describe la orden:\n" +
-			"  /bot orden Resonancia cerebral simple codigo 883141, cantidad 1\n" +
-			"  /bot orden Electromiografia 4 ext codigo 930810 cantidad 1, Resonancia columna lumbar codigo 883210 cantidad 1"
+			"- Si conoces el codigo CUPS directamente:\n" +
+			"  /bot cups <codigo>[:cantidad] ...\n" +
+			"  Ej: /bot cups 883141\n" +
+			"  Ej: /bot cups 883141:1 930810:2\n" +
+			"- Si el paciente te describe la orden (sin codigo):\n" +
+			"  /bot orden Resonancia cerebral simple codigo 883141, cantidad 1"
 
 	case sm.StateConfirmOCRResult:
 		ocrCups := sess.GetContext("ocr_cups_json")
@@ -390,12 +404,18 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume CONFIRM_OCR_RESULT ocr_correct — Los procedimientos son correctos\n" +
 			"  /bot resume CONFIRM_OCR_RESULT ocr_incorrect — Los procedimientos son incorrectos\n" +
 			"  /bot resume CONFIRM_OCR_RESULT — Mostrar resultado de nuevo\n" +
-			"- Si puedes ver la orden o el paciente te la describe:\n" +
+			"- Si quieres corregir con el codigo CUPS exacto:\n" +
+			"  /bot cups <codigo>[:cantidad] ...\n" +
+			"  Ej: /bot cups 883141\n" +
+			"- Si el paciente te describe la orden (sin codigo):\n" +
 			"  /bot orden <descripcion de procedimientos con codigos y cantidades>"
 
 	case sm.StateAskManualCups:
 		situation = fmt.Sprintf("El paciente no pudo encontrar su procedimiento al buscarlo.\nPaciente: %s | Doc: %s", patientName, patientDoc)
-		actions = "- Si puedes ver la orden o el paciente te la describe:\n" +
+		actions = "- Si conoces el codigo CUPS:\n" +
+			"  /bot cups <codigo>[:cantidad] ...\n" +
+			"  Ej: /bot cups 883141\n" +
+			"- Si el paciente te describe la orden:\n" +
 			"  /bot orden <descripcion con codigos y cantidades>\n" +
 			"- O busca por nombre:\n" +
 			"  /bot resume ASK_MANUAL_CUPS nombre del procedimiento\n" +
@@ -410,11 +430,16 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 
 	// --- Validaciones Medicas ---
 	case sm.StateAskGestationalWeeks:
-		situation = fmt.Sprintf("Ecografia obstetrica — no ingreso semanas de gestacion (1-42).\nProcedimiento: %s (%s)\nPaciente: %s",
-			cupsName, cupsCode, patientName)
-		actions = "- Preguntale las semanas de gestacion:\n" +
-			"  /bot resume ASK_GESTATIONAL_WEEKS 28 — Enviar semanas\n" +
-			"  /bot resume ASK_GESTATIONAL_WEEKS — Preguntar de nuevo"
+		gestRange := ""
+		if gr, ok := pregnancyUltrasoundCups[cupsCode]; ok {
+			gestRange = gr.label
+		}
+		situation = fmt.Sprintf("Ecografia obstetrica — paciente no respondio si esta en el rango de semanas requerido.\nProcedimiento: %s (%s)\nRango requerido: %s\nPaciente: %s",
+			cupsName, cupsCode, gestRange, patientName)
+		actions = fmt.Sprintf("- Preguntale al paciente cuantas semanas de gestacion tiene. El rango requerido es: %s\n", gestRange) +
+			"  /bot resume ASK_GESTATIONAL_WEEKS weeks_yes — Paciente SI esta en el rango\n" +
+			"  /bot resume ASK_GESTATIONAL_WEEKS weeks_no — Paciente NO esta en el rango\n" +
+			"  /bot resume ASK_GESTATIONAL_WEEKS — Preguntar de nuevo con botones"
 
 	case sm.StateAskContrasted:
 		situation = fmt.Sprintf("El paciente no respondio si el examen es con o sin contraste.\nProcedimiento: %s (%s)\nPaciente: %s",
@@ -538,8 +563,11 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 		actions = "- Muestra la lista de nuevo para que el paciente seleccione:\n" +
 			"  /bot resume LIST_APPOINTMENTS — Mostrar lista de citas de nuevo\n" +
 			"  /bot resume FETCH_APPOINTMENTS — Recargar citas desde el sistema\n" +
-			"- Si el paciente te dice que accion quiere sin seleccionar, navega por el:\n" +
-			"  /bot resume FETCH_APPOINTMENTS — Recargar y mostrar lista"
+			"- Si el paciente indica cual cita quiere (por numero en la lista):\n" +
+			"  /bot resume LIST_APPOINTMENTS 1 — Ver detalle de la cita #1\n" +
+			"  /bot resume LIST_APPOINTMENTS 2 — Ver detalle de la cita #2\n" +
+			"- Si el paciente dice que la fecha/hora esta mal o tiene mas citas:\n" +
+			"  /bot resume FETCH_APPOINTMENTS — Recargar y mostrar lista actualizada"
 
 	case sm.StateAppointmentAction:
 		situation = fmt.Sprintf("El paciente no selecciono accion sobre su cita.\nPaciente: %s | Cita: %s",
@@ -574,6 +602,19 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 		actions = "- Preguntale el motivo:\n" +
 			"  /bot resume CANCEL_REASON — Mostrar motivos de nuevo\n" +
 			"  /bot resume LIST_APPOINTMENTS — Volver a lista"
+
+	// --- Notificación proactiva — texto libre repetido (escalado por HandleInvalidInput) ---
+	case sm.StateNotifPending:
+		apptDate := sess.GetContext("notif_appt_date")
+		apptTime := sess.GetContext("notif_appt_time")
+		cupsNotif := sess.GetContext("notif_cups_name")
+		situation = fmt.Sprintf("Paciente envio texto libre reiteradamente al recibir template de confirmacion.\n"+
+			"No presiono ningun boton. Cita: %s %s — %s\nPaciente: %s",
+			apptDate, apptTime, cupsNotif, patientName)
+		actions = "- Preguntale al paciente que desea hacer y responde por el:\n" +
+			"  /bot resume NOTIF_PENDING confirm — Confirmar la cita\n" +
+			"  /bot resume NOTIF_PENDING reschedule — Reprogramar la cita\n" +
+			"  /bot resume NOTIF_PENDING cancel — Cancelar la cita"
 
 	// --- Notificaciones proactivas (reprogramar / cancelar desde template) ---
 	case sm.StateConfirmRescheduleNotif:

@@ -2,15 +2,19 @@ package notifications
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/config"
 	"github.com/neuro-bot/neuro-bot/internal/domain"
 	"github.com/neuro-bot/neuro-bot/internal/services"
 	"github.com/neuro-bot/neuro-bot/internal/session"
+	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 // PendingNotification tracks a proactive notification awaiting response.
@@ -21,8 +25,10 @@ type PendingNotification struct {
 	WaitingListID  string // only for waiting_list type
 	BirdMessageID  string
 	ConversationID string
+	CallID         string // Bird IVR call ID (set after PlaceCall, persisted for restart recovery)
 	Timer          *time.Timer
 	RetryCount     int
+	InvalidInputs  int // free-text messages received while waiting for button press
 	CreatedAt      time.Time
 }
 
@@ -51,9 +57,16 @@ type PreparationFinder interface {
 // NotificationPersister persists pending notifications to the database.
 type NotificationPersister interface {
 	Upsert(ctx context.Context, phone, nType, apptID, wlID, birdMsgID, convID string, retryCount int, expiresAt time.Time) error
+	UpdateCallID(ctx context.Context, phone, callID string) error
 	Delete(ctx context.Context, phone string) error
 	FindExpired(ctx context.Context) ([]PendingRow, error)
 	FindAll(ctx context.Context) ([]PendingRow, error)
+}
+
+// CallTracker persists IVR call records to the database for KPI tracking.
+type CallTracker interface {
+	InsertCall(ctx context.Context, callID, phone, appointmentID string) error
+	UpdateCallResult(ctx context.Context, callID, status, result string) error
 }
 
 // PendingRow represents a pending notification row from the database.
@@ -64,6 +77,7 @@ type PendingRow struct {
 	WaitingListID  string
 	BirdMessageID  string
 	ConversationID string
+	CallID         string
 	RetryCount     int
 	ExpiresAt      time.Time
 	CreatedAt      time.Time
@@ -94,6 +108,7 @@ type WaitingListChecker interface {
 // NotificationManager handles responses to proactive WhatsApp templates.
 type NotificationManager struct {
 	pending         sync.Map // phone → *PendingNotification
+	callIDMap       sync.Map // callId → phone (for IVR DTMF result correlation)
 	birdClient      *bird.Client
 	apptSvc         *services.AppointmentService
 	cfg             *config.Config
@@ -103,6 +118,7 @@ type NotificationManager struct {
 	procRepo        PreparationFinder
 	addrMapper      *services.AddressMapper
 	persister       NotificationPersister
+	callTracker     CallTracker
 	tracker         EventLogger
 
 	// Cambio 13: real-time WL notification on cancellation
@@ -140,6 +156,11 @@ func (m *NotificationManager) SetAddressMapper(am *services.AddressMapper) {
 // SetPersister injects the database persister for pending notifications.
 func (m *NotificationManager) SetPersister(p NotificationPersister) {
 	m.persister = p
+}
+
+// SetCallTracker injects the KPI tracker for IVR call records.
+func (m *NotificationManager) SetCallTracker(ct CallTracker) {
+	m.callTracker = ct
 }
 
 // SetTracker injects the event logger for auditing.
@@ -223,10 +244,107 @@ func (m *NotificationManager) HandleResponse(phone, payload, conversationID stri
 	}
 }
 
+// HandleNotifPendingCommand processes a /bot resume NOTIF_PENDING command from an agent.
+// Called when the pending notification was already removed from memory (escalated path),
+// so the appointment data is reconstructed from the session context.
+func (m *NotificationManager) HandleNotifPendingCommand(phone, action, convID, appointmentID, notifType string) {
+	slog.Info("agent handling notif_pending command",
+		"phone", phone,
+		"action", action,
+		"appointment_id", appointmentID,
+		"notif_type", notifType,
+	)
+
+	pending := &PendingNotification{
+		Phone:          phone,
+		AppointmentID:  appointmentID,
+		Type:           notifType,
+		ConversationID: convID,
+	}
+
+	normalized := normalizePostback(action)
+
+	switch notifType {
+	case "confirmation":
+		m.handleConfirmation(phone, normalized, pending)
+	case "reschedule":
+		m.handleReschedule(phone, normalized, pending)
+	case "cancellation":
+		m.handleCancellation(phone, normalized, pending)
+	default:
+		// Unknown type — treat as confirmation (safest fallback)
+		slog.Warn("HandleNotifPendingCommand: unknown notif type, treating as confirmation",
+			"phone", phone, "notif_type", notifType)
+		m.handleConfirmation(phone, normalized, pending)
+	}
+}
+
 // HasPending checks if there's a pending notification for a phone number.
 func (m *NotificationManager) HasPending(phone string) bool {
 	_, ok := m.pending.Load(phone)
 	return ok
+}
+
+// HandleInvalidInput is called when a patient sends free text while a notification is pending.
+// Resends the confirmation prompt (up to 3 times) instead of starting a new bot session.
+// Returns true if the message was consumed (caller should not route to state machine).
+func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) bool {
+	val, ok := m.pending.Load(phone)
+	if !ok {
+		return false
+	}
+	p := val.(*PendingNotification)
+
+	// Only intercept confirmation/reschedule types that show buttons
+	if p.Type != "confirmation" && p.Type != "reschedule" {
+		return false
+	}
+
+	p.InvalidInputs++
+
+	if p.InvalidInputs > 3 {
+		// Demasiados intentos inválidos — escalar al agente para que gestione
+		m.pending.LoadAndDelete(phone)
+		if p.Timer != nil {
+			p.Timer.Stop()
+		}
+		if m.persister != nil {
+			m.persister.Delete(context.Background(), phone)
+		}
+		// Actualizar caché con el convID del mensaje entrante (puede diferir del template)
+		if conversationID != "" {
+			m.birdClient.CacheConversationID(phone, conversationID)
+		}
+		m.escalateNotifToAgent(p, conversationID)
+		return true
+	}
+
+	m.pending.Store(phone, p)
+
+	convID := conversationID
+	if convID == "" {
+		convID = p.ConversationID
+	}
+
+	// Actualizar caché: el paciente puede estar en una conversación diferente al template
+	if conversationID != "" {
+		m.birdClient.CacheConversationID(phone, conversationID)
+	}
+
+	m.birdClient.SendButtons(phone, convID,
+		"Por favor selecciona una opcion para gestionar tu cita de manana:",
+		[]bird.Button{
+			{Text: "Confirmar", Payload: "confirm"},
+			{Text: "Reprogramar", Payload: "reprogramar"},
+			{Text: "Cancelar", Payload: "cancelar"},
+		})
+
+	slog.Info("notification invalid input — resent prompt",
+		"phone", phone,
+		"type", p.Type,
+		"invalid_inputs", p.InvalidInputs,
+	)
+	return true
 }
 
 // GetPendingForIVR returns pending confirmations/reschedules that completed
@@ -271,6 +389,177 @@ func (m *NotificationManager) MarkIVRSent(phone string) {
 	}
 
 	slog.Info("IVR sent, post-IVR timer started", "phone", phone, "retry", p.RetryCount, "minutes", safeMinutes(m.cfg.ConfirmPostIVRMinutes, 30))
+}
+
+// RegisterCallID stores the mapping callId → phone so that when Bird sends the
+// voice webhook (call_command_gather_finished), we can resolve the patient.
+// Also persists callId to DB (restart recovery) and inserts a KPI call record.
+func (m *NotificationManager) RegisterCallID(callID, phone string) {
+	m.callIDMap.Store(callID, phone)
+
+	ctx := context.Background()
+
+	// Store callID in the in-memory pending so MarkIVRSent can carry it forward
+	apptID := ""
+	if val, ok := m.pending.Load(phone); ok {
+		p := val.(*PendingNotification)
+		p.CallID = callID
+		m.pending.Store(phone, p)
+		apptID = p.AppointmentID
+	}
+
+	// Persist callId to notification_pending for restart recovery
+	if m.persister != nil {
+		if err := m.persister.UpdateCallID(ctx, phone, callID); err != nil {
+			slog.Error("persist call_id to notification_pending", "phone", phone, "callId", callID, "error", err)
+		}
+	}
+
+	// KPI: insert call record into communication_calls
+	if m.callTracker != nil {
+		if err := m.callTracker.InsertCall(ctx, callID, phone, apptID); err != nil {
+			slog.Error("insert ivr call record", "callId", callID, "phone", phone, "error", err)
+		}
+	}
+}
+
+// HandleVoiceGatherResult processes the DTMF result from a Bird voice IVR call.
+//
+//   - keys == "1"  → confirm in DB, internal note to Bird Inbox, clear pending (no WA to patient)
+//   - keys != "" && != "1" → cancel in DB, internal note, clear pending (no WA to patient)
+//   - keys == ""   → patient didn't press any key (gather timed out after 50s);
+//     leave appointment and pending untouched, send internal note only
+//
+// If the call was never answered: no gather webhook fires, the post-IVR timer
+// continues and eventually escalates to a human agent.
+func (m *NotificationManager) HandleVoiceGatherResult(callID, keys string) {
+	val, ok := m.callIDMap.LoadAndDelete(callID)
+	if !ok {
+		slog.Warn("voice gather result: unknown callId", "callId", callID)
+		return
+	}
+	phone := val.(string)
+
+	ctx := context.Background()
+
+	switch {
+	case keys == "1":
+		// ── CONFIRM ──────────────────────────────────────────────────────────
+		slog.Info("IVR: patient confirmed", "phone", phone, "callId", callID)
+
+		pendVal, ok := m.pending.LoadAndDelete(phone)
+		if !ok {
+			return
+		}
+		p := pendVal.(*PendingNotification)
+		if p.Timer != nil {
+			p.Timer.Stop()
+		}
+		if m.persister != nil {
+			m.persister.Delete(ctx, phone)
+		}
+
+		_, block, err := m.apptSvc.FindBlockByAppointmentID(ctx, p.AppointmentID)
+		if err == nil && len(block) > 0 {
+			m.apptSvc.ConfirmBlock(ctx, block, "ivr", callID)
+		}
+
+		m.ivrInternalNote(p.ConversationID, phone, callID,
+			"✅ *IVR — Cita CONFIRMADA por el paciente via llamada telefonica.*\n"+
+				"El paciente oprimio *1*. La cita queda confirmada en el sistema.")
+
+		if m.callTracker != nil {
+			m.callTracker.UpdateCallResult(ctx, callID, "completed", "confirmed")
+		}
+		if m.tracker != nil {
+			m.tracker.LogEvent(ctx, "", phone, "notification_confirmed_ivr",
+				map[string]interface{}{"appointment_id": p.AppointmentID, "call_id": callID})
+		}
+
+	case keys != "":
+		// ── CANCEL (pressed any key other than 1) ────────────────────────────
+		slog.Info("IVR: patient cancelled", "phone", phone, "keys", keys, "callId", callID)
+
+		pendVal, ok := m.pending.LoadAndDelete(phone)
+		if !ok {
+			return
+		}
+		p := pendVal.(*PendingNotification)
+		if p.Timer != nil {
+			p.Timer.Stop()
+		}
+		if m.persister != nil {
+			m.persister.Delete(ctx, phone)
+		}
+
+		_, block, err := m.apptSvc.FindBlockByAppointmentID(ctx, p.AppointmentID)
+		if err == nil && len(block) > 0 {
+			m.apptSvc.CancelBlock(ctx, block, "Cancelada por paciente via llamada IVR", "ivr", "")
+		}
+
+		m.ivrInternalNote(p.ConversationID, phone, callID,
+			"❌ *IVR — Cita CANCELADA por el paciente via llamada telefonica.*\n"+
+				fmt.Sprintf("El paciente oprimio *%s* (≠1). La cita fue cancelada en el sistema.", keys))
+
+		if m.callTracker != nil {
+			m.callTracker.UpdateCallResult(ctx, callID, "completed", "cancelled")
+		}
+		if m.tracker != nil {
+			m.tracker.LogEvent(ctx, "", phone, "notification_cancelled_ivr",
+				map[string]interface{}{"appointment_id": p.AppointmentID, "call_id": callID, "keys": keys})
+		}
+
+	default:
+		// ── NO KEY PRESSED (gather timed out after 50 s) ─────────────────────
+		// Appointment stays unconfirmed; post-IVR timer continues.
+		slog.Info("IVR: no DTMF received (timeout)", "phone", phone, "callId", callID)
+
+		convID := ""
+		if pendVal, ok := m.pending.Load(phone); ok {
+			convID = pendVal.(*PendingNotification).ConversationID
+		}
+		m.ivrInternalNote(convID, phone, callID,
+			"⚠️ *IVR — El paciente NO oprimio ninguna tecla durante la llamada.*\n"+
+				"La cita queda pendiente de confirmacion. El sistema continuara el flujo de seguimiento.")
+
+		if m.callTracker != nil {
+			m.callTracker.UpdateCallResult(ctx, callID, "completed", "no_dtmf")
+		}
+	}
+}
+
+// HandleVoiceCallCompleted is called when a voice call completes (via notification webhook).
+// If the callId is still in callIDMap at this point (no gather webhook was received),
+// it means the call was not answered or went to voicemail. Sends an internal note and cleans up.
+func (m *NotificationManager) HandleVoiceCallCompleted(callID string) {
+	val, ok := m.callIDMap.LoadAndDelete(callID)
+	if !ok {
+		return // Already handled by gather result
+	}
+	phone := val.(string)
+	slog.Info("IVR: call completed without gather (no answer / voicemail)", "phone", phone, "callId", callID)
+
+	convID := ""
+	if pendVal, ok := m.pending.Load(phone); ok {
+		convID = pendVal.(*PendingNotification).ConversationID
+	}
+	m.ivrInternalNote(convID, phone, callID,
+		"📵 *IVR — Llamada no contestada o cayo en buzon de voz.*\n"+
+			"La grabacion queda disponible en Bird. La cita sigue pendiente de confirmacion.")
+
+	if m.callTracker != nil {
+		m.callTracker.UpdateCallResult(context.Background(), callID, "completed", "no_answer")
+	}
+}
+
+// ivrInternalNote sends an internal (agent-only) note to Bird Inbox for the voice call.
+// If convID is empty, looks up the conversation by phone.
+func (m *NotificationManager) ivrInternalNote(convID, phone, callID, note string) {
+	if convID == "" {
+		convID = m.birdClient.GetCachedConversationID(phone)
+	}
+	msg := note + fmt.Sprintf("\n\n🎙️ CallID: `%s`\n_(La grabacion esta disponible en la seccion de Grabaciones de Bird)_", callID)
+	m.birdClient.SendInternalText(convID, msg)
 }
 
 // LoadPendingForTest exposes the pending sync.Map entry for test manipulation.
@@ -318,8 +607,14 @@ func (m *NotificationManager) RestorePending(ctx context.Context) {
 			WaitingListID:  row.WaitingListID,
 			BirdMessageID:  row.BirdMessageID,
 			ConversationID: row.ConversationID,
+			CallID:         row.CallID,
 			RetryCount:     row.RetryCount,
 			CreatedAt:      row.CreatedAt,
+		}
+
+		// Rebuild callIDMap so in-flight IVR webhooks are correlated after restart
+		if row.CallID != "" {
+			m.callIDMap.Store(row.CallID, row.Phone)
 		}
 
 		if now.After(row.ExpiresAt) {
@@ -445,6 +740,110 @@ func normalizePostback(payload string) string {
 	default:
 		return payload
 	}
+}
+
+// escalateNotifToAgent escala al agente cuando el paciente envió texto libre repetidamente
+// durante el flujo de confirmación proactiva. Crea una sesión escalada en estado NOTIF_PENDING
+// para que el agente tenga comandos disponibles (/bot resume NOTIF_PENDING confirm/reschedule/cancel).
+func (m *NotificationManager) escalateNotifToAgent(p *PendingNotification, incomingConvID string) {
+	convID := incomingConvID
+	if convID == "" {
+		convID = p.ConversationID
+	}
+	if convID == "" {
+		convID = m.birdClient.GetCachedConversationID(p.Phone)
+	}
+
+	ctx := context.Background()
+
+	// Obtener datos de la cita para el mensaje al agente
+	apptDate := ""
+	apptTime := ""
+	cupsName := ""
+	patientName := ""
+	if appt, _, err := m.apptSvc.FindBlockByAppointmentID(ctx, p.AppointmentID); err == nil && appt != nil {
+		apptDate = utils.FormatFriendlyDate(appt.Date)
+		apptTime = services.FormatTimeSlot(appt.TimeSlot)
+		patientName = appt.PatientName
+		if len(appt.Procedures) > 0 {
+			cupsName = appt.Procedures[0].CupName
+		}
+	}
+
+	// Crear sesión escalada con contexto de la notificación
+	if m.sessionRepo != nil {
+		sess := &session.Session{
+			ID:             uuid.New().String(),
+			PhoneNumber:    p.Phone,
+			CurrentState:   sm.StateNotifPending,
+			ConversationID: convID,
+			Status:         session.StatusEscalated,
+			ExpiresAt:      time.Now().Add(24 * time.Hour),
+		}
+		sessCtx := map[string]string{
+			"notif_appointment_id": p.AppointmentID,
+			"notif_type":           p.Type,
+			"notif_appt_date":      apptDate,
+			"notif_appt_time":      apptTime,
+			"notif_cups_name":      cupsName,
+			"notif_conv_id":        convID,
+			"notif_bird_msg_id":    p.BirdMessageID,
+			"patient_name":         patientName,
+			"pre_escalation_state": sm.StateNotifPending,
+		}
+		if err := m.sessionRepo.Create(ctx, sess); err != nil {
+			slog.Error("escalateNotifToAgent: create session", "error", err, "phone", p.Phone)
+		} else if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessCtx); err != nil {
+			slog.Error("escalateNotifToAgent: set context", "error", err, "phone", p.Phone)
+		}
+	}
+
+	// Nota interna + mensaje al paciente + asignación de agente
+	note := fmt.Sprintf("Paciente envio texto libre repetidamente durante confirmacion de cita.\n"+
+		"Cita ID: %s | Fecha: %s %s | Procedimiento: %s\n"+
+		"Requiere gestion manual del agente.",
+		p.AppointmentID, apptDate, apptTime, cupsName)
+
+	slog.Info("escalateNotifToAgent",
+		"phone", p.Phone,
+		"conv_id", convID,
+		"appointment_id", p.AppointmentID,
+		"team_fallback", m.cfg.BirdTeamFallback,
+	)
+
+	commands := fmt.Sprintf("Comandos disponibles:\n"+
+		"  /bot resume NOTIF_PENDING confirm — Confirmar la cita\n"+
+		"  /bot resume NOTIF_PENDING reschedule — Reprogramar la cita\n"+
+		"  /bot resume NOTIF_PENDING cancel — Cancelar la cita\n"+
+		"  /bot cerrar — Cerrar la conversacion",
+	)
+
+	if convID != "" {
+		m.birdClient.SendInternalText(convID, note)
+		m.birdClient.SendInternalText(convID, commands)
+	}
+
+	m.birdClient.SendText(p.Phone, convID,
+		"Te voy a conectar con un agente para gestionar tu cita. Un momento por favor...")
+
+	if convID == "" {
+		slog.Error("escalateNotifToAgent: no conversation ID — cannot assign agent", "phone", p.Phone)
+		return
+	}
+
+	if err := m.birdClient.EscalateToAgent(convID, p.Phone,
+		m.cfg.BirdTeamFallback, "Call Center",
+		patientName, m.cfg.BirdTeamFallback); err != nil {
+		slog.Error("escalateNotifToAgent: EscalateToAgent failed",
+			"phone", p.Phone,
+			"conv_id", convID,
+			"team", m.cfg.BirdTeamFallback,
+			"error", err,
+		)
+		return
+	}
+
+	slog.Info("notif escalated to agent (invalid inputs)", "phone", p.Phone, "appointment_id", p.AppointmentID)
 }
 
 // safeHours returns v if > 0, otherwise fallback. Guards against zero-value configs in tests.
