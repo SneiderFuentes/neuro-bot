@@ -208,7 +208,17 @@ check_port() {
         if echo "$used_by" | grep -q "neuro_bot\|docker-proxy"; then
             pass "Puerto $port ($service) - en uso por nuestro container (OK si ya esta corriendo)"
         else
-            fail "Puerto $port ($service) OCUPADO" "Cambiar en .env: ${env_var}=<otro_puerto>  |  En uso por: $used_by"
+            # Buscar puertos libres cercanos para sugerir
+            local suggestions=""
+            for try_port in $(seq $((port + 1)) $((port + 10))); do
+                if ! ss -tlnp 2>/dev/null | grep -q ":${try_port} " && \
+                   ! netstat -tlnp 2>/dev/null | grep -q ":${try_port} "; then
+                    suggestions="${suggestions}${try_port}, "
+                    [ "$(echo "$suggestions" | tr -cd ',' | wc -c)" -ge 3 ] && break
+                fi
+            done
+            suggestions="${suggestions%, }"
+            fail "Puerto $port ($service) OCUPADO" "Cambiar en .env: ${env_var}=<otro_puerto>  |  Libres: ${suggestions:-ninguno cercano}  |  En uso por: $used_by"
         fi
     else
         pass "Puerto $port ($service) disponible"
