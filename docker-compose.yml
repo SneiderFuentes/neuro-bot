@@ -149,7 +149,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 32M
+          memory: 64M
           cpus: '0.25'
 
 # ⚠ DANGER: Never use "docker compose down -v" — it DELETES the botdbdata volume
