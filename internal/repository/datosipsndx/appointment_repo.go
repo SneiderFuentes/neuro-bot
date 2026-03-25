@@ -144,9 +144,9 @@ func (r *AppointmentRepo) FindUpcomingByPatient(ctx context.Context, patientID s
 }
 
 func (r *AppointmentRepo) fetchProcedures(ctx context.Context, appointmentID string) ([]domain.AppointmentProcedure, error) {
-	query := `SELECT px.RegistroNo, px.CUPS,
-	            COALESCE(cp.nombre, px.CUPS) AS CupName,
-	            px.Cantidad, px.VrUnitario, px.IdServicio
+	query := `SELECT px.RegistroNo, COALESCE(px.CUPS, '') AS CUPS,
+	            COALESCE(cp.nombre, px.CUPS, '') AS CupName,
+	            COALESCE(px.Cantidad, 0), COALESCE(px.VrUnitario, 0), COALESCE(px.IdServicio, 0)
 	          FROM pxcita px
 	          LEFT JOIN cups_procedimientos cp ON cp.codigo_cups = px.CUPS
 	          WHERE px.IdCita = ?`

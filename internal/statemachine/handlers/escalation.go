@@ -57,7 +57,19 @@ func escalateHandler(birdClient *bird.Client, cfg *config.Config) sm.StateHandle
 		// Resolve team name for display
 		teamName := resolveTeamName(teamID, cfg)
 
-		// 4. Try to escalate — only notify patient on SUCCESS
+		// 4. If conversationID is still empty, send patient message first.
+		// The Channels API response contains conversationId which gets cached.
+		patientNotified := false
+		if conversationID == "" {
+			birdClient.SendText(msg.Phone, "", "Te voy a conectar con un agente. Un momento por favor...")
+			patientNotified = true
+			conversationID = birdClient.GetCachedConversationID(msg.Phone)
+			if conversationID != "" {
+				sess.ConversationID = conversationID
+			}
+		}
+
+		// 5. Try to escalate
 		if err := birdClient.EscalateToAgent(conversationID, msg.Phone, teamID, teamName, sess.PatientName, cfg.BirdTeamFallback); err != nil {
 			slog.Error("escalation failed",
 				"error", err,
@@ -75,21 +87,24 @@ func escalateHandler(birdClient *bird.Client, cfg *config.Config) sm.StateHandle
 				WithEvent("escalation_failed", map[string]interface{}{"error": err.Error()}), nil
 		}
 
-		// 4b. Persist conversationID in session (may have been resolved by API lookup inside EscalateToAgent)
+		// 5b. Persist conversationID in session
 		if sess.ConversationID == "" {
 			if cached := birdClient.GetCachedConversationID(msg.Phone); cached != "" {
 				sess.ConversationID = cached
+				conversationID = cached
 			}
 		}
 
-		// 5. Escalation succeeded — notify patient (visible in WhatsApp + Inbox)
-		birdClient.SendText(msg.Phone, conversationID, "Te voy a conectar con un agente. Un momento por favor...")
+		// 6. Notify patient (skip if already sent in step 4)
+		if !patientNotified {
+			birdClient.SendText(msg.Phone, conversationID, "Te voy a conectar con un agente. Un momento por favor...")
+		}
 
-		// 6. Send detailed context summary for the agent (Inbox only — invisible to patient)
+		// 7. Send detailed context summary for the agent (Inbox only — invisible to patient)
 		summary := buildAgentSummary(sess, cupsCode, teamName)
 		birdClient.SendInternalText(conversationID, summary)
 
-		// 7. Send contextual commands for the agent (Inbox only — invisible to patient)
+		// 8. Send contextual commands for the agent (Inbox only — invisible to patient)
 		commands := buildAgentCommands(sess, cupsCode)
 		birdClient.SendInternalText(conversationID, commands)
 
