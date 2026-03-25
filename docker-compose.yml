@@ -7,7 +7,6 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-      - .env.testing
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
     extra_hosts:
