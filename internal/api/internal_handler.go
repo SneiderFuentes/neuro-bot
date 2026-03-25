@@ -116,6 +116,7 @@ func (h *InternalHandler) HandleSendReminders(w http.ResponseWriter, r *http.Req
 	slog.Info("manual send-reminders triggered", "remote", r.RemoteAddr)
 
 	go func() {
+		defer recoverLog("manual-send-reminders")
 		if err := h.reminderRunner.SendWhatsAppReminders(context.Background()); err != nil {
 			slog.Error("manual send-reminders failed", "error", err)
 		}
@@ -265,6 +266,7 @@ func (h *InternalHandler) HandleCancelAgenda(w http.ResponseWriter, r *http.Requ
 
 		// Send notifications in background goroutine to avoid blocking HTTP response
 		go func() {
+			defer recoverLog("cancel-agenda-notify")
 			notified := 0
 			for _, group := range patients {
 				firstAppt := group[0]
@@ -553,6 +555,7 @@ func (h *InternalHandler) sendRescheduleNotifications(appointments []domain.Appo
 	toNotify := len(patients)
 
 	go func() {
+		defer recoverLog("reschedule-agenda-notify")
 		notified := 0
 		for _, group := range patients {
 			firstAppt := group[0]
