@@ -260,6 +260,13 @@ func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository, birdC
 			}
 			groups = splitGroups
 
+			// Guard: if all groups ended up empty after split, escalate
+			if len(groups) == 0 {
+				return sm.NewResult(sm.StateEscalateToAgent).
+					WithText("No pudimos identificar procedimientos válidos en tu orden. Te comunicaremos con un agente.").
+					WithEvent("ocr_no_valid_cups", nil), nil
+			}
+
 			groupsJSON, _ := json.Marshal(groups)
 
 			r := sm.NewResult(sm.StateCheckSpecialCups).
@@ -282,7 +289,12 @@ func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository, birdC
 
 			// Cargar primer grupo como CUPS actual
 			firstGroup := groups[0]
-			
+			if len(firstGroup.Cups) == 0 {
+				return sm.NewResult(sm.StateEscalateToAgent).
+					WithText("No pudimos identificar procedimientos válidos en tu orden. Te comunicaremos con un agente.").
+					WithEvent("ocr_empty_cups_group", nil), nil
+			}
+
 			// Para grupos con múltiples CUPS (Fisiatría, Resonancia), guardar códigos alternativos
 			// para que la búsqueda de slots pueda probar con cualquiera del grupo.
 			cupsForSearch := firstGroup.Cups[0]
