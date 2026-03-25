@@ -253,6 +253,18 @@ func (r *WaitingListRepo) List(ctx context.Context, filters domain.WaitingListFi
 		where += " AND cups_code = ?"
 		args = append(args, filters.CupsCode)
 	}
+	if filters.Phone != "" {
+		where += " AND phone_number = ?"
+		args = append(args, filters.Phone)
+	}
+	if filters.DateFrom != "" {
+		where += " AND created_at >= ?"
+		args = append(args, filters.DateFrom)
+	}
+	if filters.DateTo != "" {
+		where += " AND created_at <= ?"
+		args = append(args, filters.DateTo+" 23:59:59")
+	}
 
 	// Count total
 	var total int

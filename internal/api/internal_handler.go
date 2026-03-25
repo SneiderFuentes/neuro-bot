@@ -41,6 +41,7 @@ type EventKPIReader interface {
 	GetDailyKPIs(ctx context.Context, date time.Time) (*localrepo.DailyKPIs, error)
 	GetFunnel(ctx context.Context, from, to time.Time) (*localrepo.FunnelData, error)
 	GetHealthMetrics(ctx context.Context) (*localrepo.HealthMetrics, error)
+	FindByPhone(ctx context.Context, phone string, from, to time.Time, eventType string, maxRows int) ([]localrepo.ChatEvent, error)
 }
 
 // WaitingListReader provides waiting list queries (enables testing without DB).
@@ -671,16 +672,27 @@ func (h *InternalHandler) HandleWaitingListCheck(w http.ResponseWriter, r *http.
 
 // HandleWaitingListGet returns paginated waiting list entries.
 func (h *InternalHandler) HandleWaitingListGet(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	phone := strings.TrimSpace(q.Get("phone"))
+	if phone != "" && !strings.HasPrefix(phone, "+") {
+		phone = "+" + phone
+	}
 	filters := domain.WaitingListFilters{
-		Status:   r.URL.Query().Get("status"),
-		CupsCode: r.URL.Query().Get("cups_code"),
+		Status:   q.Get("status"),
+		CupsCode: q.Get("cups_code"),
+		Phone:    phone,
+		DateFrom: q.Get("from"),
+		DateTo:   q.Get("to"),
 	}
 
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	page, _ := strconv.Atoi(q.Get("page"))
 	if page == 0 {
 		page = 1
 	}
 	pageSize := 20
+	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 && v <= 100 {
+		pageSize = v
+	}
 
 	entries, total, err := h.waitingListRepo.List(r.Context(), filters, page, pageSize)
 	if err != nil {
@@ -885,6 +897,7 @@ func (h *InternalHandler) HandleTestAlert(w http.ResponseWriter, r *http.Request
 //	from     — start datetime: YYYY-MM-DD or YYYY-MM-DDTHH:MM
 //	to       — end datetime: YYYY-MM-DD or YYYY-MM-DDTHH:MM
 //	search   — substring search in log message
+//	phone    — filter by phone number (matches anywhere in log line)
 //	download — "true" to return as downloadable .log file
 func (h *InternalHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -899,10 +912,15 @@ func (h *InternalHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
 		lines = 10000
 	}
 
+	logPhone := strings.TrimSpace(q.Get("phone"))
+	if logPhone != "" && !strings.HasPrefix(logPhone, "+") {
+		logPhone = "+" + logPhone
+	}
 	filter := logging.LogFilter{
 		Lines:  lines,
 		Level:  q.Get("level"),
 		Search: q.Get("search"),
+		Phone:  logPhone,
 	}
 
 	if v := q.Get("from"); v != "" {
@@ -942,6 +960,89 @@ func (h *InternalHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
 	w.Write([]byte(body))
+}
+
+// HandleEvents returns chat events filtered by phone and optional date range.
+//
+// Query params:
+//
+//	phone    — phone number to filter (required, e.g. +573105800556)
+//	from     — start datetime: YYYY-MM-DD or YYYY-MM-DDTHH:MM (optional)
+//	to       — end datetime: YYYY-MM-DD or YYYY-MM-DDTHH:MM (optional)
+//	type     — event type filter (optional, e.g. escalated_to_agent)
+//	limit    — max events to return (default 200, max 500)
+func (h *InternalHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	phone := strings.TrimSpace(q.Get("phone"))
+	if phone == "" {
+		http.Error(w, "'phone' query param is required", http.StatusBadRequest)
+		return
+	}
+	// Normalize: accept with or without +
+	if !strings.HasPrefix(phone, "+") {
+		phone = "+" + phone
+	}
+
+	var from, to time.Time
+	if v := q.Get("from"); v != "" {
+		if t, err := parseFlexTime(v); err == nil {
+			from = t
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if t, err := parseFlexTime(v); err == nil {
+			to = t
+		}
+	}
+
+	eventType := q.Get("type")
+
+	limit := 200
+	if v := q.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	events, err := h.eventRepo.FindByPhone(r.Context(), phone, from, to, eventType, limit)
+	if err != nil {
+		slog.Error("find events by phone", "phone", phone, "error", err)
+		http.Error(w, "error querying events", http.StatusInternalServerError)
+		return
+	}
+
+	type eventJSON struct {
+		ID        int64                  `json:"id"`
+		SessionID string                 `json:"session_id"`
+		Phone     string                 `json:"phone"`
+		Type      string                 `json:"type"`
+		Data      map[string]interface{} `json:"data,omitempty"`
+		StateFrom string                 `json:"state_from,omitempty"`
+		StateTo   string                 `json:"state_to,omitempty"`
+		CreatedAt string                 `json:"created_at"`
+	}
+
+	result := make([]eventJSON, len(events))
+	for i, e := range events {
+		result[i] = eventJSON{
+			ID:        e.ID,
+			SessionID: e.SessionID,
+			Phone:     e.PhoneNumber,
+			Type:      e.EventType,
+			Data:      e.EventData,
+			StateFrom: e.StateFrom,
+			StateTo:   e.StateTo,
+			CreatedAt: e.CreatedAt.Format(time.RFC3339),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"phone":  phone,
+		"count":  len(result),
+		"events": result,
+	})
 }
 
 // parseFlexTime parses datetime in flexible formats.

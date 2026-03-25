@@ -78,6 +78,56 @@ func (r *EventRepo) InsertBatch(ctx context.Context, events []ChatEvent) error {
 	return tx.Commit()
 }
 
+// FindByPhone returns chat events filtered by phone number and optional date range / event type.
+// Results are ordered chronologically (oldest first), limited to maxRows.
+func (r *EventRepo) FindByPhone(ctx context.Context, phone string, from, to time.Time, eventType string, maxRows int) ([]ChatEvent, error) {
+	if maxRows <= 0 || maxRows > 500 {
+		maxRows = 200
+	}
+
+	where := "phone_number = ?"
+	args := []interface{}{phone}
+
+	if !from.IsZero() {
+		where += " AND created_at >= ?"
+		args = append(args, from)
+	}
+	if !to.IsZero() {
+		where += " AND created_at <= ?"
+		args = append(args, to)
+	}
+	if eventType != "" {
+		where += " AND event_type = ?"
+		args = append(args, eventType)
+	}
+
+	query := fmt.Sprintf(`SELECT id, session_id, phone_number, event_type, event_data,
+		COALESCE(state_from,''), COALESCE(state_to,''), created_at
+		FROM chat_events WHERE %s ORDER BY created_at ASC LIMIT ?`, where)
+	args = append(args, maxRows)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("find events by phone: %w", err)
+	}
+	defer rows.Close()
+
+	var events []ChatEvent
+	for rows.Next() {
+		var e ChatEvent
+		var dataJSON string
+		if err := rows.Scan(&e.ID, &e.SessionID, &e.PhoneNumber, &e.EventType,
+			&dataJSON, &e.StateFrom, &e.StateTo, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan event row: %w", err)
+		}
+		if dataJSON != "" {
+			json.Unmarshal([]byte(dataJSON), &e.EventData)
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 // === KPI Queries ===
 
 // DailyKPIs contains aggregated metrics for a single day.

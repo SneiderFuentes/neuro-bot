@@ -38,4 +38,7 @@ type WaitingListEntry struct {
 type WaitingListFilters struct {
 	Status   string
 	CupsCode string
+	Phone    string // filter by phone_number (exact match)
+	DateFrom string // filter created_at >= YYYY-MM-DD
+	DateTo   string // filter created_at <= YYYY-MM-DD
 }

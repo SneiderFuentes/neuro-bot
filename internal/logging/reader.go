@@ -18,6 +18,7 @@ type LogFilter struct {
 	From   time.Time // Start time (zero = no lower bound).
 	To     time.Time // End time (zero = no upper bound).
 	Search string    // Substring search in "msg" field (empty = no filter).
+	Phone  string    // Filter by phone number anywhere in the log line (empty = no filter).
 }
 
 // logEntry is the minimal JSON structure we need to parse for filtering.
@@ -38,7 +39,7 @@ func ReadLogs(dir, prefix string, f LogFilter) ([]string, error) {
 	levelUpper := strings.ToUpper(f.Level)
 
 	for _, path := range files {
-		lines, err := readAndFilter(path, levelUpper, f.From, f.To, f.Search)
+		lines, err := readAndFilter(path, levelUpper, f.From, f.To, f.Search, f.Phone)
 		if err != nil {
 			continue // skip unreadable files
 		}
@@ -104,7 +105,7 @@ func extractDate(path, prefix string) time.Time {
 }
 
 // readAndFilter reads a single log file and returns lines matching the filter criteria.
-func readAndFilter(path, levelUpper string, from, to time.Time, search string) ([]string, error) {
+func readAndFilter(path, levelUpper string, from, to time.Time, search, phone string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -120,6 +121,11 @@ func readAndFilter(path, levelUpper string, from, to time.Time, search string) (
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
+			continue
+		}
+
+		// Quick phone filter: check if the phone number appears anywhere in the line.
+		if phone != "" && !strings.Contains(line, phone) {
 			continue
 		}
 

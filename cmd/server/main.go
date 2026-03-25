@@ -388,6 +388,7 @@ func main() {
 		internalMux.HandleFunc("POST /api/internal/send-reminders", internalHandler.HandleSendReminders)
 		internalMux.HandleFunc("POST /api/internal/test-voice-call", internalHandler.HandleTestVoiceCall)
 		internalMux.HandleFunc("GET /api/internal/logs", internalHandler.HandleLogs)
+		internalMux.HandleFunc("GET /api/internal/events", internalHandler.HandleEvents)
 		mux.Handle("/api/internal/",
 			api.RateLimiter(30, time.Minute)(
 				api.MaxBodySize(
