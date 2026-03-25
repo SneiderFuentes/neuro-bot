@@ -4,14 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
 	"runtime"
+	"runtime/debug"
+	"syscall"
 	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/api"
@@ -37,13 +39,36 @@ import (
 var startTime = time.Now()
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	// Capture signals explicitly so we can log which one we received
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		sig := <-sigCh
+		slog.Info("signal received", "signal", sig.String())
+		cancel()
+	}()
 
 	cfg := config.Load()
 
 	// Configurar logger
 	initLogger(cfg.LogLevel, cfg.LogDir)
+
+	slog.Info("bot starting",
+		"pid", os.Getpid(),
+		"version", "1.0",
+	)
+
+	// Capture panics in the log file (otherwise only visible in docker logs)
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("PANIC — bot crashed",
+				"error", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+			panic(r) // re-panic so Docker sees non-zero exit
+		}
+	}()
 
 	// Telegram error alerts (optional — wraps slog handler)
 	tgClient := tg.NewClient(cfg.TelegramBotToken, cfg.TelegramChatID)
