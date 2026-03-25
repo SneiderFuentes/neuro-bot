@@ -452,26 +452,37 @@ func initRepositories(driver string, externalDB *sql.DB) *repository.Repositorie
 func healthHandler(localDB, externalDB *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		health := map[string]string{"status": "ok"}
+		critical := false
 
+		// Local DB is critical — if down, bot cannot function
 		if err := localDB.Ping(); err != nil {
 			health["local_db"] = "error: " + err.Error()
-			health["status"] = "degraded"
+			health["status"] = "critical"
+			critical = true
 		} else {
 			health["local_db"] = "ok"
 		}
 
+		// External DB is non-critical — bot can survive temporary outages (e.g. backups)
 		if externalDB == nil {
 			health["external_db"] = "not connected"
-			health["status"] = "degraded"
+			if health["status"] == "ok" {
+				health["status"] = "degraded"
+			}
 		} else if err := externalDB.Ping(); err != nil {
 			health["external_db"] = "error: " + err.Error()
-			health["status"] = "degraded"
+			if health["status"] == "ok" {
+				health["status"] = "degraded"
+			}
 		} else {
 			health["external_db"] = "ok"
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		if health["status"] != "ok" {
+		// Only return 503 for critical failures (local DB).
+		// External DB degradation returns 200 so Docker doesn't restart the container
+		// (e.g. during nightly backups).
+		if critical {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		json.NewEncoder(w).Encode(health)
