@@ -43,11 +43,11 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
+	safeGo("signal-handler", func() {
 		sig := <-sigCh
 		slog.Info("signal received", "signal", sig.String())
 		cancel()
-	}()
+	})
 
 	cfg := config.Load()
 
@@ -74,7 +74,7 @@ func main() {
 	tgClient := tg.NewClient(cfg.TelegramBotToken, cfg.TelegramChatID)
 	if tgClient != nil {
 		alertHandler := tg.NewAlertHandler(slog.Default().Handler(), tgClient)
-		go alertHandler.Start(ctx)
+		safeGo("telegram-alerts", func() { alertHandler.Start(ctx) })
 		slog.SetDefault(slog.New(alertHandler))
 		slog.Info("telegram error alerts enabled")
 	}
@@ -117,7 +117,7 @@ func main() {
 	sessionManager := session.NewSessionManager(sessionRepo, cfg.SessionTimeoutMinutes)
 
 	// Iniciar phone mutex cleanup
-	go sessionManager.PhoneMutex().StartCleanup(ctx)
+	safeGo("phone-mutex-cleanup", func() { sessionManager.PhoneMutex().StartCleanup(ctx) })
 
 	// Bird client
 	birdClient := bird.NewClient(cfg)
@@ -234,16 +234,18 @@ func main() {
 			notifyManager.SetAddressMapper(addrMapper)
 		}
 		notifyManager.RestorePending(ctx)
-		go notifyManager.StartExpirationChecker(ctx)
+		safeGo("notification-expiry", func() { notifyManager.StartExpirationChecker(ctx) })
 	}
 
 	// Fase 20: Inactivity checker (reminders + auto-close for active, expire for escalated)
-	go sessionManager.StartInactivityChecker(ctx, session.InactivityDeps{
-		BirdClient:   birdClient,
-		Tracker:      tracker,
-		Reminder1Min: cfg.InactivityReminder1Min,
-		Reminder2Min: cfg.InactivityReminder2Min,
-		CloseMin:     cfg.InactivityCloseMin,
+	safeGo("inactivity-checker", func() {
+		sessionManager.StartInactivityChecker(ctx, session.InactivityDeps{
+			BirdClient:   birdClient,
+			Tracker:      tracker,
+			Reminder1Min: cfg.InactivityReminder1Min,
+			Reminder2Min: cfg.InactivityReminder2Min,
+			CloseMin:     cfg.InactivityCloseMin,
+		})
 	})
 
 	// Message inbox (WAL for crash recovery)
@@ -272,7 +274,7 @@ func main() {
 		WorkerCount:       cfg.WorkerPoolSize,
 	})
 	if capMon != nil {
-		go capMon.Start(ctx)
+		safeGo("capacity-monitor", func() { capMon.Start(ctx) })
 	}
 
 	// WAL replay: re-process messages that weren't completed before last shutdown/crash
@@ -340,7 +342,7 @@ func main() {
 		}
 		schedulerTasks.RegisterAll(sched)
 		sched.RunMissedTasks(ctx) // Catch-up missed tasks before starting the regular loop
-		go sched.Start(ctx)
+		safeGo("scheduler", func() { sched.Start(ctx) })
 	}
 
 	// Webhook handler (con NotificationManager para postbacks proactivos + WAL inbox)
@@ -402,7 +404,7 @@ func main() {
 		WriteTimeout: time.Duration(cfg.HTTPWriteTimeout) * time.Second,
 		IdleTimeout:  time.Duration(cfg.HTTPIdleTimeout) * time.Second,
 	}
-	go func() {
+	safeGo("http-server", func() {
 		slog.Info("server starting",
 			"port", cfg.Port,
 			"timezone", cfg.Timezone,
@@ -414,7 +416,7 @@ func main() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server: %v", err)
 		}
-	}()
+	})
 
 	<-ctx.Done()
 	slog.Info("shutting down...")
@@ -516,6 +518,26 @@ func healthHandler(localDB, externalDB *sql.DB) http.HandlerFunc {
 		}
 		json.NewEncoder(w).Encode(health)
 	}
+}
+
+// safeGo runs f in a new goroutine with panic recovery.
+// Logs the panic + stack trace via slog so it appears in /api/internal/logs,
+// then re-panics so Docker sees a non-zero exit and restarts the container.
+func safeGo(name string, f func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("PANIC in background goroutine",
+					"goroutine", name,
+					"error", fmt.Sprintf("%v", r),
+					"stack", string(debug.Stack()),
+				)
+				time.Sleep(500 * time.Millisecond) // allow log flush before crash
+				panic(r)
+			}
+		}()
+		f()
+	}()
 }
 
 func debugHandler(localDB, externalDB *sql.DB) http.HandlerFunc {

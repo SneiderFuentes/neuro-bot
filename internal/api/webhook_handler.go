@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,17 @@ import (
 	"github.com/neuro-bot/neuro-bot/internal/notifications"
 	"github.com/neuro-bot/neuro-bot/internal/worker"
 )
+
+// recoverLog logs panics from background goroutines without crashing the process.
+func recoverLog(name string) {
+	if r := recover(); r != nil {
+		slog.Error("PANIC in background goroutine",
+			"goroutine", name,
+			"error", fmt.Sprintf("%v", r),
+			"stack", string(debug.Stack()),
+		)
+	}
+}
 
 // InboxPersister abstracts message inbox operations for crash recovery (WAL pattern).
 type InboxPersister interface {
@@ -97,7 +110,10 @@ func (h *WebhookHandler) HandleWhatsApp(w http.ResponseWriter, r *http.Request) 
 				"phone", msg.Phone,
 				"payload", msg.PostbackPayload,
 			)
-			go h.notifyManager.HandleResponse(msg.Phone, msg.PostbackPayload, msg.ConversationID)
+			go func() {
+				defer recoverLog("notification-response")
+				h.notifyManager.HandleResponse(msg.Phone, msg.PostbackPayload, msg.ConversationID)
+			}()
 			return
 		}
 		// Patient sent free text instead of pressing a button — retry the prompt
@@ -405,6 +421,7 @@ func (h *WebhookHandler) HandleVoiceWebhook(w http.ResponseWriter, r *http.Reque
 				// Call is active — send mid-call gather command (two-phase IVR)
 				slog.Info("voice call ongoing, sending gather", "callId", callID)
 				go func() {
+					defer recoverLog("voice-gather-send")
 					commandID, err := h.birdClient.SendGather(callID)
 					if err != nil {
 						slog.Error("send gather failed", "callId", callID, "error", err)
@@ -417,6 +434,7 @@ func (h *WebhookHandler) HandleVoiceWebhook(w http.ResponseWriter, r *http.Reque
 			case "completed":
 				// Call finished — query gather command result via GET /calls/{id}/commands/{cmdId}
 				go func() {
+					defer recoverLog("voice-gather-result")
 					val, hasCmd := h.voiceGatherCmds.LoadAndDelete(callID)
 					if !hasCmd {
 						// Gather command never ran (call not answered, or gather failed)
@@ -526,7 +544,10 @@ func (h *WebhookHandler) HandleVoiceDTMF(w http.ResponseWriter, r *http.Request)
 
 	// Process DTMF result asynchronously (confirm/cancel in DB)
 	if h.notifyManager != nil && ctx.CallID != "" {
-		go h.notifyManager.HandleVoiceGatherResult(ctx.CallID, ctx.Keys)
+		go func() {
+			defer recoverLog("voice-gather-process")
+			h.notifyManager.HandleVoiceGatherResult(ctx.CallID, ctx.Keys)
+		}()
 	}
 }
 

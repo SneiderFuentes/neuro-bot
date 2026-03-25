@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -223,7 +224,7 @@ func (p *MessageWorkerPool) Enqueue(msg bird.InboundMessage) bool {
 			defer p.wg.Done()
 			defer p.activeOverflow.Add(-1)
 			slog.Warn("processing in overflow goroutine", "id", msg.ID)
-			p.processMessage(p.ctx, msg)
+			p.safeProcess(p.ctx, msg)
 		}()
 		return true
 	}
@@ -245,10 +246,52 @@ func (p *MessageWorkerPool) worker(ctx context.Context, id int) {
 		case <-ctx.Done():
 			return
 		case msg := <-p.queue:
-			p.processMessage(ctx, msg)
+			p.safeProcess(ctx, msg)
 		case cmd := <-p.agentCmds:
-			p.processAgentCommand(ctx, cmd)
+			p.safeProcessCmd(ctx, cmd)
 		}
+	}
+}
+
+// safeProcess wraps processMessage with panic recovery so a single message
+// panic doesn't kill the entire worker pool / bot process.
+func (p *MessageWorkerPool) safeProcess(ctx context.Context, msg bird.InboundMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("PANIC processing message",
+				"phone", msg.Phone,
+				"message_id", msg.ID,
+				"error", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	p.processMessage(ctx, msg)
+}
+
+// safeProcessCmd wraps processAgentCommand with panic recovery.
+func (p *MessageWorkerPool) safeProcessCmd(ctx context.Context, cmd AgentCommand) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("PANIC processing agent command",
+				"phone", cmd.Phone,
+				"action", cmd.Action,
+				"error", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	p.processAgentCommand(ctx, cmd)
+}
+
+// recoverLog logs panics from short-lived background goroutines.
+func recoverLog(name string) {
+	if r := recover(); r != nil {
+		slog.Error("PANIC in background goroutine",
+			"goroutine", name,
+			"error", fmt.Sprintf("%v", r),
+			"stack", string(debug.Stack()),
+		)
 	}
 }
 
@@ -610,6 +653,7 @@ func (p *MessageWorkerPool) handleAgentClose(ctx context.Context, sess *session.
 	// Delay close so Bird finishes processing the outbound message delivery
 	closingConvID := sess.ConversationID
 	go func() {
+		defer recoverLog("close-feed-agent")
 		time.Sleep(3 * time.Second)
 		if err := p.birdClient.CloseFeedItems(closingConvID); err != nil {
 			slog.Warn("close feed items on agent close failed", "conversation_id", closingConvID, "error", err)
@@ -867,6 +911,7 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 	if sess.Status == session.StatusCompleted && convID != "" {
 		closingConvID := convID
 		go func() {
+			defer recoverLog("close-feed-complete")
 			time.Sleep(3 * time.Second)
 			if err := p.birdClient.CloseFeedItems(closingConvID); err != nil {
 				slog.Warn("close feed items on completion failed", "phone", phone, "conversation_id", closingConvID, "error", err)
@@ -948,7 +993,7 @@ func (p *MessageWorkerPool) EnqueueVirtual(phone string) {
 		go func() {
 			defer p.wg.Done()
 			defer p.activeOverflow.Add(-1)
-			p.processMessage(p.ctx, msg)
+			p.safeProcess(p.ctx, msg)
 		}()
 	}
 }

@@ -2,7 +2,9 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"time"
 )
 
@@ -113,6 +115,15 @@ func (s *Scheduler) RunMissedTasks(ctx context.Context) {
 		)
 
 		go func(t ScheduledTask) {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("PANIC in scheduler catch-up task",
+						"task", t.Name,
+						"error", fmt.Sprintf("%v", r),
+						"stack", string(debug.Stack()),
+					)
+				}
+			}()
 			slog.Info("scheduler catch-up: running missed task", "task", t.Name)
 			start := time.Now()
 
@@ -165,6 +176,15 @@ func (s *Scheduler) evaluateTasks(ctx context.Context, now time.Time, lastRun ma
 		executed = append(executed, task.Name)
 
 		go func(t ScheduledTask) {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("PANIC in scheduler task",
+						"task", t.Name,
+						"error", fmt.Sprintf("%v", r),
+						"stack", string(debug.Stack()),
+					)
+				}
+			}()
 			slog.Info("scheduler task starting", "task", t.Name)
 			start := time.Now()
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -702,6 +703,16 @@ func (m *NotificationManager) checkExpired(ctx context.Context) {
 // handleTimeout is called when a patient doesn't respond within 6 hours.
 // Uses LoadAndDelete to atomically claim ownership and prevent race with HandleResponse.
 func (m *NotificationManager) handleTimeout(phone string) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("PANIC in handleTimeout",
+				"phone", phone,
+				"error", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+
 	val, ok := m.pending.LoadAndDelete(phone)
 	if !ok {
 		return
@@ -839,18 +850,22 @@ func (m *NotificationManager) escalateNotifToAgent(p *PendingNotification, incom
 		"  /bot cerrar — Cerrar la conversacion",
 	)
 
-	if convID != "" {
-		m.birdClient.SendInternalText(convID, note)
-		m.birdClient.SendInternalText(convID, commands)
-	}
-
+	// Send patient message first — this populates the convID cache via Channels API if empty
 	m.birdClient.SendText(p.Phone, convID,
 		"Te voy a conectar con un agente para gestionar tu cita. Un momento por favor...")
 
+	// Pick up convID from cache (SendText via Channels API caches it)
+	if convID == "" {
+		convID = m.birdClient.GetCachedConversationID(p.Phone)
+	}
 	if convID == "" {
 		slog.Error("escalateNotifToAgent: no conversation ID — cannot assign agent", "phone", p.Phone)
 		return
 	}
+
+	// Internal notes visible only in Bird Inbox (agent context)
+	m.birdClient.SendInternalText(convID, note)
+	m.birdClient.SendInternalText(convID, commands)
 
 	if err := m.birdClient.EscalateToAgent(convID, p.Phone,
 		m.cfg.BirdTeamFallback, "Call Center",
