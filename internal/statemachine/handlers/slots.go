@@ -445,7 +445,7 @@ func autoAddToWaitingList(ctx context.Context, sess *session.Session, wlRepo Wai
 	entry.PreferredDoctorDoc = sess.GetContext("preferred_doctor_doc")
 
 	if err := wlRepo.Create(ctx, entry); err != nil {
-		slog.Error("auto_add_wl: create entry", "error", err, "phone", msg.Phone)
+		slog.Error("auto_add_wl: create entry", "error", err, "phone", sess.PhoneNumber)
 		r := sm.NewResult(sm.StatePostActionMenu).
 			WithText("No hay horarios disponibles para *" + cupsName + "*.\n\n" +
 				"Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.")
