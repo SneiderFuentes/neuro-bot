@@ -445,7 +445,7 @@ func autoAddToWaitingList(ctx context.Context, sess *session.Session, wlRepo Wai
 	entry.PreferredDoctorDoc = sess.GetContext("preferred_doctor_doc")
 
 	if err := wlRepo.Create(ctx, entry); err != nil {
-		slog.Error("auto_add_wl: create entry", "error", err)
+		slog.Error("auto_add_wl: create entry", "error", err, "phone", msg.Phone)
 		r := sm.NewResult(sm.StatePostActionMenu).
 			WithText("No hay horarios disponibles para *" + cupsName + "*.\n\n" +
 				"Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.")
@@ -733,6 +733,7 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 		if err := json.Unmarshal([]byte(proceduresJSON), &groups); err != nil {
 			slog.Error("create_appointment_invalid_procedures_json",
 				"session_id", sess.ID,
+				"phone", msg.Phone,
 				"error", err,
 				"procedures_json_preview", truncate(proceduresJSON, 150),
 			)
@@ -884,6 +885,8 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 		if err != nil {
 			slog.Error("create_appointment_create_failed",
 				"session_id", sess.ID,
+				"phone", msg.Phone,
+				"patient_name", sess.GetContext("patient_name"),
 				"time_slot", slot.TimeSlot,
 				"agenda_id", slot.AgendaID,
 				"error", err,
@@ -907,10 +910,10 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 		if rescheduleApptID != "" && sess.GetContext("reschedule_skip_cancel") != "1" {
 			_, oldBlock, findErr := apptSvc.FindBlockByAppointmentID(ctx, rescheduleApptID)
 			if findErr != nil {
-				slog.Error("reschedule: find old block", "error", findErr, "old_appt_id", rescheduleApptID)
+				slog.Error("reschedule: find old block", "error", findErr, "phone", msg.Phone, "old_appt_id", rescheduleApptID)
 			} else if len(oldBlock) > 0 {
 				if cancelErr := apptSvc.CancelBlock(ctx, oldBlock, "reprogramada por paciente via bot", "whatsapp_bot", ""); cancelErr != nil {
-					slog.Error("reschedule: cancel old block", "error", cancelErr, "old_appt_id", rescheduleApptID)
+					slog.Error("reschedule: cancel old block", "error", cancelErr, "phone", msg.Phone, "old_appt_id", rescheduleApptID)
 				} else {
 					slog.Info("reschedule: old appointment cancelled",
 						"old_appt_id", rescheduleApptID,

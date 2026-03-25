@@ -1250,54 +1250,78 @@ func (c *Client) LookupConversationByPhone(phone string) (string, error) {
 		return "", nil
 	}
 
-	reqURL := fmt.Sprintf("%s/workspaces/%s/conversations?channelId=%s&status=active&limit=50",
+	// Paginate through active conversations to find the one matching this phone.
+	// Bird may have many active conversations; limit=50 per page with nextPageToken.
+	baseURL := fmt.Sprintf("%s/workspaces/%s/conversations?channelId=%s&status=active&limit=50",
 		c.conversationsBase(), c.workspaceID, c.channelID)
 
-	req, err := http.NewRequest("GET", reqURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("create conversation lookup request: %w", err)
-	}
-	req.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
+	reqURL := baseURL
+	pages := 0
+	maxPages := 5 // safety limit: 250 conversations max
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("lookup conversation: %w", err)
-	}
-	defer resp.Body.Close()
+	for pages < maxPages {
+		pages++
 
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("lookup conversation: status %d, body: %s", resp.StatusCode, string(respBody))
-	}
+		req, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			return "", fmt.Errorf("create conversation lookup request: %w", err)
+		}
+		req.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
 
-	var result struct {
-		Results []struct {
-			ID                   string `json:"id"`
-			FeaturedParticipants []struct {
-				Contact struct {
-					IdentifierValue string `json:"identifierValue"`
-				} `json:"contact"`
-			} `json:"featuredParticipants"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("parse conversation lookup: %w", err)
-	}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("lookup conversation: %w", err)
+		}
+		defer resp.Body.Close()
 
-	// Find conversation where a participant matches the phone
-	for _, conv := range result.Results {
-		for _, p := range conv.FeaturedParticipants {
-			if p.Contact.IdentifierValue == phone {
-				slog.Info("conversation_lookup_success",
-					"phone", phone,
-					"conversation_id", conv.ID,
-				)
-				c.CacheConversationID(phone, conv.ID)
-				return conv.ID, nil
+		respBody, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 400 {
+			return "", fmt.Errorf("lookup conversation: status %d, body: %s", resp.StatusCode, string(respBody))
+		}
+
+		var result struct {
+			Results []struct {
+				ID                   string `json:"id"`
+				FeaturedParticipants []struct {
+					Contact struct {
+						IdentifierValue string `json:"identifierValue"`
+					} `json:"contact"`
+				} `json:"featuredParticipants"`
+			} `json:"results"`
+			Pagination struct {
+				NextPageToken string `json:"nextPageToken"`
+			} `json:"pagination"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return "", fmt.Errorf("parse conversation lookup: %w", err)
+		}
+
+		// Find conversation where a participant matches the phone
+		for _, conv := range result.Results {
+			for _, p := range conv.FeaturedParticipants {
+				if p.Contact.IdentifierValue == phone {
+					slog.Info("conversation_lookup_success",
+						"phone", phone,
+						"conversation_id", conv.ID,
+						"page", pages,
+					)
+					c.CacheConversationID(phone, conv.ID)
+					return conv.ID, nil
+				}
 			}
 		}
+
+		// No more pages
+		if result.Pagination.NextPageToken == "" || len(result.Results) == 0 {
+			break
+		}
+		reqURL = baseURL + "&pageToken=" + result.Pagination.NextPageToken
 	}
 
+	slog.Warn("conversation_lookup_not_found",
+		"phone", phone,
+		"pages_searched", pages,
+	)
 	return "", nil
 }
 
@@ -1309,28 +1333,26 @@ func (c *Client) EscalateToAgent(conversationID, phone, teamID, teamName, patien
 	// If no conversationID or it might be stale, try API lookup by phone
 	if phone != "" {
 		if conversationID == "" {
-			lookedUp, err := c.LookupConversationByPhone(phone)
-			if err != nil {
-				slog.Warn("conversation_lookup_failed", "phone", phone, "error", err)
-			} else if lookedUp != "" {
-				conversationID = lookedUp
+			// Try cache first (conversation.created webhook may have arrived)
+			if cached := c.GetCachedConversationID(phone); cached != "" {
+				conversationID = cached
 			}
 
-			// Retry after delay — Bird may need time to index the conversation
-			if conversationID == "" {
-				// Check cache first (conversation.created webhook may have arrived)
-				if cached := c.GetCachedConversationID(phone); cached != "" {
-					conversationID = cached
-				} else {
-					time.Sleep(500 * time.Millisecond)
-					lookedUp, err = c.LookupConversationByPhone(phone)
-					if err != nil {
-						slog.Warn("conversation_lookup_retry_failed", "phone", phone, "error", err)
-					} else if lookedUp != "" {
-						conversationID = lookedUp
-					} else if cached := c.GetCachedConversationID(phone); cached != "" {
+			// API lookup with retries — Bird may need time to index the conversation
+			for attempt := 1; attempt <= 3 && conversationID == ""; attempt++ {
+				if attempt > 1 {
+					time.Sleep(time.Duration(attempt-1) * 500 * time.Millisecond) // 500ms, 1s
+					// Re-check cache between retries (webhook may have arrived)
+					if cached := c.GetCachedConversationID(phone); cached != "" {
 						conversationID = cached
+						break
 					}
+				}
+				lookedUp, err := c.LookupConversationByPhone(phone)
+				if err != nil {
+					slog.Warn("conversation_lookup_failed", "phone", phone, "attempt", attempt, "error", err)
+				} else if lookedUp != "" {
+					conversationID = lookedUp
 				}
 			}
 		} else {
