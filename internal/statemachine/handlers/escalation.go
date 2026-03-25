@@ -504,11 +504,6 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 				cupsName, cupsCode, patientName, patientDoc, sess.GetContext("patient_age"))
 			actions = "- Coordina la cita manualmente y luego:\n" +
 				"  /bot cerrar — Cerrar cuando termines"
-		} else if isPETCT(cupsCode) {
-			situation = fmt.Sprintf("PET/CT — requiere coordinacion con medicina nuclear.\nProcedimiento: %s (%s)\nPaciente: %s | Doc: %s",
-				cupsName, cupsCode, patientName, patientDoc)
-			actions = "- Coordina con medicina nuclear y luego:\n" +
-				"  /bot cerrar — Cerrar cuando termines"
 		} else {
 			situation = fmt.Sprintf("Procedimiento especial requiere atencion manual.\nProcedimiento: %s (%s)\nPaciente: %s | Doc: %s",
 				cupsName, cupsCode, patientName, patientDoc)
