@@ -295,8 +295,11 @@ func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) b
 	}
 	p := val.(*PendingNotification)
 
-	// Only intercept confirmation/reschedule types that show buttons
-	if p.Type != "confirmation" && p.Type != "reschedule" {
+	// Intercept all notification types that show buttons
+	switch p.Type {
+	case "confirmation", "reschedule", "cancellation", "waiting_list":
+		// These types have interactive buttons — intercept free text
+	default:
 		return false
 	}
 
@@ -331,13 +334,31 @@ func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) b
 		m.birdClient.CacheConversationID(phone, conversationID)
 	}
 
-	m.birdClient.SendButtons(phone, convID,
-		"Por favor selecciona una opcion para gestionar tu cita de manana:",
-		[]bird.Button{
-			{Text: "Confirmar", Payload: "confirm"},
-			{Text: "Reprogramar", Payload: "reprogramar"},
-			{Text: "Cancelar", Payload: "cancelar"},
-		})
+	// Re-send type-appropriate buttons
+	switch p.Type {
+	case "confirmation", "reschedule":
+		m.birdClient.SendButtons(phone, convID,
+			"Por favor selecciona una opcion para gestionar tu cita de manana:",
+			[]bird.Button{
+				{Text: "Confirmar", Payload: "confirm"},
+				{Text: "Reprogramar", Payload: "reprogramar"},
+				{Text: "Cancelar", Payload: "cancelar"},
+			})
+	case "cancellation":
+		m.birdClient.SendButtons(phone, convID,
+			"Por favor selecciona una opcion:",
+			[]bird.Button{
+				{Text: "Entendido", Payload: "understood"},
+				{Text: "Reprogramar", Payload: "reschedule"},
+			})
+	case "waiting_list":
+		m.birdClient.SendButtons(phone, convID,
+			"Se libero un espacio para tu procedimiento. ¿Deseas agendar la cita?",
+			[]bird.Button{
+				{Text: "Agendar", Payload: "wl_schedule"},
+				{Text: "No, gracias", Payload: "wl_decline"},
+			})
+	}
 
 	slog.Info("notification invalid input — resent prompt",
 		"phone", phone,

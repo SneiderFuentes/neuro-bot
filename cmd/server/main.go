@@ -260,6 +260,24 @@ func main() {
 				continue
 			}
 			msg := bird.ParseInboundMessage(event)
+
+			// Classify: notification postback vs regular message
+			if notifyManager != nil && notifyManager.HasPending(msg.Phone) {
+				if msg.IsPostback && api.IsNotificationPostback(msg.PostbackPayload) {
+					slog.Info("WAL replay: notification postback routed to handler",
+						"id", row.ID, "phone", msg.Phone, "payload", msg.PostbackPayload)
+					go notifyManager.HandleResponse(msg.Phone, msg.PostbackPayload, msg.ConversationID)
+					inboxRepo.MarkDone(ctx, row.ID)
+					continue
+				}
+				if notifyManager.HandleInvalidInput(msg.Phone, msg.ConversationID) {
+					slog.Info("WAL replay: invalid input during notification handled",
+						"id", row.ID, "phone", msg.Phone)
+					inboxRepo.MarkDone(ctx, row.ID)
+					continue
+				}
+			}
+
 			workerPool.Enqueue(msg)
 		}
 	}

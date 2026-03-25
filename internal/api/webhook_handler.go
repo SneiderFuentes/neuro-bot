@@ -92,7 +92,7 @@ func (h *WebhookHandler) HandleWhatsApp(w http.ResponseWriter, r *http.Request) 
 
 	// Clasificar: postback de notificación o mensaje de chatbot?
 	if h.notifyManager != nil && h.notifyManager.HasPending(msg.Phone) {
-		if msg.IsPostback && isNotificationPostback(msg.PostbackPayload) {
+		if msg.IsPostback && IsNotificationPostback(msg.PostbackPayload) {
 			slog.Info("notification postback received",
 				"phone", msg.Phone,
 				"payload", msg.PostbackPayload,
@@ -544,8 +544,8 @@ func reconstructFullURL(r *http.Request) string {
 	return scheme + "://" + host + r.URL.String()
 }
 
-// isNotificationPostback determina si un postback viene de un template proactivo
-func isNotificationPostback(payload string) bool {
+// IsNotificationPostback determina si un postback viene de un template proactivo
+func IsNotificationPostback(payload string) bool {
 	switch payload {
 	case "confirm", "cancelar", "cancel", "understood", "reschedule", "reprogramar",
 		"wl_schedule", "wl_decline":

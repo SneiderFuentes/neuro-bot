@@ -1315,6 +1315,24 @@ func (c *Client) EscalateToAgent(conversationID, phone, teamID, teamName, patien
 			} else if lookedUp != "" {
 				conversationID = lookedUp
 			}
+
+			// Retry after delay — Bird may need time to index the conversation
+			if conversationID == "" {
+				// Check cache first (conversation.created webhook may have arrived)
+				if cached := c.GetCachedConversationID(phone); cached != "" {
+					conversationID = cached
+				} else {
+					time.Sleep(500 * time.Millisecond)
+					lookedUp, err = c.LookupConversationByPhone(phone)
+					if err != nil {
+						slog.Warn("conversation_lookup_retry_failed", "phone", phone, "error", err)
+					} else if lookedUp != "" {
+						conversationID = lookedUp
+					} else if cached := c.GetCachedConversationID(phone); cached != "" {
+						conversationID = cached
+					}
+				}
+			}
 		} else {
 			// Verify the ID is still active via cache (populated by processMessage lookup)
 			if cached := c.GetCachedConversationID(phone); cached != "" && cached != conversationID {

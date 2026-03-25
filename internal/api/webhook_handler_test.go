@@ -21,7 +21,7 @@ import (
 func TestIsNotificationPostback_True(t *testing.T) {
 	truePayloads := []string{"confirm", "cancelar", "cancel", "understood", "reschedule", "wl_schedule", "wl_decline"}
 	for _, p := range truePayloads {
-		if !isNotificationPostback(p) {
+		if !IsNotificationPostback(p) {
 			t.Errorf("expected true for %q", p)
 		}
 	}
@@ -30,7 +30,7 @@ func TestIsNotificationPostback_True(t *testing.T) {
 func TestIsNotificationPostback_False(t *testing.T) {
 	falsePayloads := []string{"consultar", "agendar", "agente", "identity_yes", "otra_cita", "", "random"}
 	for _, p := range falsePayloads {
-		if isNotificationPostback(p) {
+		if IsNotificationPostback(p) {
 			t.Errorf("expected false for %q", p)
 		}
 	}
