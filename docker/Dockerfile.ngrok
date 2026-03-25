@@ -1,5 +1,6 @@
-FROM ngrok/ngrok:latest
+FROM ngrok/ngrok:latest AS ngrok
 
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
-USER ngrok
+FROM alpine:3.21
+RUN apk --no-cache add wget
+COPY --from=ngrok /bin/ngrok /bin/ngrok
+ENTRYPOINT ["/bin/ngrok"]
