@@ -85,7 +85,9 @@ services:
           memory: 128M
 
   ngrok:
-    image: ngrok/ngrok:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ngrok
     container_name: neuro_bot_ngrok
     restart: unless-stopped
     depends_on:
@@ -102,7 +104,7 @@ services:
     ports:
       - "14041:4040"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:4040/api/tunnels | grep -q tunnels || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:4040/api/tunnels | grep -q tunnels"]
       interval: 20s
       timeout: 5s
       retries: 3
