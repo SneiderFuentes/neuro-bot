@@ -883,6 +883,18 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 		espacios, _ := strconv.Atoi(sess.GetContext("espacios"))
 		apptID, err := apptSvc.CreateWithConsecutive(ctx, input, espacios, slot.Duration)
 		if err != nil {
+			if strings.Contains(err.Error(), "slot_taken") {
+				// slot_taken is a normal race condition (two patients competing for the same slot).
+				// The bot auto-recovers via BOOKING_FAILED → SEARCH_SLOTS. Not an error.
+				slog.Warn("create_appointment_slot_taken",
+					"session_id", sess.ID,
+					"phone", msg.Phone,
+					"time_slot", slot.TimeSlot,
+					"agenda_id", slot.AgendaID,
+				)
+				return sm.NewResult(sm.StateBookingFailed).
+					WithContext("booking_failure_reason", "slot_taken"), nil
+			}
 			slog.Error("create_appointment_create_failed",
 				"session_id", sess.ID,
 				"phone", msg.Phone,
@@ -891,10 +903,6 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 				"agenda_id", slot.AgendaID,
 				"error", err,
 			)
-			if strings.Contains(err.Error(), "slot_taken") {
-				return sm.NewResult(sm.StateBookingFailed).
-					WithContext("booking_failure_reason", "slot_taken"), nil
-			}
 			return sm.NewResult(sm.StateBookingFailed).
 				WithContext("booking_failure_reason", "error").
 				WithEvent("appointment_create_error", map[string]interface{}{"error": err.Error()}), nil

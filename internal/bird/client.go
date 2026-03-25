@@ -1283,9 +1283,10 @@ func (c *Client) LookupConversationByPhone(phone string) (string, error) {
 			Results []struct {
 				ID                   string `json:"id"`
 				FeaturedParticipants []struct {
-					Contact struct {
+					IdentifierValue string `json:"identifierValue"` // top-level (Bird actual)
+					Contact         struct {
 						IdentifierValue string `json:"identifierValue"`
-					} `json:"contact"`
+					} `json:"contact"` // nested (legacy/alternative)
 				} `json:"featuredParticipants"`
 			} `json:"results"`
 			Pagination struct {
@@ -1296,10 +1297,11 @@ func (c *Client) LookupConversationByPhone(phone string) (string, error) {
 			return "", fmt.Errorf("parse conversation lookup: %w", err)
 		}
 
-		// Find conversation where a participant matches the phone
+		// Find conversation where a participant matches the phone.
+		// Bird may place identifierValue at the top level OR nested in contact.
 		for _, conv := range result.Results {
 			for _, p := range conv.FeaturedParticipants {
-				if p.Contact.IdentifierValue == phone {
+				if p.IdentifierValue == phone || p.Contact.IdentifierValue == phone {
 					slog.Info("conversation_lookup_success",
 						"phone", phone,
 						"conversation_id", conv.ID,

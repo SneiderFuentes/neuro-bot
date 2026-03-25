@@ -330,16 +330,14 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 			}
 			sess.ConversationID = looked
 		} else if sess.ConversationID != "" && msg.ConversationID == "" {
-			// No active conversation found AND the current message has no conversationID
-			// → truly stale session ID (e.g. after session expired and new chat started).
-			// If the current message brought its own conversationID (set in 3b), trust it —
-			// the lookup may just be racing with Bird's conversation.created webhook.
-			slog.Warn("conversation_id_stale_cleared",
+			// Lookup returned empty but session has a conversationID. Don't clear it —
+			// the conversation may still be usable even if not indexed yet.
+			// trySendToConversation handles 422 (not active) with self-heal.
+			slog.Warn("conversation_id_lookup_miss_kept",
 				"session_id", sess.ID,
 				"phone", msg.Phone,
-				"stale", sess.ConversationID,
+				"kept", sess.ConversationID,
 			)
-			sess.ConversationID = ""
 		}
 	}
 
