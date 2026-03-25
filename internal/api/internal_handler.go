@@ -12,6 +12,7 @@ import (
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/config"
+	"github.com/neuro-bot/neuro-bot/internal/logging"
 	"github.com/neuro-bot/neuro-bot/internal/domain"
 	"github.com/neuro-bot/neuro-bot/internal/notifications"
 	"github.com/neuro-bot/neuro-bot/internal/repository"
@@ -870,6 +871,91 @@ func (h *InternalHandler) HandleTestAlert(w http.ResponseWriter, r *http.Request
 	)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "message": "test error logged — check Telegram"})
+}
+
+// HandleLogs serves log entries with optional filtering.
+//
+// Query params:
+//
+//	lines    — max lines to return (default 200, max 10000)
+//	level    — filter by level: debug, info, warn, error
+//	from     — start datetime: YYYY-MM-DD or YYYY-MM-DDTHH:MM
+//	to       — end datetime: YYYY-MM-DD or YYYY-MM-DDTHH:MM
+//	search   — substring search in log message
+//	download — "true" to return as downloadable .log file
+func (h *InternalHandler) HandleLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	lines := 200
+	if v := q.Get("lines"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			lines = n
+		}
+	}
+	if lines > 10000 {
+		lines = 10000
+	}
+
+	filter := logging.LogFilter{
+		Lines:  lines,
+		Level:  q.Get("level"),
+		Search: q.Get("search"),
+	}
+
+	if v := q.Get("from"); v != "" {
+		if t, err := parseFlexTime(v); err == nil {
+			filter.From = t
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if t, err := parseFlexTime(v); err == nil {
+			filter.To = t
+		}
+	}
+
+	logDir := h.cfg.LogDir
+	if logDir == "" {
+		http.Error(w, "log files not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	results, err := logging.ReadLogs(logDir, "neuro-bot", filter)
+	if err != nil {
+		slog.Error("read logs failed", "error", err)
+		http.Error(w, "failed to read logs", http.StatusInternalServerError)
+		return
+	}
+
+	body := strings.Join(results, "\n")
+	if body == "" {
+		body = "No log entries found matching the filter."
+	}
+
+	if q.Get("download") == "true" {
+		filename := fmt.Sprintf("neuro-bot-logs-%s.log", time.Now().Format("2006-01-02_15-04"))
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+		w.Header().Set("Content-Type", "application/octet-stream")
+	} else {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	w.Write([]byte(body))
+}
+
+// parseFlexTime parses datetime in flexible formats.
+func parseFlexTime(s string) (time.Time, error) {
+	formats := []string{
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+	}
+	for _, f := range formats {
+		if t, err := time.ParseInLocation(f, s, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognized time format: %s", s)
 }
 
 // --- Helpers ---

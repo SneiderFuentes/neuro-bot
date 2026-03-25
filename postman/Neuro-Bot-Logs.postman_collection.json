@@ -1,0 +1,222 @@
+{
+	"info": {
+		"name": "Neuro Bot - Logs API",
+		"description": "Endpoints para consulta remota de logs del bot Samuel.\n\nTodos los endpoints requieren header `X-API-Key: <INTERNAL_API_KEY>`.\n\nBase URL: `https://{{host}}/api/internal`",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"auth": {
+		"type": "apikey",
+		"apikey": [
+			{
+				"key": "key",
+				"value": "X-API-Key",
+				"type": "string"
+			},
+			{
+				"key": "value",
+				"value": "{{INTERNAL_API_KEY}}",
+				"type": "string"
+			},
+			{
+				"key": "in",
+				"value": "header",
+				"type": "string"
+			}
+		]
+	},
+	"variable": [
+		{
+			"key": "host",
+			"value": "app.colibrixa.com",
+			"type": "string"
+		},
+		{
+			"key": "INTERNAL_API_KEY",
+			"value": "f3a76d7b8b82dsfd565d928e1c4c3eaa3c6ef04a713d67b0f27fa",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "Logs - Ultimas 200 lineas",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "https://{{host}}/api/internal/logs",
+					"protocol": "https",
+					"host": ["{{host}}"],
+					"path": ["api", "internal", "logs"]
+				},
+				"description": "Retorna las últimas 200 líneas de log (default)."
+			}
+		},
+		{
+			"name": "Logs - Filtrar por nivel (error)",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "https://{{host}}/api/internal/logs?level=error&lines=500",
+					"protocol": "https",
+					"host": ["{{host}}"],
+					"path": ["api", "internal", "logs"],
+					"query": [
+						{
+							"key": "level",
+							"value": "error",
+							"description": "Filtrar por nivel: debug, info, warn, error"
+						},
+						{
+							"key": "lines",
+							"value": "500",
+							"description": "Cantidad máxima de líneas (max 10000)"
+						}
+					]
+				},
+				"description": "Retorna solo logs de nivel ERROR."
+			}
+		},
+		{
+			"name": "Logs - Filtrar por fecha",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "https://{{host}}/api/internal/logs?from=2026-03-24T07:00&to=2026-03-24T18:00&lines=1000",
+					"protocol": "https",
+					"host": ["{{host}}"],
+					"path": ["api", "internal", "logs"],
+					"query": [
+						{
+							"key": "from",
+							"value": "2026-03-24T07:00",
+							"description": "Fecha/hora inicio (YYYY-MM-DD o YYYY-MM-DDTHH:MM)"
+						},
+						{
+							"key": "to",
+							"value": "2026-03-24T18:00",
+							"description": "Fecha/hora fin"
+						},
+						{
+							"key": "lines",
+							"value": "1000"
+						}
+					]
+				},
+				"description": "Retorna logs dentro de un rango de fecha/hora específico."
+			}
+		},
+		{
+			"name": "Logs - Buscar texto",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "https://{{host}}/api/internal/logs?search=webhook&lines=500",
+					"protocol": "https",
+					"host": ["{{host}}"],
+					"path": ["api", "internal", "logs"],
+					"query": [
+						{
+							"key": "search",
+							"value": "webhook",
+							"description": "Buscar substring en el campo msg del log"
+						},
+						{
+							"key": "lines",
+							"value": "500"
+						}
+					]
+				},
+				"description": "Busca un texto específico en los mensajes de log."
+			}
+		},
+		{
+			"name": "Logs - Filtros combinados",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "https://{{host}}/api/internal/logs?level=error&from=2026-03-24&search=bird&lines=1000",
+					"protocol": "https",
+					"host": ["{{host}}"],
+					"path": ["api", "internal", "logs"],
+					"query": [
+						{
+							"key": "level",
+							"value": "error"
+						},
+						{
+							"key": "from",
+							"value": "2026-03-24"
+						},
+						{
+							"key": "search",
+							"value": "bird"
+						},
+						{
+							"key": "lines",
+							"value": "1000"
+						}
+					]
+				},
+				"description": "Combina múltiples filtros: nivel + fecha + texto."
+			}
+		},
+		{
+			"name": "Logs - Descargar archivo",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "https://{{host}}/api/internal/logs?lines=5000&download=true",
+					"protocol": "https",
+					"host": ["{{host}}"],
+					"path": ["api", "internal", "logs"],
+					"query": [
+						{
+							"key": "lines",
+							"value": "5000"
+						},
+						{
+							"key": "download",
+							"value": "true",
+							"description": "Retorna como archivo descargable .log"
+						}
+					]
+				},
+				"description": "Descarga los logs como archivo .log.\nEl archivo se nombra automáticamente: neuro-bot-logs-YYYY-MM-DD_HH-MM.log"
+			}
+		},
+		{
+			"name": "Logs - Solo warnings de hoy",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "https://{{host}}/api/internal/logs?level=warn&from={{today}}&lines=500",
+					"protocol": "https",
+					"host": ["{{host}}"],
+					"path": ["api", "internal", "logs"],
+					"query": [
+						{
+							"key": "level",
+							"value": "warn"
+						},
+						{
+							"key": "from",
+							"value": "{{today}}",
+							"description": "Reemplazar con fecha de hoy: YYYY-MM-DD"
+						},
+						{
+							"key": "lines",
+							"value": "500"
+						}
+					]
+				},
+				"description": "Muestra solo warnings del día actual."
+			}
+		}
+	]
+}

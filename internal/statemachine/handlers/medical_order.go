@@ -14,14 +14,26 @@ import (
 )
 
 // RegisterMedicalOrderHandlers registra los handlers de Orden Médica y OCR (Fase 8)
-func RegisterMedicalOrderHandlers(m *sm.Machine, ocrSvc *services.OCRService, procedureRepo repository.ProcedureRepository) {
+func RegisterMedicalOrderHandlers(m *sm.Machine, ocrSvc *services.OCRService, procedureRepo repository.ProcedureRepository, birdClient *bird.Client) {
 	m.Register(sm.StateAskMedicalOrder, askMedicalOrderHandler())
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, birdClient))
 	m.Register(sm.StateValidateOCR, validateOCRHandler(procedureRepo))
-	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(procedureRepo))
-	m.Register(sm.StateOCRFailed, ocrFailedHandler())
+	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(procedureRepo, birdClient))
+	m.Register(sm.StateOCRFailed, ocrFailedHandler(birdClient))
 	m.Register(sm.StateAskManualCups, askManualCupsHandler(procedureRepo))
 	m.Register(sm.StateSelectProcedure, selectProcedureHandler())
+}
+
+// ocrRetryButtons builds the retry/escalation buttons for OCR errors.
+// Only includes "Hablar con agente" if agents are available.
+func ocrRetryButtons(birdClient *bird.Client) []sm.Button {
+	buttons := []sm.Button{
+		{Text: "Enviar de nuevo", Payload: "retry_photo"},
+	}
+	if birdClient != nil && birdClient.HasAvailableAgents() {
+		buttons = append(buttons, sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"})
+	}
+	return buttons
 }
 
 // ASK_MEDICAL_ORDER (automático) — pide foto de la orden y transiciona a UPLOAD.
@@ -34,7 +46,7 @@ func askMedicalOrderHandler() sm.StateHandler {
 }
 
 // UPLOAD_MEDICAL_ORDER (interactivo) — espera imagen, procesa OCR
-func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
+func uploadMedicalOrderHandler(ocrSvc *services.OCRService, birdClient *bird.Client) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		switch msg.MessageType {
 		case "image", "document":
@@ -51,8 +63,7 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 			if err != nil {
 				return sm.NewResult(sess.CurrentState).
 					WithButtons("Error al procesar la imagen. ¿Qué deseas hacer?",
-						sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
-						sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
+						ocrRetryButtons(birdClient)...,
 					).
 					WithEvent("ocr_error", map[string]interface{}{"error": err.Error()}), nil
 			}
@@ -64,8 +75,7 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 				}
 				return sm.NewResult(sess.CurrentState).
 					WithButtons(errorMsg+"\n\n¿Qué deseas hacer?",
-						sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
-						sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
+						ocrRetryButtons(birdClient)...,
 					).
 					WithEvent("ocr_failed", map[string]interface{}{"error": ocrResult.Error}), nil
 			}
@@ -97,6 +107,14 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService) sm.StateHandler {
 					return sm.NewResult(sess.CurrentState).
 						WithText("Envía otra foto o PDF de tu orden médica."), nil
 				case "escalate_agent":
+					// Re-check agent availability (button may have been shown before agents went offline)
+					if birdClient != nil && !birdClient.HasAvailableAgents() {
+						return sm.NewResult(sess.CurrentState).
+							WithButtons("En este momento no hay agentes disponibles. ¿Qué deseas hacer?",
+								sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
+							).
+							WithEvent("agent_unavailable_at_escalation", nil), nil
+					}
 					return sm.NewResult(sm.StateEscalateToAgent).
 						WithText("Te voy a comunicar con uno de nuestros agentes para que pueda ayudarte con tu orden médica.").
 						WithEvent("ocr_escalate_to_agent", nil), nil
@@ -182,7 +200,7 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 }
 
 // CONFIRM_OCR_RESULT (interactivo) — usuario confirma o corrige
-func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository) sm.StateHandler {
+func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository, birdClient *bird.Client) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "ocr_correct", "ocr_incorrect")
 		if result != nil {
@@ -309,8 +327,7 @@ func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository) sm.St
 		case "ocr_incorrect":
 			return sm.NewResult(sm.StateUploadMedicalOrder).
 				WithButtons("Entendido. ¿Qué deseas hacer?",
-					sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
-					sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
+					ocrRetryButtons(birdClient)...,
 				).
 				WithClearCtx("ocr_cups_json").
 				WithEvent("ocr_rejected", nil), nil
@@ -321,12 +338,11 @@ func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository) sm.St
 }
 
 // OCR_FAILED (automático) — error en OCR, redirige
-func ocrFailedHandler() sm.StateHandler {
+func ocrFailedHandler(birdClient *bird.Client) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		return sm.NewResult(sm.StateUploadMedicalOrder).
 			WithButtons("No pudimos procesar tu orden médica. ¿Qué deseas hacer?",
-				sm.Button{Text: "Enviar de nuevo", Payload: "retry_photo"},
-				sm.Button{Text: "Hablar con agente", Payload: "escalate_agent"},
+				ocrRetryButtons(birdClient)...,
 			).
 			WithEvent("ocr_failed_redirect", nil), nil
 	}

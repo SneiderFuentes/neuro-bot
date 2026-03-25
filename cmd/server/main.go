@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/config"
 	"github.com/neuro-bot/neuro-bot/internal/database"
+	"github.com/neuro-bot/neuro-bot/internal/logging"
+	"github.com/neuro-bot/neuro-bot/internal/monitor"
 	"github.com/neuro-bot/neuro-bot/internal/notifications"
 	"github.com/neuro-bot/neuro-bot/internal/repository"
 	"github.com/neuro-bot/neuro-bot/internal/repository/datosipsndx"
@@ -37,10 +40,11 @@ func main() {
 	cfg := config.Load()
 
 	// Configurar logger
-	initLogger(cfg.LogLevel)
+	initLogger(cfg.LogLevel, cfg.LogDir)
 
 	// Telegram error alerts (optional — wraps slog handler)
-	if tgClient := tg.NewClient(cfg.TelegramBotToken, cfg.TelegramChatID); tgClient != nil {
+	tgClient := tg.NewClient(cfg.TelegramBotToken, cfg.TelegramChatID)
+	if tgClient != nil {
 		alertHandler := tg.NewAlertHandler(slog.Default().Handler(), tgClient)
 		go alertHandler.Start(ctx)
 		slog.SetDefault(slog.New(alertHandler))
@@ -161,7 +165,7 @@ func main() {
 	}
 	// Fase 8: Orden Médica y OCR
 	if repos != nil {
-		handlers.RegisterMedicalOrderHandlers(machine, ocrSvc, repos.Procedure)
+		handlers.RegisterMedicalOrderHandlers(machine, ocrSvc, repos.Procedure, birdClient)
 	}
 	// Fase 9: Validaciones Médicas
 	gfrSvc := services.NewGFRService()
@@ -176,7 +180,7 @@ func main() {
 		handlers.RegisterSlotHandlers(machine, slotSvc, appointmentSvc, repos.Procedure, repos.Soat, repos.Entity, waitingListRepo, addrMapper)
 	}
 	// Fase 11: Post-Acción y Escalación
-	handlers.RegisterPostActionHandlers(machine)
+	handlers.RegisterPostActionHandlers(machine, birdClient)
 	handlers.RegisterEscalationHandlers(machine, birdClient, cfg)
 
 	// Fase 12: Notificaciones Proactivas y Scheduler
@@ -217,8 +221,8 @@ func main() {
 	// Message inbox (WAL for crash recovery)
 	inboxRepo := localrepo.NewInboxRepo(localDB)
 
-	// Worker pool (10 workers, buffer 100, overflow hasta 20)
-	workerPool := worker.NewMessageWorkerPool(10, 100)
+	// Worker pool (configurable via WORKER_POOL_SIZE / WORKER_QUEUE_SIZE)
+	workerPool := worker.NewMessageWorkerPool(cfg.WorkerPoolSize, cfg.WorkerQueueSize)
 	workerPool.SetDependencies(sessionManager, birdClient, machine)
 	workerPool.SetTracker(tracker)
 	workerPool.SetOCRService(ocrSvc)
@@ -227,6 +231,21 @@ func main() {
 		workerPool.SetNotifyResponder(notifyManager)
 	}
 	workerPool.Start(ctx)
+
+	// Capacity monitor — sends Telegram alerts when approaching limits
+	capMon := monitor.New(monitor.Config{
+		TGClient:          tgClient,
+		WorkerPool:        workerPool,
+		LocalDB:           localDB,
+		ExternalDB:        externalDB,
+		Profile:           cfg.ScalingProfile,
+		LocalDBMaxOpen:    cfg.LocalDBMaxOpen,
+		ExternalDBMaxOpen: cfg.ExternalDBMaxOpen,
+		WorkerCount:       cfg.WorkerPoolSize,
+	})
+	if capMon != nil {
+		go capMon.Start(ctx)
+	}
 
 	// WAL replay: re-process messages that weren't completed before last shutdown/crash
 	if pending, err := inboxRepo.FindPending(ctx); err != nil {
@@ -319,6 +338,7 @@ func main() {
 		internalMux.HandleFunc("POST /api/internal/test-alert", internalHandler.HandleTestAlert)
 		internalMux.HandleFunc("POST /api/internal/send-reminders", internalHandler.HandleSendReminders)
 		internalMux.HandleFunc("POST /api/internal/test-voice-call", internalHandler.HandleTestVoiceCall)
+		internalMux.HandleFunc("GET /api/internal/logs", internalHandler.HandleLogs)
 		mux.Handle("/api/internal/",
 			api.RateLimiter(30, time.Minute)(
 				api.MaxBodySize(
@@ -328,9 +348,22 @@ func main() {
 		)
 	}
 
-	srv := &http.Server{Addr: ":" + cfg.Port, Handler: api.RequestLogger(mux)}
+	srv := &http.Server{
+		Addr:         ":" + cfg.Port,
+		Handler:      api.RequestLogger(mux),
+		ReadTimeout:  time.Duration(cfg.HTTPReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.HTTPWriteTimeout) * time.Second,
+		IdleTimeout:  time.Duration(cfg.HTTPIdleTimeout) * time.Second,
+	}
 	go func() {
-		slog.Info("server starting", "port", cfg.Port, "timezone", cfg.Timezone)
+		slog.Info("server starting",
+			"port", cfg.Port,
+			"timezone", cfg.Timezone,
+			"workers", cfg.WorkerPoolSize,
+			"queue_size", cfg.WorkerQueueSize,
+			"local_db_conns", cfg.LocalDBMaxOpen,
+			"external_db_conns", cfg.ExternalDBMaxOpen,
+		)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server: %v", err)
 		}
@@ -352,7 +385,7 @@ func main() {
 	slog.Info("shutdown complete")
 }
 
-func initLogger(level string) {
+func initLogger(level, logDir string) {
 	var logLevel slog.Level
 	switch level {
 	case "debug":
@@ -365,7 +398,17 @@ func initLogger(level string) {
 		logLevel = slog.LevelInfo
 	}
 
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+	var w io.Writer = os.Stdout
+	if logDir != "" {
+		fw, err := logging.NewDailyFileWriter(logDir, "neuro-bot", 30)
+		if err != nil {
+			log.Printf("WARN: could not init log file writer: %v (logging to stdout only)", err)
+		} else {
+			w = io.MultiWriter(os.Stdout, fw)
+		}
+	}
+
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(handler))
 }
 

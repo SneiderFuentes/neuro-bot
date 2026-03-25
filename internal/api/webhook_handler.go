@@ -463,6 +463,22 @@ func (h *WebhookHandler) HandleVoiceDTMF(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Verify HMAC signature if present (Bird Flow may or may not sign fetchCallFlow requests)
+	signature := r.Header.Get("MessageBird-Signature")
+	timestamp := r.Header.Get("MessageBird-Request-Timestamp")
+	if signature != "" {
+		requestURL := reconstructFullURL(r)
+		secret := h.cfg.BirdWebhookSecretVoice
+		if secret == "" {
+			secret = h.cfg.BirdWebhookSecret
+		}
+		if !bird.VerifySignatureWithKey(secret, signature, timestamp, requestURL, body) {
+			slog.Warn("invalid voice dtmf webhook signature")
+			http.Error(w, "invalid signature", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	// Bird sends call context as JSON: {callID, keys, ...}
 	var ctx struct {
 		CallID string `json:"callId"`

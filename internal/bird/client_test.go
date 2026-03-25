@@ -134,12 +134,19 @@ func TestSendTemplate_PayloadCorrect(t *testing.T) {
 	if !ok {
 		t.Fatal("expected template field in payload")
 	}
-	params, ok := tmplField["parameters"].(map[string]interface{})
+	params, ok := tmplField["parameters"].([]interface{})
 	if !ok {
-		t.Error("expected parameters to be a map")
+		t.Fatal("expected parameters to be an array")
 	}
-	if params["name"] != "Juan" {
-		t.Errorf("expected parameters.name=Juan, got %v", params["name"])
+	if len(params) != 1 {
+		t.Fatalf("expected 1 parameter, got %d", len(params))
+	}
+	firstParam, ok := params[0].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected first parameter to be a map")
+	}
+	if firstParam["key"] != "name" || firstParam["value"] != "Juan" {
+		t.Errorf("expected key=name, value=Juan, got %v", firstParam)
 	}
 }
 
@@ -239,11 +246,19 @@ func agentsJSON(agents ...AgentInfo) string {
 	return string(b)
 }
 
-func TestEscalateToAgent_AssignsLeastLoaded(t *testing.T) {
-	var calls []struct{ method, path string }
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls = append(calls, struct{ method, path string }{r.Method, r.URL.Path})
+// feedItemSearchJSON returns a search/feed-items response for a conversation.
+// Uses "fi-{convID}" as the feed item ID and "channel:ch-test" as the feed ID.
+func feedItemSearchJSON(convID string) string {
+	return `{"results":[{"id":"fi-` + convID + `","feedId":"channel:ch-test","closed":false}]}`
+}
 
+// isFeedItemSearch returns true if the request is a POST to search/feed-items.
+func isFeedItemSearch(r *http.Request) bool {
+	return r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/search/feed-items")
+}
+
+func TestEscalateToAgent_AssignsLeastLoaded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/conversations/conv-123":
 			// MarkConversationEscalated
@@ -265,7 +280,10 @@ func TestEscalateToAgent_AssignsLeastLoaded(t *testing.T) {
 					RootItemAssignedCount: 1,
 				},
 			)))
-		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/feeds/channel:ch-test/items/conv-123":
+		case isFeedItemSearch(r):
+			w.WriteHeader(200)
+			w.Write([]byte(feedItemSearchJSON("conv-123")))
+		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/feeds/channel:ch-test/items/fi-conv-123":
 			// AssignFeedItem — verify payload
 			body, _ := io.ReadAll(r.Body)
 			var payload map[string]interface{}
@@ -289,11 +307,6 @@ func TestEscalateToAgent_AssignsLeastLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-
-	// Should make 3 calls: PATCH conversation, GET agents, PATCH feed item
-	if len(calls) != 3 {
-		t.Errorf("expected 3 API calls, got %d: %+v", len(calls), calls)
-	}
 }
 
 func TestEscalateToAgent_FallbackTeam(t *testing.T) {
@@ -310,7 +323,10 @@ func TestEscalateToAgent_FallbackTeam(t *testing.T) {
 				Availability:          AgentAvailability{Status: "active", Activity: "available"},
 				RootItemAssignedCount: 0,
 			})))
-		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/feeds/channel:ch-test/items/conv-1":
+		case isFeedItemSearch(r):
+			w.WriteHeader(200)
+			w.Write([]byte(feedItemSearchJSON("conv-1")))
+		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/feeds/channel:ch-test/items/fi-conv-1":
 			body, _ := io.ReadAll(r.Body)
 			var payload map[string]interface{}
 			json.Unmarshal(body, &payload)
@@ -343,6 +359,9 @@ func TestEscalateToAgent_NoActiveAgents(t *testing.T) {
 			// No agents at all
 			w.WriteHeader(200)
 			w.Write([]byte(`{"results":[]}`))
+		case isFeedItemSearch(r):
+			w.WriteHeader(200)
+			w.Write([]byte(feedItemSearchJSON("conv-1")))
 		default:
 			w.WriteHeader(200)
 		}
@@ -351,8 +370,8 @@ func TestEscalateToAgent_NoActiveAgents(t *testing.T) {
 
 	c := NewClientForTest(srv.URL)
 	err := c.EscalateToAgent("conv-1", "+573001234567", "team-a", "Grupo A", "Patient", "team-fallback")
-	if err == nil {
-		t.Error("expected error when no active agents")
+	if err != nil {
+		t.Errorf("expected nil error (assigns to team when no agents), got %v", err)
 	}
 }
 
@@ -364,6 +383,9 @@ func TestEscalateToAgent_AgentsAPIError(t *testing.T) {
 		case r.Method == "GET" && r.URL.Path == "/workspaces/ws-test/agents":
 			w.WriteHeader(500)
 			w.Write([]byte(`internal error`))
+		case isFeedItemSearch(r):
+			w.WriteHeader(200)
+			w.Write([]byte(feedItemSearchJSON("conv-1")))
 		default:
 			w.WriteHeader(200)
 		}
@@ -372,8 +394,8 @@ func TestEscalateToAgent_AgentsAPIError(t *testing.T) {
 
 	c := NewClientForTest(srv.URL)
 	err := c.EscalateToAgent("conv-1", "+573001234567", "team-a", "Grupo A", "Patient", "team-fallback")
-	if err == nil {
-		t.Error("expected error when agents API fails")
+	if err != nil {
+		t.Errorf("expected nil error (falls back to team-only), got %v", err)
 	}
 }
 
@@ -392,7 +414,10 @@ func TestEscalateToAgent_AllBusy_AssignsToTeamOnly(t *testing.T) {
 				Availability:          AgentAvailability{Status: "active", Activity: "busy"},
 				RootItemAssignedCount: 3,
 			})))
-		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/feeds/channel:ch-test/items/conv-1":
+		case isFeedItemSearch(r):
+			w.WriteHeader(200)
+			w.Write([]byte(feedItemSearchJSON("conv-1")))
+		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/feeds/channel:ch-test/items/fi-conv-1":
 			body, _ := io.ReadAll(r.Body)
 			json.Unmarshal(body, &assignPayload)
 			w.WriteHeader(200)
@@ -407,12 +432,12 @@ func TestEscalateToAgent_AllBusy_AssignsToTeamOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error (assign to team), got %v", err)
 	}
-	// Should assign to team without agent
+	// Busy agents are used as fallback — agent should be assigned
 	if assignPayload["teamId"] != "team-a" {
 		t.Errorf("expected team-a, got %v", assignPayload["teamId"])
 	}
-	if _, hasAgent := assignPayload["agentId"]; hasAgent {
-		t.Error("expected no agentId for busy agents")
+	if assignPayload["agentId"] != "agent-1" {
+		t.Errorf("expected agentId=agent-1 (busy fallback), got %v", assignPayload["agentId"])
 	}
 }
 
@@ -453,14 +478,11 @@ func TestUpdateFeedItem_ServerError_NoReturn(t *testing.T) {
 	}
 }
 
-func TestPlaceCall_Noop(t *testing.T) {
+func TestPlaceCall_NoVoiceChannel(t *testing.T) {
 	c := NewClientForTest("http://localhost")
-	msgID, err := c.PlaceCall("+573001234567", nil)
-	if err != nil {
-		t.Errorf("expected nil error, got %v", err)
-	}
-	if msgID != "" {
-		t.Errorf("expected empty msgID, got %s", msgID)
+	_, err := c.PlaceCall("+573001234567", nil)
+	if err == nil {
+		t.Error("expected error when voice channel not configured")
 	}
 }
 
@@ -515,14 +537,22 @@ func TestListActiveAgents_Success(t *testing.T) {
 }
 
 func TestAssignFeedItem_Success(t *testing.T) {
-	var method, path string
+	var patchPath string
 	var payload map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		method = r.Method
-		path = r.URL.Path
-		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &payload)
-		w.WriteHeader(200)
+		switch {
+		case isFeedItemSearch(r):
+			w.WriteHeader(200)
+			w.Write([]byte(feedItemSearchJSON("conv-123")))
+		case r.Method == "PATCH":
+			patchPath = r.URL.Path
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &payload)
+			w.WriteHeader(200)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(404)
+		}
 	}))
 	defer srv.Close()
 
@@ -531,11 +561,8 @@ func TestAssignFeedItem_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if method != "PATCH" {
-		t.Errorf("expected PATCH, got %s", method)
-	}
-	if path != "/workspaces/ws-test/feeds/channel:ch-test/items/conv-123" {
-		t.Errorf("unexpected path: %s", path)
+	if patchPath != "/workspaces/ws-test/feeds/channel:ch-test/items/fi-conv-123" {
+		t.Errorf("unexpected path: %s", patchPath)
 	}
 	if payload["teamId"] != "team-a" {
 		t.Errorf("expected team-a, got %v", payload["teamId"])
@@ -556,9 +583,17 @@ func TestAssignFeedItem_EmptyConversation(t *testing.T) {
 func TestAssignFeedItem_NoAgent(t *testing.T) {
 	var payload map[string]interface{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &payload)
-		w.WriteHeader(200)
+		switch {
+		case isFeedItemSearch(r):
+			w.WriteHeader(200)
+			w.Write([]byte(feedItemSearchJSON("conv-1")))
+		case r.Method == "PATCH":
+			body, _ := io.ReadAll(r.Body)
+			json.Unmarshal(body, &payload)
+			w.WriteHeader(200)
+		default:
+			w.WriteHeader(200)
+		}
 	}))
 	defer srv.Close()
 
@@ -653,7 +688,10 @@ func TestEscalateToAgent_LookupByPhone(t *testing.T) {
 				Availability:          AgentAvailability{Status: "active", Activity: "available"},
 				RootItemAssignedCount: 0,
 			})))
-		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/feeds/channel:ch-test/items/conv-looked-up":
+		case isFeedItemSearch(r):
+			w.WriteHeader(200)
+			w.Write([]byte(feedItemSearchJSON("conv-looked-up")))
+		case r.Method == "PATCH" && r.URL.Path == "/workspaces/ws-test/feeds/channel:ch-test/items/fi-conv-looked-up":
 			// AssignFeedItem with the looked-up conversationID
 			w.WriteHeader(200)
 		default:

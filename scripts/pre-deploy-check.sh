@@ -59,6 +59,15 @@ else
     fail "Docker daemon no responde" "sudo systemctl start docker"
 fi
 
+# Verificar auto-start al boot (solo Linux con systemd)
+if command -v systemctl &>/dev/null; then
+    if systemctl is-enabled docker &>/dev/null 2>&1; then
+        pass "Docker auto-start al boot (enabled)"
+    else
+        warn "Docker NO arranca automaticamente al reiniciar el servidor" "sudo systemctl enable docker"
+    fi
+fi
+
 # ==========================================================================
 # 2. Archivos requeridos
 # ==========================================================================
@@ -81,6 +90,13 @@ for f in "${REQUIRED_FILES[@]}"; do
         fail "$f no encontrado" "Verificar que el repositorio esta completo (git status)"
     fi
 done
+
+# Archivos opcionales de scaling
+if [ -f "docker-compose.high-load.yml" ] && [ -f ".env.high-load" ]; then
+    pass "Perfil high-load disponible (docker-compose.high-load.yml + .env.high-load)"
+else
+    warn "Perfil high-load no disponible" "Sin esto no podras escalar a ~1000 chats/hora con ./scripts/scale-up.sh"
+fi
 
 if [ -d "migrations" ] && ls migrations/*.sql &>/dev/null 2>&1; then
     MIGRATION_COUNT=$(ls migrations/*.sql 2>/dev/null | wc -l)
@@ -108,7 +124,11 @@ if [ -f ".env" ]; then
         "BIRD_API_KEY_WA"
         "BIRD_ACCESS_KEY_ID"
         "BIRD_WEBHOOK_SECRET"
+        "BIRD_WORKSPACE_ID"
+        "BIRD_CHANNEL_ID"
+        "BIRD_TEAM_FALLBACK"
         "OPENAI_API_KEY"
+        "INTERNAL_API_KEY"
         "NGROK_AUTHTOKEN"
     )
 
@@ -125,7 +145,8 @@ if [ -f ".env" ]; then
     RECOMMENDED_VARS=(
         "TG_BOT_TOKEN"
         "TG_CHAT_IDS"
-        "INTERNAL_API_KEY"
+        "TELEGRAM_BOT_TOKEN"
+        "TELEGRAM_CHAT_ID"
     )
 
     for var in "${RECOMMENDED_VARS[@]}"; do
@@ -133,7 +154,7 @@ if [ -f ".env" ]; then
         if [ -n "$val" ] && [ "$val" != '""' ]; then
             pass "$var configurado"
         else
-            warn "$var vacio" "Recomendado para produccion. Sin esto no tendras alertas Telegram ni API interna protegida."
+            warn "$var vacio" "Recomendado para produccion. Sin esto no tendras alertas Telegram (errores + capacity monitor) ni watcher."
         fi
     done
 
@@ -306,11 +327,15 @@ if command -v free &>/dev/null; then
     if [ -n "$TOTAL_MB" ] && [ "$TOTAL_MB" -gt 0 ] 2>/dev/null; then
         # Bot necesita: bot(128M) + db(256M) + ngrok(64M) + watcher(32M) = 480M minimo
         MIN_RAM=480
-        if [ -n "$AVAIL_MB" ] && [ "$AVAIL_MB" -gt "$MIN_RAM" ] 2>/dev/null; then
-            pass "RAM: ${AVAIL_MB}MB disponible de ${TOTAL_MB}MB total (minimo: ${MIN_RAM}MB)"
-        elif [ -n "$AVAIL_MB" ] 2>/dev/null; then
-            warn "RAM: ${AVAIL_MB}MB disponible de ${TOTAL_MB}MB total" "El bot necesita ~${MIN_RAM}MB. Cerrar otros procesos o aumentar RAM."
-        fi
+        # high-load: bot(512M) + db(1024M) + ngrok(64M) + watcher(32M) = 1632M
+            MIN_RAM_HL=1632
+            if [ -n "$AVAIL_MB" ] && [ "$AVAIL_MB" -gt "$MIN_RAM_HL" ] 2>/dev/null; then
+                pass "RAM: ${AVAIL_MB}MB disponible de ${TOTAL_MB}MB total (normal: ${MIN_RAM}MB, high-load: ${MIN_RAM_HL}MB)"
+            elif [ -n "$AVAIL_MB" ] && [ "$AVAIL_MB" -gt "$MIN_RAM" ] 2>/dev/null; then
+                warn "RAM: ${AVAIL_MB}MB disponible de ${TOTAL_MB}MB total" "Suficiente para perfil normal (${MIN_RAM}MB) pero NO para high-load (${MIN_RAM_HL}MB)."
+            elif [ -n "$AVAIL_MB" ] 2>/dev/null; then
+                warn "RAM: ${AVAIL_MB}MB disponible de ${TOTAL_MB}MB total" "El bot necesita ~${MIN_RAM}MB. Cerrar otros procesos o aumentar RAM."
+            fi
     fi
 fi
 
@@ -429,6 +454,10 @@ echo ""
 if [ "$FAIL" -eq 0 ] && [ "$WARN" -eq 0 ]; then
     echo -e "${GREEN}${BOLD}TODO LISTO! Puedes construir con:${NC}"
     echo "  docker compose up -d --build"
+    echo ""
+    echo -e "  Escalar:  ${CYAN}./scripts/scale-up.sh${NC}   (high-load ~1000 chats/h)"
+    echo -e "  Reducir:  ${CYAN}./scripts/scale-down.sh${NC}  (perfil normal)"
+    echo -e "  Backup:   ${CYAN}./scripts/backup-db.sh${NC}   (backup BD local)"
 elif [ "$FAIL" -eq 0 ]; then
     echo -e "${YELLOW}${BOLD}LISTO CON ADVERTENCIAS. Puedes continuar pero revisa los warnings.${NC}"
     echo "  docker compose up -d --build"

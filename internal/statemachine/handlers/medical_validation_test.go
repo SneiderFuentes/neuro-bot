@@ -57,6 +57,9 @@ func (m *mockApptRepo) FindPendingByDate(ctx context.Context, date string) ([]do
 func (m *mockApptRepo) RescheduleDate(ctx context.Context, agendaID int, doctorDoc, oldDate, newDate string) (int, error) {
 	return 0, nil
 }
+func (m *mockApptRepo) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
+	return nil
+}
 
 // ==================== AskContrasted ====================
 

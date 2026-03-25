@@ -38,6 +38,9 @@ func (m *mockApptRepoAPI) FindByAgendaAndDate(ctx context.Context, agendaID int,
 func (m *mockApptRepoAPI) Create(ctx context.Context, input domain.CreateAppointmentInput) (*domain.Appointment, error) {
 	return nil, nil
 }
+func (m *mockApptRepoAPI) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
+	return nil
+}
 func (m *mockApptRepoAPI) Confirm(ctx context.Context, id, ch, chID string) error { return nil }
 func (m *mockApptRepoAPI) Cancel(ctx context.Context, id, reason, ch, chID string) error {
 	if m.cancelFn != nil {

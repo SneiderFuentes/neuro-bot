@@ -119,8 +119,9 @@ func TestGroupByServiceFromDB_SingleCup(t *testing.T) {
 	if g.ServiceType != "Resonancia" {
 		t.Errorf("expected service 'Resonancia', got %q", g.ServiceType)
 	}
-	if g.Espacios != 2 {
-		t.Errorf("expected Espacios=2 (1 qty * 2 spaces), got %d", g.Espacios)
+	// applyResonanciaRules overrides: 890271 not in resonanciaCodes → fallback qty=1
+	if g.Espacios != 1 {
+		t.Errorf("expected Espacios=1 (890271 not in resonanciaCodes, fallback to qty), got %d", g.Espacios)
 	}
 	if len(g.Cups) != 1 {
 		t.Fatalf("expected 1 cup, got %d", len(g.Cups))
@@ -131,7 +132,7 @@ func TestGroupByServiceFromDB_SingleCup(t *testing.T) {
 	}
 }
 
-// 3. CUPS code not found in DB falls back to "General" with Espacios=1.
+// 3. CUPS code not found in DB is skipped (inactive/unknown).
 func TestGroupByServiceFromDB_SingleCup_NotInDB(t *testing.T) {
 	mock := newMock() // empty DB
 
@@ -140,15 +141,9 @@ func TestGroupByServiceFromDB_SingleCup_NotInDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(groups))
-	}
-	g := groups[0]
-	if g.ServiceType != "General" {
-		t.Errorf("expected service 'General', got %q", g.ServiceType)
-	}
-	if g.Espacios != 1 {
-		t.Errorf("expected Espacios=1, got %d", g.Espacios)
+	// Code not found in DB is skipped entirely
+	if len(groups) != 0 {
+		t.Fatalf("expected 0 groups (code not in DB is skipped), got %d", len(groups))
 	}
 }
 
@@ -180,8 +175,8 @@ func TestGroupByServiceFromDB_MultipleSameService(t *testing.T) {
 	if g.ServiceType != "Resonancia" {
 		t.Errorf("expected service 'Resonancia', got %q", g.ServiceType)
 	}
-	if g.Espacios != 4 {
-		t.Errorf("expected Espacios=4 (2+2), got %d", g.Espacios)
+	if g.Espacios != 2 {
+		t.Errorf("expected Espacios=2 (resonanciaCodes simple=1+fallback qty=1), got %d", g.Espacios)
 	}
 	if len(g.Cups) != 2 {
 		t.Errorf("expected 2 cups, got %d", len(g.Cups))
@@ -262,8 +257,9 @@ func TestGroupByServiceFromDB_QuantityMultiplier(t *testing.T) {
 	if len(groups) != 1 {
 		t.Fatalf("expected 1 group, got %d", len(groups))
 	}
-	if groups[0].Espacios != 6 {
-		t.Errorf("expected Espacios=6 (3 qty * 2 spaces), got %d", groups[0].Espacios)
+	// applyResonanciaRules: 883101 Simple=1, qty=3 → 1*3=3
+	if groups[0].Espacios != 3 {
+		t.Errorf("expected Espacios=3 (3 qty * 1 simple from resonanciaCodes), got %d", groups[0].Espacios)
 	}
 }
 
@@ -541,8 +537,9 @@ func TestGroupByServiceFromDB_MixedServicesIsolation(t *testing.T) {
 	if res == nil {
 		t.Fatal("missing 'Resonancia' group")
 	}
-	if res.Espacios != 2 {
-		t.Errorf("Resonancia Espacios: expected 2, got %d", res.Espacios)
+	// applyResonanciaRules: 883101 Simple=1, qty=1 → 1
+	if res.Espacios != 1 {
+		t.Errorf("Resonancia Espacios: expected 1 (883101 simple=1 from resonanciaCodes), got %d", res.Espacios)
 	}
 }
 

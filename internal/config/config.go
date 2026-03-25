@@ -14,6 +14,7 @@ type Config struct {
 	Port     string
 	Timezone string
 	LogLevel string
+	LogDir   string
 
 	// Local DB
 	DBHost     string
@@ -115,6 +116,19 @@ type Config struct {
 
 	// Testing whitelist — only these phones can interact with the bot (empty = all allowed)
 	TestingWhitelistPhones []string
+
+	// Scaling — configurable pool sizes and DB connections for load profiles
+	ScalingProfile     string // "normal" or "high-load" (informational, for monitoring alerts)
+	WorkerPoolSize     int    // Worker goroutines (default 10)
+	WorkerQueueSize    int    // Message queue buffer (default 100)
+	LocalDBMaxOpen     int // Local DB max open connections (default 25)
+	LocalDBMaxIdle     int // Local DB max idle connections (default 10)
+	ExternalDBMaxOpen  int // External DB max open connections (default 10)
+	ExternalDBMaxIdle  int // External DB max idle connections (default 5)
+	HTTPReadTimeout    int // HTTP server read timeout seconds (default 30)
+	HTTPWriteTimeout   int // HTTP server write timeout seconds (default 30)
+	HTTPIdleTimeout    int // HTTP server idle timeout seconds (default 60)
+	MySQLMaxConns      int // MySQL max_connections hint for docker-compose (informational)
 }
 
 func Load() *Config {
@@ -130,6 +144,7 @@ func Load() *Config {
 		Port:     getEnv("PORT", "8080"),
 		Timezone: getEnv("TZ", "America/Bogota"),
 		LogLevel: getEnv("LOG_LEVEL", "info"),
+		LogDir:   getEnv("LOG_DIR", "/app/logs"),
 
 		// Local DB
 		DBHost:     getEnv("DB_HOST", "db"),
@@ -232,6 +247,18 @@ func Load() *Config {
 
 		// Testing whitelist
 		TestingWhitelistPhones: parsePhoneList(os.Getenv("TESTING_WHITELIST_PHONES")),
+
+		// Scaling
+		ScalingProfile:    getEnv("SCALING_PROFILE", "normal"),
+		WorkerPoolSize:    getEnvInt("WORKER_POOL_SIZE", 10),
+		WorkerQueueSize:   getEnvInt("WORKER_QUEUE_SIZE", 100),
+		LocalDBMaxOpen:    getEnvInt("LOCAL_DB_MAX_OPEN", 25),
+		LocalDBMaxIdle:    getEnvInt("LOCAL_DB_MAX_IDLE", 10),
+		ExternalDBMaxOpen: getEnvInt("EXTERNAL_DB_MAX_OPEN", 10),
+		ExternalDBMaxIdle: getEnvInt("EXTERNAL_DB_MAX_IDLE", 5),
+		HTTPReadTimeout:   getEnvInt("HTTP_READ_TIMEOUT", 30),
+		HTTPWriteTimeout:  getEnvInt("HTTP_WRITE_TIMEOUT", 30),
+		HTTPIdleTimeout:   getEnvInt("HTTP_IDLE_TIMEOUT", 60),
 	}
 
 	cfg.validate()

@@ -429,7 +429,7 @@ func TestStateMachine_AutoChainCycleGuard(t *testing.T) {
 		StateGfrNotEligible,       // 17
 		StateAskSedation,          // 18
 		StateCheckPriorConsult,    // 19
-		StateCheckSoatLimit,       // 20
+		StateCheckMRCLimit,        // 20
 		StateCheckAgeRestriction,  // 21
 		StateSearchSlots,          // 22
 		StateNoSlotsAvailable,     // 23

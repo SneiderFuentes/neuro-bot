@@ -11,8 +11,8 @@ import (
 )
 
 // RegisterPostActionHandlers registra los handlers de post-acción y estados terminales (Fase 11).
-func RegisterPostActionHandlers(m *sm.Machine) {
-	m.Register(sm.StatePostActionMenu, postActionMenuHandler())
+func RegisterPostActionHandlers(m *sm.Machine, birdClient *bird.Client) {
+	m.Register(sm.StatePostActionMenu, postActionMenuHandler(birdClient))
 	m.Register(sm.StateFallbackMenu, fallbackMenuHandler())
 	m.Register(sm.StateFarewell, farewellHandler())
 	m.Register(sm.StateTerminated, terminatedHandler())
@@ -36,7 +36,7 @@ func buildPostActionList(body string) *sm.ListMessage {
 
 // POST_ACTION_MENU (interactivo) — menú con lista de 3 opciones + texto "agente".
 // Acepta payloads: ver_citas, menu_principal, terminar_chat, y texto "agente".
-func postActionMenuHandler() sm.StateHandler {
+func postActionMenuHandler(birdClient *bird.Client) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		payload := msg.Text
 		if msg.PostbackPayload != "" {
@@ -45,9 +45,17 @@ func postActionMenuHandler() sm.StateHandler {
 
 		// Accept "agente" as free-text input (case insensitive)
 		if strings.EqualFold(strings.TrimSpace(payload), "agente") {
+			if birdClient != nil && !birdClient.HasAvailableAgents() {
+				r := sm.NewResult(sess.CurrentState).
+					WithEvent("agent_unavailable", nil)
+				r.Messages = append(r.Messages, buildPostActionList("En este momento no hay agentes disponibles. Por favor selecciona una opción."))
+				return r, nil
+			}
 			return sm.NewResult(sm.StateEscalateToAgent).
 				WithEvent("post_action_selected", map[string]interface{}{"action": "escalate"}), nil
 		}
+
+		agentsAvailable := birdClient != nil && birdClient.HasAvailableAgents()
 
 		result, selected := sm.ValidateButtonResponse(sess, msg,
 			"ver_citas", "menu_principal", "terminar_chat")
@@ -56,7 +64,11 @@ func postActionMenuHandler() sm.StateHandler {
 				return result, nil
 			}
 			result.Messages = nil
-			result.Messages = append(result.Messages, buildPostActionList("¿Qué deseas hacer ahora?\n\nTambién puedes escribir *agente* para hablar con un asesor."))
+			listText := "¿Qué deseas hacer ahora?"
+			if agentsAvailable {
+				listText += "\n\nTambién puedes escribir *agente* para hablar con un asesor."
+			}
+			result.Messages = append(result.Messages, buildPostActionList(listText))
 			return result, nil
 		}
 

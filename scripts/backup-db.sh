@@ -2,6 +2,10 @@
 # Backup de la BD interna del bot (neuro_bot)
 # Uso: ./scripts/backup-db.sh
 # Genera: backups/neuro_bot_YYYY-MM-DD_HHMMSS.sql.gz
+#
+# Crontab (backup diario a las 3am):
+#   crontab -e
+#   0 3 * * * /ruta/al/proyecto/neuro-bot/scripts/backup-db.sh >> /ruta/al/proyecto/neuro-bot/backups/cron.log 2>&1
 
 set -euo pipefail
 

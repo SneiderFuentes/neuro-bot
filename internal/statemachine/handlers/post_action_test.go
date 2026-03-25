@@ -40,7 +40,7 @@ func postbackM(payload string) bird.InboundMessage {
 
 func TestPostActionMenu_VerCitas(t *testing.T) {
 	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
+	RegisterPostActionHandlers(m, nil)
 
 	sess := testSess(sm.StatePostActionMenu)
 	result, err := m.Process(context.Background(), sess, postbackM("ver_citas"))
@@ -54,7 +54,7 @@ func TestPostActionMenu_VerCitas(t *testing.T) {
 
 func TestPostActionMenu_Agente(t *testing.T) {
 	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
+	RegisterPostActionHandlers(m, nil)
 
 	sess := testSess(sm.StatePostActionMenu)
 	result, err := m.Process(context.Background(), sess, textM("agente"))
@@ -68,7 +68,7 @@ func TestPostActionMenu_Agente(t *testing.T) {
 
 func TestPostActionMenu_AgenteUpperCase(t *testing.T) {
 	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
+	RegisterPostActionHandlers(m, nil)
 
 	sess := testSess(sm.StatePostActionMenu)
 	result, _ := m.Process(context.Background(), sess, textM("AGENTE"))
@@ -79,7 +79,7 @@ func TestPostActionMenu_AgenteUpperCase(t *testing.T) {
 
 func TestPostActionMenu_InvalidInput(t *testing.T) {
 	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
+	RegisterPostActionHandlers(m, nil)
 
 	sess := testSess(sm.StatePostActionMenu)
 	result, err := m.Process(context.Background(), sess, textM("hola"))
@@ -94,7 +94,7 @@ func TestPostActionMenu_InvalidInput(t *testing.T) {
 
 func TestPostActionMenu_Numeric(t *testing.T) {
 	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
+	RegisterPostActionHandlers(m, nil)
 
 	sess := testSess(sm.StatePostActionMenu)
 	// "1" = ver_citas, "2" = menu_principal, "3" = terminar_chat
@@ -109,7 +109,7 @@ func TestPostActionMenu_Numeric(t *testing.T) {
 
 func TestFarewell(t *testing.T) {
 	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
+	RegisterPostActionHandlers(m, nil)
 
 	sess := testSess(sm.StateFarewell)
 	result, err := m.Process(context.Background(), sess, textM(""))
@@ -126,7 +126,7 @@ func TestFarewell(t *testing.T) {
 
 func TestTerminated(t *testing.T) {
 	m := sm.NewMachine()
-	RegisterPostActionHandlers(m)
+	RegisterPostActionHandlers(m, nil)
 
 	sess := testSess(sm.StateTerminated)
 	result, err := m.Process(context.Background(), sess, textM(""))

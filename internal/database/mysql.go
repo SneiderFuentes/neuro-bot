@@ -18,8 +18,8 @@ func NewLocalDB(cfg *config.Config) (*sql.DB, error) {
 		return nil, fmt.Errorf("local db open: %w", err)
 	}
 
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
+	db.SetMaxOpenConns(cfg.LocalDBMaxOpen)
+	db.SetMaxIdleConns(cfg.LocalDBMaxIdle)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := db.Ping(); err != nil {
@@ -38,8 +38,8 @@ func NewExternalDB(cfg *config.Config) (*sql.DB, error) {
 		return nil, fmt.Errorf("external db open: %w", err)
 	}
 
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(cfg.ExternalDBMaxOpen)
+	db.SetMaxIdleConns(cfg.ExternalDBMaxIdle)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
 	if err := db.Ping(); err != nil {

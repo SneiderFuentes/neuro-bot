@@ -86,7 +86,7 @@ func TestAskMedicalOrder_Automatic(t *testing.T) {
 
 func TestUploadMedicalOrder_TextReceived(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(nil))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(nil, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, textM("hello"))
@@ -101,7 +101,7 @@ func TestUploadMedicalOrder_TextReceived(t *testing.T) {
 
 func TestUploadMedicalOrder_RetryPostback(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(nil))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(nil, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, postbackM("retry_photo"))
@@ -115,7 +115,7 @@ func TestUploadMedicalOrder_RetryPostback(t *testing.T) {
 
 func TestUploadMedicalOrder_EscalateAgentPostback(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(nil))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(nil, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, postbackM("escalate_agent"))
@@ -267,17 +267,11 @@ func TestSelectProcedure_TextFallback(t *testing.T) {
 }
 
 func TestConfirmOCRResult_Correct(t *testing.T) {
-	// Single CUPS → calls AI for accurate espacios
-	groupResp := `[{"service": "Fisiatria", "cups": [{"cups_code": "890271", "cups_name": "Electromiografia", "quantity": 1}], "espacios": 1}]`
-	srv := newMockOCRServer(wrapOpenAIResponse(groupResp))
-	defer srv.Close()
-	ocrSvc := services.NewOCRServiceForTest(srv.URL)
-
 	cups := []services.CUPSEntry{{Code: "890271", Name: "Electromiografia", Quantity: 1}}
 	cupsJSON, _ := json.Marshal(cups)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(ocrSvc))
+	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(&mockProcedureRepo{}, nil))
 
 	sess := testSess(sm.StateConfirmOCRResult)
 	sess.Context["ocr_cups_json"] = string(cupsJSON)
@@ -292,10 +286,8 @@ func TestConfirmOCRResult_Correct(t *testing.T) {
 }
 
 func TestConfirmOCRResult_Incorrect(t *testing.T) {
-	ocrSvc := services.NewOCRServiceForTest("http://unused")
-
 	m := sm.NewMachine()
-	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(ocrSvc))
+	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(&mockProcedureRepo{}, nil))
 
 	sess := testSess(sm.StateConfirmOCRResult)
 	result, err := m.Process(context.Background(), sess, postbackM("ocr_incorrect"))
@@ -346,7 +338,7 @@ func TestUploadMedicalOrder_ImageSuccess(t *testing.T) {
 	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, imageMsg(fileSrv.URL+"/order.jpg"))
@@ -371,7 +363,7 @@ func TestUploadMedicalOrder_DocumentSuccess(t *testing.T) {
 	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, documentMsg(fileSrv.URL+"/order.pdf"))
@@ -390,7 +382,7 @@ func TestUploadMedicalOrder_DocumentEmptyURL(t *testing.T) {
 	ocrSvc := services.NewOCRServiceForTest("http://unused")
 
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, documentMsg(""))
@@ -406,7 +398,7 @@ func TestUploadMedicalOrder_ImageEmptyURL(t *testing.T) {
 	ocrSvc := services.NewOCRServiceForTest("http://unused")
 
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, imageMsg(""))
@@ -432,7 +424,7 @@ func TestUploadMedicalOrder_ImageOCRError(t *testing.T) {
 	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, imageMsg(fileSrv.URL+"/order.jpg"))
@@ -455,7 +447,7 @@ func TestUploadMedicalOrder_ImageNoCups(t *testing.T) {
 	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, imageMsg(fileSrv.URL+"/order.jpg"))
@@ -479,7 +471,7 @@ func TestUploadMedicalOrder_StoresDocument(t *testing.T) {
 	ocrSvc := services.NewOCRServiceForTest(ocrSrv.URL)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc))
+	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, nil))
 
 	sess := testSess(sm.StateUploadMedicalOrder)
 	result, err := m.Process(context.Background(), sess, imageMsg(fileSrv.URL+"/order.jpg"))
@@ -610,7 +602,7 @@ func TestValidateOCR_DocumentMatch(t *testing.T) {
 
 func TestOCRFailed_RedirectsToUpload(t *testing.T) {
 	m := sm.NewMachine()
-	m.Register(sm.StateOCRFailed, ocrFailedHandler())
+	m.Register(sm.StateOCRFailed, ocrFailedHandler(nil))
 
 	sess := testSess(sm.StateOCRFailed)
 
@@ -647,20 +639,13 @@ func TestAskManualCups_SearchError(t *testing.T) {
 }
 
 func TestConfirmOCRResult_PreservesSedation(t *testing.T) {
-	// OCR detected is_sedated=true for one procedure. GroupByService AI
-	// doesn't return is_sedated, so confirmOCRResult must restore it.
-	groupResp := `[{"service": "Resonancia", "cups": [{"cups_code": "883210", "cups_name": "RM cerebro", "quantity": 1}], "espacios": 2}]`
-	srv := newMockOCRServer(wrapOpenAIResponse(groupResp))
-	defer srv.Close()
-	ocrSvc := services.NewOCRServiceForTest(srv.URL)
-
 	cups := []services.CUPSEntry{
 		{Code: "883210", Name: "RM cerebro bajo sedacion", Quantity: 1, IsSedated: true},
 	}
 	cupsJSON, _ := json.Marshal(cups)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(ocrSvc))
+	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(&mockProcedureRepo{}, nil))
 
 	sess := testSess(sm.StateConfirmOCRResult)
 	sess.Context["ocr_cups_json"] = string(cupsJSON)

@@ -73,7 +73,7 @@ func TestSearchSlots_Found(t *testing.T) {
 	)
 
 	m := sm.NewMachine()
-	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil)
+	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil, nil)
 
 	sess := testSess(sm.StateSearchSlots)
 	sess.Context["cups_code"] = "890271"
@@ -103,7 +103,7 @@ func TestSearchSlots_NotFound(t *testing.T) {
 	)
 
 	m := sm.NewMachine()
-	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil)
+	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil, nil)
 
 	sess := testSess(sm.StateSearchSlots)
 	sess.Context["cups_code"] = "890271"
@@ -131,7 +131,8 @@ func TestShowSlots_Selection(t *testing.T) {
 	sess.Context["available_slots_json"] = slotsJSON(slots)
 	sess.Context["cups_name"] = "Electromiografia"
 
-	result, err := m.Process(context.Background(), sess, postbackM(slots[0].TimeSlot))
+	// showSlotsHandler now expects a number (1-based index), not a postback payload
+	result, err := m.Process(context.Background(), sess, textM("1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +150,8 @@ func TestShowSlots_MoreSlots(t *testing.T) {
 	sess := testSess(sm.StateShowSlots)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
 
-	result, err := m.Process(context.Background(), sess, postbackM("more_slots"))
+	// "Ver más" = slot count + 1 = option "2" (1 slot available)
+	result, err := m.Process(context.Background(), sess, textM("2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,13 +322,23 @@ func TestCreateAppointment_Success(t *testing.T) {
 	slots := sampleSlots()
 	repo := &testutil.MockAppointmentRepo{
 		CreateFn: func(ctx context.Context, input domain.CreateAppointmentInput) (*domain.Appointment, error) {
-			return &domain.Appointment{ID: "apt-100"}, nil
+			return &domain.Appointment{ID: "100"}, nil
 		},
 	}
 	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil))
+
+	// Build procedures_json for a single group
+	groups := []services.CUPSGroup{
+		{
+			ServiceType: "Neurofisiologia",
+			Cups:        []services.CUPSEntry{{Code: "890271", Name: "Electromiografia", Quantity: 1}},
+			Espacios:    1,
+		},
+	}
+	groupsJSON, _ := json.Marshal(groups)
 
 	sess := testSess(sm.StateCreateAppointment)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
@@ -337,6 +349,9 @@ func TestCreateAppointment_Success(t *testing.T) {
 	sess.Context["is_contrasted"] = "0"
 	sess.Context["is_sedated"] = "0"
 	sess.Context["espacios"] = "1"
+	sess.Context["procedures_json"] = string(groupsJSON)
+	sess.Context["current_procedure_idx"] = "0"
+	sess.Context["total_procedures"] = "1"
 
 	result, err := m.Process(context.Background(), sess, textM(""))
 	if err != nil {
@@ -345,8 +360,8 @@ func TestCreateAppointment_Success(t *testing.T) {
 	if result.NextState != sm.StateBookingSuccess {
 		t.Errorf("expected BOOKING_SUCCESS, got %s", result.NextState)
 	}
-	if result.UpdateCtx["created_appointment_id"] != "apt-100" {
-		t.Errorf("expected created_appointment_id=apt-100, got %s", result.UpdateCtx["created_appointment_id"])
+	if result.UpdateCtx["created_appointment_id"] != "100" {
+		t.Errorf("expected created_appointment_id=100, got %s", result.UpdateCtx["created_appointment_id"])
 	}
 }
 
@@ -355,7 +370,7 @@ func TestCreateAppointment_SlotNotFound(t *testing.T) {
 	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil))
 
 	sess := testSess(sm.StateCreateAppointment)
 	// No available_slots_json or selected_slot_id -> slot not found
@@ -384,7 +399,17 @@ func TestCreateAppointment_SlotTakenError(t *testing.T) {
 	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil))
+
+	// Build procedures_json for a single group
+	groups := []services.CUPSGroup{
+		{
+			ServiceType: "Neurofisiologia",
+			Cups:        []services.CUPSEntry{{Code: "890271", Name: "Electromiografia", Quantity: 1}},
+			Espacios:    1,
+		},
+	}
+	groupsJSON, _ := json.Marshal(groups)
 
 	sess := testSess(sm.StateCreateAppointment)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
@@ -395,6 +420,9 @@ func TestCreateAppointment_SlotTakenError(t *testing.T) {
 	sess.Context["is_contrasted"] = "0"
 	sess.Context["is_sedated"] = "0"
 	sess.Context["espacios"] = "1"
+	sess.Context["procedures_json"] = string(groupsJSON)
+	sess.Context["current_procedure_idx"] = "0"
+	sess.Context["total_procedures"] = "1"
 
 	result, err := m.Process(context.Background(), sess, textM(""))
 	if err != nil {
@@ -418,7 +446,17 @@ func TestCreateAppointment_GenericError(t *testing.T) {
 	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil))
+
+	// Build procedures_json for a single group
+	groups := []services.CUPSGroup{
+		{
+			ServiceType: "Neurofisiologia",
+			Cups:        []services.CUPSEntry{{Code: "890271", Name: "Electromiografia", Quantity: 1}},
+			Espacios:    1,
+		},
+	}
+	groupsJSON, _ := json.Marshal(groups)
 
 	sess := testSess(sm.StateCreateAppointment)
 	sess.Context["available_slots_json"] = slotsJSON(slots)
@@ -429,6 +467,9 @@ func TestCreateAppointment_GenericError(t *testing.T) {
 	sess.Context["is_contrasted"] = "0"
 	sess.Context["is_sedated"] = "0"
 	sess.Context["espacios"] = "1"
+	sess.Context["procedures_json"] = string(groupsJSON)
+	sess.Context["current_procedure_idx"] = "0"
+	sess.Context["total_procedures"] = "1"
 
 	result, err := m.Process(context.Background(), sess, textM(""))
 	if err != nil {

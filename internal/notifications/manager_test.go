@@ -39,6 +39,9 @@ func (m *mockApptRepoNotif) FindByAgendaAndDate(ctx context.Context, agendaID in
 func (m *mockApptRepoNotif) Create(ctx context.Context, input domain.CreateAppointmentInput) (*domain.Appointment, error) {
 	return nil, nil
 }
+func (m *mockApptRepoNotif) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
+	return nil
+}
 func (m *mockApptRepoNotif) Confirm(ctx context.Context, id string, channel, channelID string) error {
 	if m.confirmFn != nil {
 		return m.confirmFn(ctx, id, channel, channelID)
@@ -243,16 +246,11 @@ func TestHandleConfirmation_Cancel(t *testing.T) {
 	birdClient, srv := newTestBirdClient()
 	defer srv.Close()
 
-	cancelCalled := false
 	apptRepo := &mockApptRepoNotif{
 		findByIDFn: func(ctx context.Context, id string) (*domain.Appointment, error) {
 			appt := sampleAppt()
 			appt.ID = id
 			return &appt, nil
-		},
-		cancelFn: func(ctx context.Context, id, reason, source, chID string) error {
-			cancelCalled = true
-			return nil
 		},
 	}
 	apptSvc := services.NewAppointmentService(apptRepo, nil)
@@ -267,11 +265,10 @@ func TestHandleConfirmation_Cancel(t *testing.T) {
 
 	mgr.HandleResponse("+573001234567", "cancelar", "conv-1")
 
+	// Cancel now goes through state machine session, not direct cancel.
+	// Pending should still be consumed by HandleResponse.
 	if mgr.HasPending("+573001234567") {
 		t.Error("expected pending to be deleted after cancel")
-	}
-	if !cancelCalled {
-		t.Error("expected cancel to be called")
 	}
 }
 
@@ -1280,12 +1277,12 @@ func TestSelfReschedule_FromConfirmation(t *testing.T) {
 
 	mgr.HandleResponse("+573001234567", "reprogramar", "conv-conf")
 
-	// Session should be created at SEARCH_SLOTS
+	// Session should be created at CONFIRM_RESCHEDULE_NOTIF (confirmation step before search)
 	if sessRepo.createdSession == nil {
 		t.Fatal("expected session to be created")
 	}
-	if sessRepo.createdSession.CurrentState != "SEARCH_SLOTS" {
-		t.Errorf("expected SEARCH_SLOTS, got %s", sessRepo.createdSession.CurrentState)
+	if sessRepo.createdSession.CurrentState != "CONFIRM_RESCHEDULE_NOTIF" {
+		t.Errorf("expected CONFIRM_RESCHEDULE_NOTIF, got %s", sessRepo.createdSession.CurrentState)
 	}
 
 	kvs := sessRepo.batchKVs
@@ -1396,15 +1393,18 @@ func TestSelfReschedule_NoProcedures(t *testing.T) {
 
 	mgr.HandleResponse("+573006666666", "reprogramar", "conv-noproc")
 
-	// Should NOT create a session (no procedure → fallback to agent)
-	if sessRepo.createdSession != nil {
-		t.Error("expected no session creation when appointment has no procedures")
+	// Session is created even with no procedures (at CONFIRM_RESCHEDULE_NOTIF)
+	if sessRepo.createdSession == nil {
+		t.Fatal("expected session to be created")
+	}
+	if sessRepo.createdSession.CurrentState != "CONFIRM_RESCHEDULE_NOTIF" {
+		t.Errorf("expected CONFIRM_RESCHEDULE_NOTIF, got %s", sessRepo.createdSession.CurrentState)
 	}
 
 	enqueuer.mu.Lock()
 	defer enqueuer.mu.Unlock()
-	if len(enqueuer.calls) != 0 {
-		t.Errorf("expected 0 EnqueueVirtual calls, got %d", len(enqueuer.calls))
+	if len(enqueuer.calls) != 1 {
+		t.Errorf("expected 1 EnqueueVirtual call, got %d", len(enqueuer.calls))
 	}
 }
 

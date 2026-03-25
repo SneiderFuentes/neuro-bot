@@ -43,7 +43,7 @@ func (m *mockAppointmentRepo) Create(ctx context.Context, input domain.CreateApp
 	if m.createFn != nil {
 		return m.createFn(ctx, input)
 	}
-	return &domain.Appointment{ID: "new-id"}, nil
+	return &domain.Appointment{ID: "100"}, nil
 }
 func (m *mockAppointmentRepo) Confirm(ctx context.Context, id, channel, channelID string) error {
 	return nil
@@ -77,6 +77,9 @@ func (m *mockAppointmentRepo) FindPendingByDate(ctx context.Context, date string
 }
 func (m *mockAppointmentRepo) RescheduleDate(ctx context.Context, agendaID int, doctorDoc, oldDate, newDate string) (int, error) {
 	return 0, nil
+}
+func (m *mockAppointmentRepo) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
+	return nil
 }
 
 // --- Tests ---
@@ -639,7 +642,7 @@ func TestCreateWithConsecutive_Error(t *testing.T) {
 			if callCount == 2 {
 				return nil, fmt.Errorf("insert failed on 2nd slot")
 			}
-			return &domain.Appointment{ID: fmt.Sprintf("appt-%d", callCount)}, nil
+			return &domain.Appointment{ID: fmt.Sprintf("%d", 100+callCount)}, nil
 		},
 	}
 	svc := NewAppointmentService(repo, nil)
@@ -661,10 +664,12 @@ func TestCreateWithConsecutive_Error(t *testing.T) {
 
 func TestCreateWithConsecutive_Multiple(t *testing.T) {
 	var createdSlots []string
+	callIdx := 0
 	repo := &mockAppointmentRepo{
 		createFn: func(ctx context.Context, input domain.CreateAppointmentInput) (*domain.Appointment, error) {
+			callIdx++
 			createdSlots = append(createdSlots, input.TimeSlot)
-			return &domain.Appointment{ID: fmt.Sprintf("appt-%s", input.TimeSlot)}, nil
+			return &domain.Appointment{ID: fmt.Sprintf("%d", 200+callIdx)}, nil
 		},
 	}
 	svc := NewAppointmentService(repo, nil)
@@ -679,8 +684,8 @@ func TestCreateWithConsecutive_Multiple(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if id != "appt-202603150800" {
-		t.Errorf("expected first appointment ID, got %q", id)
+	if id != "201" {
+		t.Errorf("expected first appointment ID '201', got %q", id)
 	}
 	if len(createdSlots) != 3 {
 		t.Fatalf("expected 3 slots created, got %d", len(createdSlots))

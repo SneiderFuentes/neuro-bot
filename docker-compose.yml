@@ -21,6 +21,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    volumes:
+      - bot-logs:/app/logs
     networks:
       - botnet
     logging:
@@ -153,6 +155,7 @@ services:
 # Safe commands: docker compose down | up --build | restart | stop
 volumes:
   botdbdata:
+  bot-logs:
 
 networks:
   botnet:

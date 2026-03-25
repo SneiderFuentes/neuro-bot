@@ -1,0 +1,40 @@
+# =============================================================================
+# HIGH-LOAD OVERRIDE — Para soportar ~1000 chats/hora
+# =============================================================================
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.high-load.yml up -d
+#
+# Para volver a normal:
+#   docker compose up -d
+# =============================================================================
+
+services:
+  bot:
+    env_file:
+      - .env
+      - .env.testing
+      - .env.high-load
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '2.0'
+        reservations:
+          memory: 128M
+
+  db:
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --tls-version=TLSv1.2
+      --mysqlx=0
+      --innodb-buffer-pool-size=512M
+      --max-connections=200
+      --table-open-cache=400
+      --sort-buffer-size=512K
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: '2.0'
+        reservations:
+          memory: 512M

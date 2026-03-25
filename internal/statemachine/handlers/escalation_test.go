@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
@@ -44,13 +45,17 @@ func TestEscalatedHandler_Noop(t *testing.T) {
 func TestEscalateHandler_Success(t *testing.T) {
 	// Create a test server that accepts escalation + messages + agents
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" && r.URL.Path == "/workspaces/ws-test/agents" {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/workspaces/ws-test/agents":
 			w.WriteHeader(200)
 			w.Write([]byte(`{"results":[{"id":"agent-1","displayName":"Test Agent","teams":[{"id":"team-fallback","name":"CC"}],"availability":{"status":"active","activity":"available"},"rootItemAssignedCount":0}]}`))
-			return
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/search/feed-items"):
+			w.WriteHeader(200)
+			w.Write([]byte(`{"results":[{"id":"fi-conv-test","feedId":"channel:ch-test","closed":false}]}`))
+		default:
+			w.WriteHeader(200)
+			w.Write([]byte(`{"id":"msg-ok"}`))
 		}
-		w.WriteHeader(200)
-		w.Write([]byte(`{"id":"msg-ok"}`))
 	}))
 	defer srv.Close()
 
@@ -110,14 +115,18 @@ func TestEscalateHandler_TeamRouting(t *testing.T) {
 	var assignedPayloads []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assignedPayloads = append(assignedPayloads, r.URL.Path)
-		if r.Method == "GET" && r.URL.Path == "/workspaces/ws-test/agents" {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/workspaces/ws-test/agents":
 			// Agent in Grupo A team
 			w.WriteHeader(200)
 			w.Write([]byte(`{"results":[{"id":"agent-a","displayName":"Agent A","teams":[{"id":"team-grupo-a","name":"Grupo A"}],"availability":{"status":"active","activity":"available"},"rootItemAssignedCount":0}]}`))
-			return
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/search/feed-items"):
+			w.WriteHeader(200)
+			w.Write([]byte(`{"results":[{"id":"fi-conv-test","feedId":"channel:ch-test","closed":false}]}`))
+		default:
+			w.WriteHeader(200)
+			w.Write([]byte(`{"id":"msg-ok"}`))
 		}
-		w.WriteHeader(200)
-		w.Write([]byte(`{"id":"msg-ok"}`))
 	}))
 	defer srv.Close()
 

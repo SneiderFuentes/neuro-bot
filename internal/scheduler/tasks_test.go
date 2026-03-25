@@ -122,12 +122,12 @@ func sampleAppointments() []domain.Appointment {
 // 1. RegisterAll Tests
 // ═══════════════════════════════════════════════════════════════════════════════
 
-func TestRegisterAll_RegistersFourTasks(t *testing.T) {
+func TestRegisterAll_RegistersFiveTasks(t *testing.T) {
 	tasks := &Tasks{}
 	s := NewScheduler(time.UTC)
 	tasks.RegisterAll(s)
-	if len(s.tasks) != 4 {
-		t.Fatalf("expected 4 tasks, got %d", len(s.tasks))
+	if len(s.tasks) != 5 {
+		t.Fatalf("expected 5 tasks, got %d", len(s.tasks))
 	}
 }
 
@@ -137,10 +137,11 @@ func TestRegisterAll_TaskNames(t *testing.T) {
 	tasks.RegisterAll(s)
 
 	expected := map[string]bool{
-		"data_cleanup":       false,
-		"whatsapp_reminders": false,
-		"waiting_list_check": false,
-		"voice_reminders":    false,
+		"data_cleanup":          false,
+		"whatsapp_reminders":    false,
+		"waiting_list_check_08": false,
+		"waiting_list_check_14": false,
+		"voice_reminders":       false,
 	}
 
 	for _, task := range s.tasks {
@@ -207,23 +208,23 @@ func TestRegisterAll_WaitingListCheck_WeekdaysOnly(t *testing.T) {
 	tasks.RegisterAll(s)
 
 	for _, task := range s.tasks {
-		if task.Name == "waiting_list_check" {
+		if task.Name == "waiting_list_check_08" {
 			if task.Hour != 8 || task.Minute != 0 {
-				t.Errorf("waiting_list_check expected 08:00, got %02d:%02d", task.Hour, task.Minute)
+				t.Errorf("waiting_list_check_08 expected 08:00, got %02d:%02d", task.Hour, task.Minute)
 			}
 			if len(task.Weekdays) != 5 {
-				t.Errorf("waiting_list_check expected 5 weekdays (Mon-Fri), got %d", len(task.Weekdays))
+				t.Errorf("waiting_list_check_08 expected 5 weekdays (Mon-Fri), got %d", len(task.Weekdays))
 			}
 			// Verify Saturday and Sunday are NOT included
 			for _, wd := range task.Weekdays {
 				if wd == time.Saturday || wd == time.Sunday {
-					t.Errorf("waiting_list_check should not include %s", wd)
+					t.Errorf("waiting_list_check_08 should not include %s", wd)
 				}
 			}
 			return
 		}
 	}
-	t.Fatal("waiting_list_check task not found")
+	t.Fatal("waiting_list_check_08 task not found")
 }
 
 func TestRegisterAll_VoiceReminders_Schedule(t *testing.T) {

@@ -40,6 +40,8 @@ type Client struct {
 	voiceAPIKey     string
 	voiceFlowID     string // Bird Flow ID for IVR (has webhook step for DTMF result)
 	voiceWebhookURL string // notification URL for voice events (e.g. https://server/webhooks/voice)
+	// All configured team IDs for agent availability checks.
+	teamIDs []string
 	// ConversationID cache: phone → conversationID (from conversation.created webhook).
 	// Self-replacing: new conversation.created overwrites the old entry automatically.
 	mu        sync.RWMutex
@@ -67,6 +69,7 @@ func NewClient(cfg *config.Config) *Client {
 		voiceAPIKey:     cfg.BirdAPIKeyVoice,
 		voiceFlowID:     cfg.BirdVoiceFlowID,
 		voiceWebhookURL: voiceNotificationURL(cfg),
+		teamIDs:   collectTeamIDs(cfg),
 		convCache: make(map[string]string),
 	}
 }
@@ -81,6 +84,17 @@ func NewClientForTest(baseURL string) *Client {
 		channelID:           "ch-test",
 		convCache:           make(map[string]string),
 	}
+}
+
+// collectTeamIDs extracts non-empty team IDs from config for agent availability filtering.
+func collectTeamIDs(cfg *config.Config) []string {
+	var ids []string
+	for _, id := range []string{cfg.BirdTeamGrupoA, cfg.BirdTeamGrupoB, cfg.BirdTeamFallback} {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // CacheConversationID stores the conversationID for a phone (from conversation.created webhook).
@@ -845,6 +859,29 @@ func GatherKeysFromCallDetails(details *CallDetails) string {
 	return ""
 }
 
+// HasAvailableAgents returns true if at least one active agent belongs to one of the
+// configured teams (Grupo A, Grupo B, or Call Center fallback).
+// Used to conditionally show/hide the "Hablar con agente" button.
+func (c *Client) HasAvailableAgents() bool {
+	agents, err := c.ListActiveAgents()
+	if err != nil {
+		return false
+	}
+	if len(c.teamIDs) == 0 {
+		return len(agents) > 0
+	}
+	for _, a := range agents {
+		for _, t := range a.Teams {
+			for _, wanted := range c.teamIDs {
+				if t.ID == wanted {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // ListActiveAgents returns all agents with status "active" from Bird Inbox.
 func (c *Client) ListActiveAgents() ([]AgentInfo, error) {
 	return c.listAgents("active")
@@ -888,16 +925,12 @@ func (c *Client) listAgents(statusFilter string) ([]AgentInfo, error) {
 }
 
 // AssignFeedItem assigns a conversation to a team+agent in Bird Inbox.
-// Uses the Feeds API: PATCH /feeds/channel:{channelId}/items/{conversationId}
-// If the feed item doesn't exist (404), attempts to create it via POST first.
+// First searches for the feed item by conversationId (feed item ID != conversation ID),
+// then PATCHes using the actual feed item ID. Retries the search if not found yet.
 func (c *Client) AssignFeedItem(conversationID, teamID, agentID string) error {
 	if conversationID == "" {
 		return nil
 	}
-
-	feedID := "channel:" + c.channelID
-	url := fmt.Sprintf("%s/workspaces/%s/feeds/%s/items/%s",
-		c.conversationsBase(), c.workspaceID, feedID, conversationID)
 
 	payload := map[string]interface{}{
 		"teamId": teamID,
@@ -905,36 +938,101 @@ func (c *Client) AssignFeedItem(conversationID, teamID, agentID string) error {
 	if agentID != "" {
 		payload["agentId"] = agentID
 	}
-
 	jsonBody, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal feed item assignment: %w", err)
 	}
 
-	resp, err := c.doPatchFeedItem(url, jsonBody)
+	// Search → PATCH with retries (feed item may not be indexed yet)
+	for attempt := 0; attempt <= 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+
+		feedItemID, feedID, err := c.searchFeedItem(conversationID)
+		if err != nil {
+			slog.Warn("search_feed_item_failed",
+				"attempt", attempt,
+				"conversation_id", conversationID,
+				"error", err,
+			)
+			continue
+		}
+		if feedItemID == "" {
+			slog.Info("feed_item_not_found_yet",
+				"attempt", attempt,
+				"conversation_id", conversationID,
+			)
+			continue
+		}
+
+		url := fmt.Sprintf("%s/workspaces/%s/feeds/%s/items/%s",
+			c.conversationsBase(), c.workspaceID, feedID, feedItemID)
+
+		resp, err := c.doPatchFeedItem(url, jsonBody)
+		if err != nil {
+			return fmt.Errorf("assign feed item: %w", err)
+		}
+		if resp < 400 {
+			slog.Info("feed_item_assigned",
+				"conversation_id", conversationID,
+				"feed_item_id", feedItemID,
+				"feed_id", feedID,
+				"attempt", attempt,
+			)
+			return nil
+		}
+		return fmt.Errorf("assign feed item: status %d, feed_item=%s, feed=%s", resp, feedItemID, feedID)
+	}
+	return fmt.Errorf("assign feed item: no feed item found after retries, conversation_id=%s", conversationID)
+}
+
+// searchFeedItem finds the feed item ID for a conversation via POST /search/feed-items.
+// Returns (feedItemID, feedID, error). Returns ("", "", nil) if no item found.
+func (c *Client) searchFeedItem(conversationID string) (string, string, error) {
+	searchURL := fmt.Sprintf("%s/workspaces/%s/search/feed-items",
+		c.conversationsBase(), c.workspaceID)
+
+	searchPayload, _ := json.Marshal(map[string]interface{}{
+		"conversationIds": []string{conversationID},
+	})
+
+	req, err := http.NewRequest("POST", searchURL, bytes.NewReader(searchPayload))
 	if err != nil {
-		return fmt.Errorf("assign feed item: %w", err)
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", "", fmt.Errorf("search feed items: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
-	if resp == 404 {
-		// Feed item doesn't exist — create it via POST then retry PATCH
-		slog.Info("feed_item_not_found_creating",
-			"conversation_id", conversationID,
-			"feed_id", feedID,
-		)
-		if createErr := c.createFeedItem(feedID, conversationID); createErr != nil {
-			slog.Warn("create_feed_item_failed", "error", createErr)
-			return fmt.Errorf("assign feed item: item not found and create failed: %w", createErr)
-		}
-		resp, err = c.doPatchFeedItem(url, jsonBody)
-		if err != nil {
-			return fmt.Errorf("assign feed item (retry): %w", err)
-		}
-		if resp >= 400 {
-			return fmt.Errorf("assign feed item (retry): status %d", resp)
+	var result struct {
+		Results []struct {
+			ID     string `json:"id"`
+			FeedID string `json:"feedId"`
+			Closed bool   `json:"closed"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", fmt.Errorf("decode search response: %w", err)
+	}
+
+	// Return the first non-closed feed item
+	for _, item := range result.Results {
+		if !item.Closed {
+			return item.ID, item.FeedID, nil
 		}
 	}
-	return nil
+	return "", "", nil
 }
 
 // doPatchFeedItem sends a PATCH request to the feed items endpoint. Returns status code.
@@ -962,40 +1060,6 @@ func (c *Client) doPatchFeedItem(url string, jsonBody []byte) (int, error) {
 	return resp.StatusCode, nil
 }
 
-// createFeedItem creates a feed item for a conversation via POST.
-func (c *Client) createFeedItem(feedID, conversationID string) error {
-	url := fmt.Sprintf("%s/workspaces/%s/feeds/%s/items",
-		c.conversationsBase(), c.workspaceID, feedID)
-
-	payload := map[string]interface{}{
-		"conversationId": conversationID,
-	}
-	jsonBody, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonBody))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("create feed item: status %d, body: %s", resp.StatusCode, string(respBody))
-	}
-	slog.Info("feed_item_created", "conversation_id", conversationID, "feed_id", feedID)
-	return nil
-}
-
 // UnassignFeedItem removes agent/team assignment from a feed item in Bird Inbox.
 // If closed=true, also closes the item (removes from agent's queue permanently).
 // Non-blocking: logs errors but does not fail.
@@ -1004,9 +1068,18 @@ func (c *Client) UnassignFeedItem(conversationID string, closed bool) error {
 		return nil
 	}
 
-	feedID := "channel:" + c.channelID
+	feedItemID, feedID, err := c.searchFeedItem(conversationID)
+	if err != nil {
+		slog.Warn("unassign_search_failed", "error", err, "conversation_id", conversationID)
+		return nil
+	}
+	if feedItemID == "" {
+		slog.Warn("unassign_no_feed_item", "conversation_id", conversationID)
+		return nil
+	}
+
 	url := fmt.Sprintf("%s/workspaces/%s/feeds/%s/items/%s",
-		c.conversationsBase(), c.workspaceID, feedID, conversationID)
+		c.conversationsBase(), c.workspaceID, feedID, feedItemID)
 
 	payload := map[string]interface{}{
 		"agentId": nil,
@@ -1015,28 +1088,16 @@ func (c *Client) UnassignFeedItem(conversationID string, closed bool) error {
 	}
 
 	jsonBody, _ := json.Marshal(payload)
-
-	req, err := http.NewRequest("PATCH", url, bytes.NewReader(jsonBody))
-	if err != nil {
-		slog.Warn("unassign_feed_item_request_failed", "error", err, "conversation_id", conversationID)
-		return nil
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "AccessKey "+c.accessKeyID)
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doPatchFeedItem(url, jsonBody)
 	if err != nil {
 		slog.Warn("unassign_feed_item_failed", "error", err, "conversation_id", conversationID)
 		return nil
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+	if resp >= 400 {
 		slog.Warn("unassign_feed_item_error",
-			"status", resp.StatusCode,
-			"body", string(respBody),
-			"conversation_id", conversationID)
+			"status", resp,
+			"conversation_id", conversationID,
+			"feed_item_id", feedItemID)
 	}
 	return nil
 }
