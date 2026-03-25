@@ -92,11 +92,6 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService, birdClient *bird.Cli
 				r.WithContext("ocr_document", ocrResult.Document)
 			}
 
-			// Alerta de Capital Salud
-			if strings.EqualFold(ocrResult.Entity, "Capital Salud") {
-				r.WithText("Detectamos que tu EPS es *Capital Salud*. Ten en cuenta que actualmente no tenemos convenio con esta entidad. El servicio sería *particular*.")
-			}
-
 			return r, nil
 
 		default:

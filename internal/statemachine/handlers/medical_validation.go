@@ -585,11 +585,6 @@ func isSleepStudy(cupsCode string) bool {
 	return sleepStudyCups[cupsCode]
 }
 
-// isPETCT checks if CUPS is a PET/CT that requires routing to an agent.
-func isPETCT(cupsCode string) bool {
-	return strings.HasPrefix(cupsCode, "879") // PET/CT codes start with 879
-}
-
 // CHECK_SPECIAL_CUPS (automático) — verifica CUPS especiales antes de validaciones médicas.
 func checkSpecialCupsHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
@@ -606,13 +601,6 @@ func checkSpecialCupsHandler() sm.StateHandler {
 			return sm.NewResult(sm.StateEscalateToAgent).
 				WithText("Los *estudios del sueño* requieren una coordinación especial. Te comunicaremos con un agente para programar tu cita.").
 				WithEvent("special_cups_sleep_study", map[string]interface{}{"cups_code": cupsCode}), nil
-		}
-
-		// PET/CT → escalate to agent
-		if isPETCT(cupsCode) {
-			return sm.NewResult(sm.StateEscalateToAgent).
-				WithText("Los exámenes de *PET/CT* requieren coordinación especial con el servicio de medicina nuclear. Te comunicaremos con un agente.").
-				WithEvent("special_cups_pet_ct", map[string]interface{}{"cups_code": cupsCode}), nil
 		}
 
 		// Normal CUPS → proceed to contrast check
