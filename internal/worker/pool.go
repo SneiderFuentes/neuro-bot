@@ -812,6 +812,13 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 		if i > 0 {
 			time.Sleep(300 * time.Millisecond)
 		}
+		// Refresh convID from cache — Channels API responses populate it
+		if convID == "" {
+			if cached := p.birdClient.GetCachedConversationID(phone); cached != "" {
+				convID = cached
+				sess.ConversationID = cached
+			}
+		}
 		slog.Debug("sending_message", "phone", phone, "type", outMsg.Type(), "conversation_id", convID)
 		birdMsgID, err := p.sendMessage(phone, convID, outMsg)
 		if err != nil {

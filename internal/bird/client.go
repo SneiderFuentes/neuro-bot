@@ -348,7 +348,7 @@ func (c *Client) SendText(to, conversationID, text string) (string, error) {
 		},
 		"body": body,
 	}
-	return c.sendMessage(c.messagesURL(), payload)
+	return c.sendMessage(c.messagesURL(), payload, to)
 }
 
 // SendButtons envía un mensaje con botones postback (máx 3).
@@ -504,7 +504,7 @@ func (c *Client) SendTemplate(to string, tmpl TemplateConfig) (string, error) {
 		slog.Debug("send_template_payload", "to", to, "payload", string(debugJSON))
 	}
 
-	return c.sendMessage(c.templatesURL(), payload)
+	return c.sendMessage(c.templatesURL(), payload, to)
 }
 
 // voiceNotificationURL builds the voice event notification URL.
@@ -1535,7 +1535,7 @@ func (c *Client) TagConversation(conversationID, tag string) error {
 }
 
 // sendMessage envía un payload JSON a la API de Bird con retry.
-func (c *Client) sendMessage(url string, payload interface{}) (string, error) {
+func (c *Client) sendMessage(url string, payload interface{}, phone ...string) (string, error) {
 	jsonBody, err := json.Marshal(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal payload: %w", err)
@@ -1563,10 +1563,17 @@ func (c *Client) sendMessage(url string, payload interface{}) (string, error) {
 	slog.Debug("bird_api_response", "status", resp.StatusCode, "body", string(respBody))
 
 	var result struct {
-		ID string `json:"id"`
+		ID             string `json:"id"`
+		ConversationID string `json:"conversationId"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		slog.Debug("could not parse bird response", "body", string(respBody))
+	}
+
+	// Cache conversationId from Channels API response.
+	// This is the most reliable source: every message the bot sends returns it.
+	if result.ConversationID != "" && len(phone) > 0 && phone[0] != "" {
+		c.CacheConversationID(phone[0], result.ConversationID)
 	}
 
 	return result.ID, nil

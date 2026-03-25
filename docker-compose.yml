@@ -34,10 +34,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 512M
           cpus: '2.0'
         reservations:
-          memory: 64M
+          memory: 128M
 
   db:
     image: mysql:8.0

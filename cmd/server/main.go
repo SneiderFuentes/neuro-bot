@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"runtime"
 	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/api"
@@ -32,6 +33,8 @@ import (
 	"github.com/neuro-bot/neuro-bot/internal/tracking"
 	"github.com/neuro-bot/neuro-bot/internal/worker"
 )
+
+var startTime = time.Now()
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -336,6 +339,7 @@ func main() {
 	// HTTP Server
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler(localDB, externalDB))
+	mux.HandleFunc("GET /health/debug", debugHandler(localDB, externalDB))
 	mux.HandleFunc("POST /api/webhooks/whatsapp", webhookHandler.HandleWhatsApp)
 	mux.HandleFunc("POST /api/webhooks/whatsapp/outbound", webhookHandler.HandleWhatsAppOutbound)
 	mux.HandleFunc("POST /api/webhooks/conversations", webhookHandler.HandleConversation)
@@ -486,5 +490,47 @@ func healthHandler(localDB, externalDB *sql.DB) http.HandlerFunc {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		json.NewEncoder(w).Encode(health)
+	}
+}
+
+func debugHandler(localDB, externalDB *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+
+		uptime := time.Since(startTime)
+
+		info := map[string]interface{}{
+			"uptime":          uptime.String(),
+			"started_at":      startTime.Format(time.RFC3339),
+			"goroutines":      runtime.NumGoroutine(),
+			"memory_alloc_mb": float64(m.Alloc) / 1024 / 1024,
+			"memory_sys_mb":   float64(m.Sys) / 1024 / 1024,
+			"memory_heap_mb":  float64(m.HeapAlloc) / 1024 / 1024,
+			"gc_cycles":       m.NumGC,
+			"gc_last":         time.Since(time.Unix(0, int64(m.LastGC))).String(),
+		}
+
+		// DB pool stats
+		localStats := localDB.Stats()
+		info["local_db"] = map[string]interface{}{
+			"open_connections": localStats.OpenConnections,
+			"in_use":           localStats.InUse,
+			"idle":             localStats.Idle,
+			"max_open":         localStats.MaxOpenConnections,
+		}
+
+		if externalDB != nil {
+			extStats := externalDB.Stats()
+			info["external_db"] = map[string]interface{}{
+				"open_connections": extStats.OpenConnections,
+				"in_use":           extStats.InUse,
+				"idle":             extStats.Idle,
+				"max_open":         extStats.MaxOpenConnections,
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(info)
 	}
 }
