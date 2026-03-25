@@ -54,7 +54,7 @@ services:
       --default-authentication-plugin=mysql_native_password
       --tls-version=TLSv1.2
       --mysqlx=0
-      --innodb-buffer-pool-size=64M
+      --innodb-buffer-pool-size=256M
       --max-connections=50
       --table-open-cache=200
       --sort-buffer-size=256K
@@ -79,10 +79,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 1024M
           cpus: '1.0'
         reservations:
-          memory: 128M
+          memory: 512M
 
   ngrok:
     build:

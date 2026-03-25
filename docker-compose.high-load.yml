@@ -27,14 +27,14 @@ services:
       --default-authentication-plugin=mysql_native_password
       --tls-version=TLSv1.2
       --mysqlx=0
-      --innodb-buffer-pool-size=512M
+      --innodb-buffer-pool-size=1G
       --max-connections=200
       --table-open-cache=400
       --sort-buffer-size=512K
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 2048M
           cpus: '2.0'
         reservations:
-          memory: 512M
+          memory: 1024M
