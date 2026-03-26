@@ -18,6 +18,16 @@ func RegisterPostActionHandlers(m *sm.Machine, birdClient *bird.Client) {
 	m.Register(sm.StateTerminated, terminatedHandler())
 }
 
+// closingNote se agrega al ultimo mensaje en escenarios de cierre automatico.
+const closingNote = "\n\nSi deseas realizar otra solicitud, envia *0* o *menu*."
+
+// buildAutoCloseResult crea un resultado que cierra la sesion automaticamente.
+// Transiciona a TERMINATED (auto) que marca session.Status = completed.
+func buildAutoCloseResult(text string) *sm.StateResult {
+	return sm.NewResult(sm.StateTerminated).
+		WithText(text + closingNote)
+}
+
 // buildPostActionList retorna la lista estándar de opciones post-acción.
 func buildPostActionList(body string) *sm.ListMessage {
 	return &sm.ListMessage{

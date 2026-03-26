@@ -288,33 +288,14 @@ func showHelpHandler() sm.StateHandler {
 			"Lunes a viernes: 7:00 AM - 6:00 PM\n" +
 			"Sabados: 7:00 AM - 12:00 PM"
 
-		// Si viene del menú fuera de horario, volver allá
+		// Auto-close: combinar ambos mensajes y cerrar sesion
 		if sess.GetContext("help_source") == "ooh" {
-			r := sm.NewResult(sm.StateOutOfHoursMenu).
-				WithText(msg1).
+			return buildAutoCloseResult(msg1 + "\n\n" + msg2).
 				WithClearCtx("help_source").
-				WithEvent("help_shown", nil)
-			r.Messages = append(r.Messages, &sm.ListMessage{
-				Body:  msg2 + "\n\nEn que puedo ayudarte hoy?",
-				Title: "Ver opciones",
-				Sections: []sm.ListSection{{
-					Title: "Opciones disponibles",
-					Rows: []sm.ListRow{
-						{ID: "ooh_resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
-						{ID: "ooh_ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
-						{ID: "ooh_ayuda", Title: "Como usar el bot", Description: "Guia rapida de como interactuar conmigo"},
-					},
-				}},
-			})
-			return r, nil
+				WithEvent("help_shown", nil), nil
 		}
 
-		r := sm.NewResult(sm.StateMainMenu).
-			WithText(msg1).
-			WithEvent("help_shown", nil)
-		list := buildMainMenuList()
-		list.Body = msg2 + "\n\n" + list.Body
-		r.Messages = append(r.Messages, list)
-		return r, nil
+		return buildAutoCloseResult(msg1 + "\n\n" + msg2).
+			WithEvent("help_shown", nil), nil
 	}
 }

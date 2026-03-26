@@ -189,8 +189,8 @@ func TestPatientLookup_NotFound_Consultar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 }
 
@@ -211,8 +211,8 @@ func TestPatientLookup_DBError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU on error, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED on error, got %s", result.NextState)
 	}
 }
 

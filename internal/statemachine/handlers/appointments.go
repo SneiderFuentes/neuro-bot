@@ -82,17 +82,12 @@ func fetchAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHand
 
 		appointments, err := apptSvc.GetUpcomingAppointments(ctx, patientID)
 		if err != nil {
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithText("Error al consultar tus citas. Intenta más tarde.").
+			return buildAutoCloseResult("Error al consultar tus citas. Intenta más tarde.").
 				WithEvent("fetch_appointments_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		if len(appointments) == 0 {
-			return sm.NewResult(sm.StateNoAppointments).
-				WithButtons("No tienes citas pendientes o confirmadas.\n\n¿Qué deseas hacer?",
-					sm.Button{Text: "Menú principal", Payload: "no_appt_menu"},
-					sm.Button{Text: "Terminar chat", Payload: "no_appt_end"},
-				).
+			return buildAutoCloseResult("No tienes citas pendientes o confirmadas.").
 				WithEvent("no_appointments_found", nil), nil
 		}
 
@@ -159,8 +154,7 @@ func listAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandl
 		// Cargar citas del contexto y re-mostrar lista
 		var appointments []domain.Appointment
 		if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithText("Error al cargar las citas. Intenta de nuevo."), nil
+			return buildAutoCloseResult("Error al cargar las citas. Intenta de nuevo."), nil
 		}
 
 		listMsg := buildAppointmentList(apptSvc, appointments)
@@ -185,8 +179,7 @@ func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo rep
 			// Re-mostrar detalle + acciones
 			var appointments []domain.Appointment
 			if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
-				return sm.NewResult(sm.StatePostActionMenu).
-					WithText("Error al cargar las citas."), nil
+				return buildAutoCloseResult("Error al cargar las citas."), nil
 			}
 
 			detail := buildAppointmentDetail(apptSvc, appointments, selectedID)
@@ -244,8 +237,7 @@ func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo rep
 				cupsName = selectedAppt.Procedures[0].CupName
 			}
 			if cupsCode == "" {
-				return sm.NewResult(sm.StatePostActionMenu).
-					WithText("No se puede reprogramar: no se encontró el procedimiento."), nil
+				return buildAutoCloseResult("No se puede reprogramar: no se encontró el procedimiento."), nil
 			}
 
 			isContrasted := "0"
@@ -457,8 +449,7 @@ func executeConfirmAppointment(ctx context.Context, sess *session.Session, apptS
 
 	var appointments []domain.Appointment
 	if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText("Error al procesar la cita."), nil
+		return buildAutoCloseResult("Error al procesar la cita."), nil
 	}
 
 	block := apptSvc.FindConsecutiveBlock(appointments, selectedID)
@@ -469,8 +460,7 @@ func executeConfirmAppointment(ctx context.Context, sess *session.Session, apptS
 	}
 
 	if err := apptSvc.ConfirmBlock(ctx, block, "whatsapp", sess.ConversationID); err != nil {
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText("Error al confirmar la cita. Intenta más tarde.").
+		return buildAutoCloseResult("Error al confirmar la cita. Intenta más tarde.").
 			WithEvent("appointment_confirm_error", map[string]interface{}{"error": err.Error()}), nil
 	}
 
@@ -517,10 +507,7 @@ func executeConfirmAppointment(ctx context.Context, sess *session.Session, apptS
 
 	msg += "\n\nRecuerda presentarte 15 minutos antes con tu documento."
 
-	r := sm.NewResult(sm.StatePostActionMenu).
-		WithText(msg)
-	r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer ahora?"))
-	return r.
+	return buildAutoCloseResult(msg).
 		WithClearCtx("selected_appointment_id", "appointments_json").
 		WithEvent("appointment_confirmed", map[string]interface{}{
 			"appointment_id": selectedID,
@@ -534,8 +521,7 @@ func executeCancelAppointment(ctx context.Context, sess *session.Session, apptSv
 
 	var appointments []domain.Appointment
 	if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText("Error al procesar la cita."), nil
+		return buildAutoCloseResult("Error al procesar la cita."), nil
 	}
 
 	block := apptSvc.FindConsecutiveBlock(appointments, selectedID)
@@ -546,8 +532,7 @@ func executeCancelAppointment(ctx context.Context, sess *session.Session, apptSv
 	}
 
 	if err := apptSvc.CancelBlock(ctx, block, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText("Error al cancelar la cita. Intenta más tarde.").
+		return buildAutoCloseResult("Error al cancelar la cita. Intenta más tarde.").
 			WithEvent("appointment_cancel_error", map[string]interface{}{"error": err.Error()}), nil
 	}
 
@@ -566,12 +551,7 @@ func executeCancelAppointment(ctx context.Context, sess *session.Session, apptSv
 
 	msg := fmt.Sprintf("*Cita cancelada.*\n\n%d cita(s) cancelada(s).", len(block))
 
-	return sm.NewResult(sm.StatePostActionMenu).
-		WithButtons(msg+"\n\n¿Qué deseas hacer ahora?",
-			sm.Button{Text: "Ver mis citas", Payload: "ver_citas"},
-			sm.Button{Text: "Menú principal", Payload: "menu_principal"},
-			sm.Button{Text: "Terminar chat", Payload: "terminar_chat"},
-		).
+	return buildAutoCloseResult(msg).
 		WithClearCtx("selected_appointment_id", "appointments_json").
 		WithEvent("appointment_cancelled", map[string]interface{}{
 			"appointment_id": selectedID,

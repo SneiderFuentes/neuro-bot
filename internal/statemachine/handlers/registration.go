@@ -269,10 +269,8 @@ func registrationStartHandler() sm.StateHandler {
 
 			return r, nil
 		case "register_no":
-			r := sm.NewResult(sm.StatePostActionMenu).
-				WithText("Entendido. Si necesitas algo más, estoy aquí para ayudarte.")
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
-			return r.WithEvent("registration_declined", nil), nil
+			return buildAutoCloseResult("Entendido. Si necesitas algo más, estamos aquí para ayudarte.").
+				WithEvent("registration_declined", nil), nil
 		}
 		return nil, fmt.Errorf("unreachable")
 	}
@@ -667,10 +665,8 @@ func createPatientHandler(patientSvc *services.PatientService) sm.StateHandler {
 
 		patientID, err := patientSvc.Create(ctx, input)
 		if err != nil {
-			r := sm.NewResult(sm.StatePostActionMenu).
-				WithText("Lo siento, hubo un error al crear tu registro. Por favor intenta más tarde o contacta a un agente.")
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
-			return r.WithEvent("registration_failed", map[string]interface{}{"error": err.Error()}), nil
+			return buildAutoCloseResult("Lo siento, hubo un error al crear tu registro. Por favor intenta más tarde o contacta a un agente.").
+				WithEvent("registration_failed", map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		// Construir nombre completo para la sesión

@@ -111,13 +111,13 @@ func askContrastedHandler() sm.StateHandler {
 
 		result, selected := sm.ValidateButtonResponse(sess, msg, "contrast_yes", "contrast_no")
 		if result != nil {
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: "Tu examen requiere *medio de contraste*?\n\n(Esto debe indicarlo tu orden médica)",
 				Buttons: []sm.Button{
 					{Text: "Sí, con contraste", Payload: "contrast_yes"},
 					{Text: "No, sin contraste", Payload: "contrast_no"},
 				},
-			})
+			}}
 			return result, nil
 		}
 
@@ -193,13 +193,13 @@ func askPregnancyHandler() sm.StateHandler {
 
 		result, selected := sm.ValidateButtonResponse(sess, msg, "pregnant_yes", "pregnant_no")
 		if result != nil {
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: "¿Estás embarazada?",
 				Buttons: []sm.Button{
 					{Text: "Sí", Payload: "pregnant_yes"},
 					{Text: "No", Payload: "pregnant_no"},
 				},
-			})
+			}}
 			return result, nil
 		}
 
@@ -225,8 +225,7 @@ func askPregnancyHandler() sm.StateHandler {
 // PREGNANCY_BLOCK (automático) — bloquea embarazada + contraste.
 func pregnancyBlockHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText("Por seguridad, no es posible realizar exámenes con *medio de contraste* durante el embarazo.\n\nConsulta con tu médico tratante para alternativas.").
+		return buildAutoCloseResult("Por seguridad, no es posible realizar exámenes con *medio de contraste* durante el embarazo.\n\nConsulta con tu médico tratante para alternativas.").
 			WithEvent("pregnant_blocked", nil), nil
 	}
 }
@@ -237,13 +236,13 @@ func askBabyWeightHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "baby_low", "baby_normal")
 		if result != nil {
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: "¿Cuál fue el peso del bebé al nacer?",
 				Buttons: []sm.Button{
 					{Text: "Bajo peso", Payload: "baby_low"},
 					{Text: "Peso normal", Payload: "baby_normal"},
 				},
-			})
+			}}
 			return result, nil
 		}
 
@@ -305,14 +304,14 @@ func gfrDiseaseHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "disease_none", "disease_renal", "disease_diabetica")
 		if result != nil {
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: "¿Padeces alguna de estas condiciones?",
 				Buttons: []sm.Button{
 					{Text: "Ninguna", Payload: "disease_none"},
 					{Text: "Enfermedad renal", Payload: "disease_renal"},
 					{Text: "Diabetes", Payload: "disease_diabetica"},
 				},
-			})
+			}}
 			return result, nil
 		}
 
@@ -406,7 +405,7 @@ func gfrResultHandler(gfrSvc *services.GFRService) sm.StateHandler {
 // GFR_NOT_ELIGIBLE (automático) — GFR < 30, bloquea contraste.
 func gfrNotEligibleHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		return sm.NewResult(sm.StatePostActionMenu).
+		return buildAutoCloseResult("Tu resultado de función renal no cumple con los requisitos para este examen con contraste.\n\nConsulta con tu médico tratante.").
 			WithEvent("gfr_not_eligible", map[string]interface{}{
 				"gfr_value": sess.GetContext("gfr_calculated"),
 			}), nil
@@ -448,13 +447,13 @@ func askSedationHandler() sm.StateHandler {
 
 		result, selected := sm.ValidateButtonResponse(sess, msg, "sedated_yes", "sedated_no")
 		if result != nil {
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: "Tu examen requiere *sedación*?\n\n(Esto lo indica tu médico, generalmente para niños o pacientes con claustrofobia)",
 				Buttons: []sm.Button{
 					{Text: "Sí, con sedación", Payload: "sedated_yes"},
 					{Text: "No, sin sedación", Payload: "sedated_no"},
 				},
-			})
+			}}
 			return result, nil
 		}
 
@@ -495,8 +494,7 @@ func checkExistingHandler(apptSvc *services.AppointmentService) sm.StateHandler 
 func appointmentExistsHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		cupsName := sess.GetContext("cups_name")
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText(fmt.Sprintf("Ya tienes una cita pendiente para *%s*.\n\nSi necesitas reprogramarla, consulta tus citas desde el menú principal.", cupsName)).
+		return buildAutoCloseResult(fmt.Sprintf("Ya tienes una cita pendiente para *%s*.", cupsName)).
 			WithEvent("appointment_exists_blocked", nil), nil
 	}
 }
@@ -514,8 +512,7 @@ func checkPriorConsultHandler(apptSvc *services.AppointmentService) sm.StateHand
 		}
 
 		if blocked {
-			return sm.NewResult(sm.StatePostActionMenu).
-				WithText(message).
+			return buildAutoCloseResult(message).
 				WithEvent("prior_consultation_required", map[string]interface{}{"cups_code": cupsCode}), nil
 		}
 
@@ -640,12 +637,11 @@ func askGestationalWeeksHandler() sm.StateHandler {
 			}
 			// Número fuera de rango → tratar como weeks_no
 			sess.RetryCount = 0
-			return sm.NewResult(sm.StatePostActionMenu).
+			return buildAutoCloseResult(fmt.Sprintf(
+				"Esta ecografía requiere estar entre las *%s* de gestación.\n\nCuando estés en ese rango, vuelve a contactarnos y con gusto te agendaremos.",
+				gr.label,
+			)).
 				WithClearCtx("_prompted_weeks").
-				WithText(fmt.Sprintf(
-					"Esta ecografía requiere estar entre las *%s* de gestación.\n\nCuando estés en ese rango, vuelve a contactarnos y con gusto te agendaremos.",
-					gr.label,
-				)).
 				WithEvent("gestational_weeks_out_of_range", map[string]interface{}{"cups_code": cupsCode, "range": gr.label, "weeks": weeks}), nil
 		}
 
@@ -653,10 +649,10 @@ func askGestationalWeeksHandler() sm.StateHandler {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "weeks_yes", "weeks_no")
 		if result != nil {
 			// Respuesta inválida: re-mostrar botones
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text:    questionText,
 				Buttons: buttons,
-			})
+			}}
 			return result, nil
 		}
 
@@ -666,12 +662,11 @@ func askGestationalWeeksHandler() sm.StateHandler {
 				WithClearCtx("_prompted_weeks").
 				WithEvent("gestational_weeks_confirmed", map[string]interface{}{"cups_code": cupsCode, "range": gr.label}), nil
 		default: // weeks_no
-			return sm.NewResult(sm.StatePostActionMenu).
+			return buildAutoCloseResult(fmt.Sprintf(
+				"Esta ecografía requiere estar entre las *%s* de gestación.\n\nCuando estés en ese rango, vuelve a contactarnos y con gusto te agendaremos.",
+				gr.label,
+			)).
 				WithClearCtx("_prompted_weeks").
-				WithText(fmt.Sprintf(
-					"Esta ecografía requiere estar entre las *%s* de gestación.\n\nCuando estés en ese rango, vuelve a contactarnos y con gusto te agendaremos.",
-					gr.label,
-				)).
 				WithEvent("gestational_weeks_out_of_range", map[string]interface{}{"cups_code": cupsCode, "range": gr.label}), nil
 		}
 	}

@@ -199,13 +199,13 @@ func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository, birdC
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "ocr_correct", "ocr_incorrect")
 		if result != nil {
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: "¿Es correcto?",
 				Buttons: []sm.Button{
 					{Text: "Sí, correcto", Payload: "ocr_correct"},
 					{Text: "No, corregir", Payload: "ocr_incorrect"},
 				},
-			})
+			}}
 			return result, nil
 		}
 

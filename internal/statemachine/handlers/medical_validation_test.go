@@ -509,8 +509,8 @@ func TestPregnancyBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 	if len(result.Messages) == 0 {
 		t.Error("expected a message explaining pregnancy block")
@@ -764,8 +764,8 @@ func TestGfrNotEligible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 }
 
@@ -782,8 +782,8 @@ func TestAppointmentExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 	if len(result.Messages) == 0 {
 		t.Error("expected a message about existing appointment")

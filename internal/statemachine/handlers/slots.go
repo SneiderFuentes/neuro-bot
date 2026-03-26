@@ -221,10 +221,8 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 		}
 
 		if err != nil {
-			r := sm.NewResult(sm.StatePostActionMenu).
-				WithText("Error al buscar horarios. Intenta más tarde.")
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
-			return r.WithEvent("slot_search_error", map[string]interface{}{"error": err.Error()}), nil
+			return buildAutoCloseResult("Error al buscar horarios. Intenta más tarde.").
+				WithEvent("slot_search_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		if len(slots) == 0 {
@@ -367,15 +365,12 @@ func noSlotsHandler(wlRepo WaitingListCreator) sm.StateHandler {
 		// Cambio 12b: Self-reschedule from active appointment (confirmation/reschedule template).
 		// The old appointment is still active → don't offer WL (patient still has their slot).
 		if sess.GetContext("reschedule_appt_id") != "" {
-			r := sm.NewResult(sm.StatePostActionMenu).
-				WithText("No hay horarios disponibles para *"+cupsName+"* en otra fecha.\n\n"+
-					"Tu cita original sigue vigente.").
+			return buildAutoCloseResult("No hay horarios disponibles para *"+cupsName+"* en otra fecha.\n\n"+
+				"Tu cita original sigue vigente.").
 				WithEvent("no_slots_reschedule_active", map[string]interface{}{
 					"cups_code":          sess.GetContext("cups_code"),
 					"reschedule_appt_id": sess.GetContext("reschedule_appt_id"),
-				})
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer ahora?"))
-			return r, nil
+				}), nil
 		}
 
 		return sm.NewResult(sm.StateOfferWaitingList).
@@ -407,13 +402,11 @@ func autoAddToWaitingList(ctx context.Context, sess *session.Session, wlRepo Wai
 				"next_procedure": true,
 			}), nil
 		}
-		r := sm.NewResult(sm.StatePostActionMenu).
-			WithText(dupMsg)
-		r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
-		return r.WithEvent("waiting_list_auto_duplicate", map[string]interface{}{
-			"cups_code":  cupsCode,
-			"patient_id": patientID,
-		}), nil
+		return buildAutoCloseResult(dupMsg).
+			WithEvent("waiting_list_auto_duplicate", map[string]interface{}{
+				"cups_code":  cupsCode,
+				"patient_id": patientID,
+			}), nil
 	}
 
 	age, _ := strconv.Atoi(sess.GetContext("patient_age"))
@@ -446,13 +439,11 @@ func autoAddToWaitingList(ctx context.Context, sess *session.Session, wlRepo Wai
 
 	if err := wlRepo.Create(ctx, entry); err != nil {
 		slog.Error("auto_add_wl: create entry", "error", err, "phone", sess.PhoneNumber)
-		r := sm.NewResult(sm.StatePostActionMenu).
-			WithText("No hay horarios disponibles para *" + cupsName + "*.\n\n" +
-				"Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.")
-		r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
-		return r.WithEvent("waiting_list_auto_failed", map[string]interface{}{
-			"error": err.Error(),
-		}), nil
+		return buildAutoCloseResult("No hay horarios disponibles para *" + cupsName + "*.\n\n" +
+			"Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.").
+			WithEvent("waiting_list_auto_failed", map[string]interface{}{
+				"error": err.Error(),
+			}), nil
 	}
 
 	autoMsg := "No hay horarios disponibles para *" + cupsName + "*.\n\n" +
@@ -471,15 +462,13 @@ func autoAddToWaitingList(ctx context.Context, sess *session.Session, wlRepo Wai
 			}), nil
 	}
 
-	r := sm.NewResult(sm.StatePostActionMenu).
-		WithText(autoMsg).
-		WithContext("waiting_list_entry_id", entry.ID)
-	r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
-	return r.WithEvent("waiting_list_auto_joined", map[string]interface{}{
-		"cups_code":  cupsCode,
-		"patient_id": patientID,
-		"entry_id":   entry.ID,
-	}), nil
+	return buildAutoCloseResult(autoMsg).
+		WithContext("waiting_list_entry_id", entry.ID).
+		WithEvent("waiting_list_auto_joined", map[string]interface{}{
+			"cups_code":  cupsCode,
+			"patient_id": patientID,
+			"entry_id":   entry.ID,
+		}), nil
 }
 
 // OFFER_WAITING_LIST (interactivo) — usuario decide unirse o no a la lista de espera.
@@ -491,13 +480,13 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 				return result, nil
 			}
 			cupsName := sess.GetContext("cups_name")
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: fmt.Sprintf("No hay horarios disponibles para *%s*.\n\n¿Deseas que te avisemos cuando haya disponibilidad?", cupsName),
 				Buttons: []sm.Button{
 					{Text: "Sí, avisarme", Payload: "wl_yes"},
 					{Text: "No, gracias", Payload: "wl_no"},
 				},
-			})
+			}}
 			return result, nil
 		}
 
@@ -520,13 +509,11 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 							"next_procedure": true,
 						}), nil
 					}
-					r := sm.NewResult(sm.StatePostActionMenu).
-						WithText(dupMsg)
-					r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
-					return r.WithEvent("waiting_list_duplicate", map[string]interface{}{
-						"cups_code":  cupsCode,
-						"patient_id": patientID,
-					}), nil
+					return buildAutoCloseResult(dupMsg).
+						WithEvent("waiting_list_duplicate", map[string]interface{}{
+							"cups_code":  cupsCode,
+							"patient_id": patientID,
+						}), nil
 				}
 			}
 
@@ -574,12 +561,10 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 			// Guardar en BD
 			if wlRepo != nil {
 				if err := wlRepo.Create(ctx, entry); err != nil {
-					r := sm.NewResult(sm.StatePostActionMenu).
-						WithText("Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.")
-					r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
-					return r.WithEvent("waiting_list_creation_failed", map[string]interface{}{
-						"error": err.Error(),
-					}), nil
+					return buildAutoCloseResult("Ocurrio un error al inscribirte en la lista de espera. Intenta mas tarde.").
+						WithEvent("waiting_list_creation_failed", map[string]interface{}{
+							"error": err.Error(),
+						}), nil
 				}
 			}
 
@@ -598,15 +583,13 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 					}), nil
 			}
 
-			r := sm.NewResult(sm.StatePostActionMenu).
-				WithText(wlMsg).
-				WithContext("waiting_list_entry_id", entry.ID)
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
-			return r.WithEvent("waiting_list_joined", map[string]interface{}{
-				"cups_code":  cupsCode,
-				"patient_id": patientID,
-				"entry_id":   entry.ID,
-			}), nil
+			return buildAutoCloseResult(wlMsg).
+				WithContext("waiting_list_entry_id", entry.ID).
+				WithEvent("waiting_list_joined", map[string]interface{}{
+					"cups_code":  cupsCode,
+					"patient_id": patientID,
+					"entry_id":   entry.ID,
+				}), nil
 
 		case "wl_no":
 			if next := advanceToNextProcedure(sess); next != nil {
@@ -615,11 +598,10 @@ func offerWaitingListHandler(wlRepo WaitingListCreator) sm.StateHandler {
 					"next_procedure": true,
 				}), nil
 			}
-			r := sm.NewResult(sm.StatePostActionMenu)
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer ahora?"))
-			return r.WithEvent("waiting_list_declined", map[string]interface{}{
-				"cups_code": sess.GetContext("cups_code"),
-			}), nil
+			return buildAutoCloseResult("Entendido. No te inscribimos en la lista de espera.").
+				WithEvent("waiting_list_declined", map[string]interface{}{
+					"cups_code": sess.GetContext("cups_code"),
+				}), nil
 		}
 
 		return nil, fmt.Errorf("unreachable")
@@ -1006,15 +988,13 @@ func bookingSuccessHandler(addrMapper *services.AddressMapper) sm.StateHandler {
 			}), nil
 		}
 
-		// No more procedures → post action menu
-		r := sm.NewResult(sm.StatePostActionMenu).
-			WithText(successMsg)
-		r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
-		return r.WithEvent("booking_success", map[string]interface{}{
-			"appointment_id": sess.GetContext("created_appointment_id"),
-			"cups_code":      sess.GetContext("cups_code"),
-			"next_procedure": false,
-		}), nil
+		// No more procedures → auto-close
+		return buildAutoCloseResult(successMsg).
+			WithEvent("booking_success", map[string]interface{}{
+				"appointment_id": sess.GetContext("created_appointment_id"),
+				"cups_code":      sess.GetContext("cups_code"),
+				"next_procedure": false,
+			}), nil
 	}
 }
 
@@ -1031,10 +1011,8 @@ func bookingFailedHandler() sm.StateHandler {
 				WithEvent("slot_taken", nil), nil
 
 		default:
-			r := sm.NewResult(sm.StatePostActionMenu).
-				WithText("Ocurrió un error al crear la cita. Por favor intenta más tarde.")
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
-			return r.WithEvent("booking_failed", map[string]interface{}{"reason": reason}), nil
+			return buildAutoCloseResult("Ocurrió un error al crear la cita. Por favor intenta más tarde.").
+				WithEvent("booking_failed", map[string]interface{}{"reason": reason}), nil
 		}
 	}
 }

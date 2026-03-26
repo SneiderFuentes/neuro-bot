@@ -36,12 +36,7 @@ func showResultsHandler(cfg *config.Config) sm.StateHandler {
 			text = "Para consultar tus resultados médicos, por favor comunícate con nuestra línea de atención o acércate a nuestras instalaciones."
 		}
 
-		return sm.NewResult(sm.StatePostActionMenu).
-			WithText(text).
-			WithButtons("¿Qué deseas hacer?",
-				sm.Button{Text: "Menú principal", Payload: "menu_principal"},
-				sm.Button{Text: "Terminar chat", Payload: "terminar_chat"},
-			).
+		return buildAutoCloseResult(text).
 			WithEvent("results_shown", nil), nil
 	}
 }
@@ -74,9 +69,7 @@ func showLocationsHandler(locationRepo LocationReader) sm.StateHandler {
 			text = "📍 Actualmente no tenemos sedes configuradas. Comunícate con un agente para más información."
 		}
 
-		r := sm.NewResult(sm.StatePostActionMenu).
-			WithText(text)
-		r.Messages = append(r.Messages, buildPostActionList("¿Qué más deseas hacer?"))
-		return r.WithEvent("locations_shown", nil), nil
+		return buildAutoCloseResult(text).
+			WithEvent("locations_shown", nil), nil
 	}
 }

@@ -45,7 +45,7 @@ func askClientTypeHandler() sm.StateHandler {
 			if result.NextState == sm.StateEscalateToAgent {
 				return result, nil
 			}
-			result.Messages = append(result.Messages, buildEntityTypeList())
+			result.Messages = []sm.OutboundMessage{buildEntityTypeList()}
 			return result, nil
 		}
 
@@ -241,13 +241,13 @@ func askSanitasPlanHandler() sm.StateHandler {
 			if result.NextState == sm.StateEscalateToAgent {
 				return result, nil
 			}
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: "Selecciona tu plan de Sanitas:",
 				Buttons: []sm.Button{
 					{Text: "Sanitas Premium", Payload: "sanitas_premium"},
 					{Text: "Sanitas", Payload: "sanitas_regular"},
 				},
-			})
+			}}
 			return result, nil
 		}
 
@@ -329,13 +329,13 @@ func confirmEntityHandler() sm.StateHandler {
 			if entityName == "" {
 				entityName = sess.GetContext("patient_entity")
 			}
-			result.Messages = append(result.Messages, &sm.ButtonMessage{
+			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
 				Text: fmt.Sprintf("Tu entidad registrada es *%s*.\n\n¿Es correcta?", entityName),
 				Buttons: []sm.Button{
 					{Text: "Sí, correcta", Payload: "entity_ok"},
 					{Text: "Cambiar entidad", Payload: "entity_change"},
 				},
-			})
+			}}
 			return result, nil
 		}
 

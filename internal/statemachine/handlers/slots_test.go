@@ -261,8 +261,8 @@ func TestOfferWaitingList_Yes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 }
 
@@ -279,8 +279,8 @@ func TestOfferWaitingList_No(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 }
 
@@ -311,8 +311,8 @@ func TestBookingFailed_GenericError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 }
 
@@ -503,8 +503,8 @@ func TestBookingSuccess_SingleProcedure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 }
 
@@ -637,8 +637,8 @@ func TestNoSlots_AutoAddToWL_CancellationReschedule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 
 	if createdEntry == nil {
@@ -677,8 +677,8 @@ func TestNoSlots_AutoAddToWL_Duplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 }
 
@@ -697,8 +697,8 @@ func TestNoSlots_ActiveReschedule_NoWL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 	// Should NOT go to OFFER_WAITING_LIST (patient still has their appointment)
 }
@@ -743,8 +743,8 @@ func TestNoSlots_AutoAddToWL_CreateError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU on error, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED on error, got %s", result.NextState)
 	}
 }
 

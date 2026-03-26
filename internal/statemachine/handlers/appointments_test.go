@@ -77,8 +77,8 @@ func TestFetchAppointments_Error(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU on error, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED on error, got %s", result.NextState)
 	}
 }
 
@@ -232,8 +232,8 @@ func TestConfirmAppointment_Yes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 	if !confirmCalled {
 		t.Error("expected confirm to be called")
@@ -289,8 +289,8 @@ func TestCancelAppointment_Yes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StatePostActionMenu {
-		t.Errorf("expected POST_ACTION_MENU, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED, got %s", result.NextState)
 	}
 	if !cancelCalled {
 		t.Error("expected cancel to be called")

@@ -73,10 +73,8 @@ func patientLookupHandler(patientSvc *services.PatientService) sm.StateHandler {
 
 		patient, err := patientSvc.LookupByDocument(ctx, doc)
 		if err != nil {
-			r := sm.NewResult(sm.StatePostActionMenu).
-				WithText("Lo siento, hubo un problema al buscar tu información. Intenta más tarde.")
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
-			return r.WithEvent("patient_lookup_error", map[string]interface{}{"error": err.Error()}), nil
+			return buildAutoCloseResult("Lo siento, hubo un problema al buscar tu información. Intenta más tarde.").
+				WithEvent("patient_lookup_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		if patient == nil {
@@ -92,10 +90,8 @@ func patientLookupHandler(patientSvc *services.PatientService) sm.StateHandler {
 			}
 
 			// Menú consultar → no puede consultar sin estar registrado
-			r := sm.NewResult(sm.StatePostActionMenu).
-				WithText("No encontramos un paciente con el documento *" + doc + "*. Verifica que el número sea correcto.\n\nSi eres paciente nuevo, selecciona la opción *Agendar cita* para registrarte.")
-			r.Messages = append(r.Messages, buildPostActionList("¿Qué deseas hacer?"))
-			return r.WithEvent("patient_not_found", map[string]interface{}{"doc": doc, "can_register": false}), nil
+			return buildAutoCloseResult("No encontramos un paciente con el documento *" + doc + "*. Verifica que el número sea correcto.\n\nSi eres paciente nuevo, selecciona la opción *Agendar cita* para registrarte.").
+				WithEvent("patient_not_found", map[string]interface{}{"doc": doc, "can_register": false}), nil
 		}
 
 		// Paciente encontrado → guardar datos en sesión
@@ -177,7 +173,7 @@ func routeAfterContactInfo(ctx context.Context, sess *session.Session, r *sm.Sta
 		}
 		r.NextState = sm.StateAskMedicalOrder
 	default:
-		r.NextState = sm.StatePostActionMenu
+		r.NextState = sm.StateTerminated
 	}
 }
 
