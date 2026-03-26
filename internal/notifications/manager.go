@@ -481,9 +481,14 @@ func (m *NotificationManager) HandleVoiceGatherResult(callID, keys string) {
 			m.persister.Delete(ctx, phone)
 		}
 
-		_, block, err := m.apptSvc.FindBlockByAppointmentID(ctx, p.AppointmentID)
-		if err == nil && len(block) > 0 {
-			m.apptSvc.ConfirmBlock(ctx, block, "ivr", callID)
+		appt, _, err := m.apptSvc.FindBlockByAppointmentID(ctx, p.AppointmentID)
+		if err == nil && appt != nil {
+			// Confirm ALL patient's appointments for this date
+			allAppts, aErr := m.apptSvc.GetPatientAppointmentsForDate(ctx, appt.PatientID, appt.Date)
+			if aErr != nil || len(allAppts) == 0 {
+				allAppts = []domain.Appointment{*appt}
+			}
+			m.apptSvc.ConfirmBlock(ctx, allAppts, "ivr", callID)
 		}
 
 		m.ivrInternalNote(p.ConversationID, phone, callID,
@@ -514,9 +519,14 @@ func (m *NotificationManager) HandleVoiceGatherResult(callID, keys string) {
 			m.persister.Delete(ctx, phone)
 		}
 
-		_, block, err := m.apptSvc.FindBlockByAppointmentID(ctx, p.AppointmentID)
-		if err == nil && len(block) > 0 {
-			m.apptSvc.CancelBlock(ctx, block, "Cancelada por paciente via llamada IVR", "ivr", "")
+		appt, _, err := m.apptSvc.FindBlockByAppointmentID(ctx, p.AppointmentID)
+		if err == nil && appt != nil {
+			// Cancel ALL patient's appointments for this date
+			allAppts, aErr := m.apptSvc.GetPatientAppointmentsForDate(ctx, appt.PatientID, appt.Date)
+			if aErr != nil || len(allAppts) == 0 {
+				allAppts = []domain.Appointment{*appt}
+			}
+			m.apptSvc.CancelBlock(ctx, allAppts, "Cancelada por paciente via llamada IVR", "ivr", "")
 		}
 
 		m.ivrInternalNote(p.ConversationID, phone, callID,

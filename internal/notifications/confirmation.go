@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/neuro-bot/neuro-bot/internal/domain"
 	"github.com/neuro-bot/neuro-bot/internal/services"
 	"github.com/neuro-bot/neuro-bot/internal/session"
 	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
@@ -22,21 +23,31 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 
 	switch action {
 	case "confirm":
-		appt, block, err := m.apptSvc.FindBlockByAppointmentID(ctx, pending.AppointmentID)
+		appt, _, err := m.apptSvc.FindBlockByAppointmentID(ctx, pending.AppointmentID)
 		if err != nil || appt == nil {
 			slog.Error("confirm: find appointment", "error", err, "appointment_id", pending.AppointmentID)
 			return
 		}
 
-		if err := m.apptSvc.ConfirmBlock(ctx, block, "whatsapp_bot", pending.ConversationID); err != nil {
-			slog.Error("confirm: confirm block", "error", err)
+		// Get ALL patient's appointments for this date (may span multiple agendas/doctors)
+		allAppts, err := m.apptSvc.GetPatientAppointmentsForDate(ctx, appt.PatientID, appt.Date)
+		if err != nil || len(allAppts) == 0 {
+			allAppts = []domain.Appointment{*appt} // Fallback to single appointment
 		}
 
-		// Build procedure names
+		if err := m.apptSvc.ConfirmBlock(ctx, allAppts, "whatsapp_bot", pending.ConversationID); err != nil {
+			slog.Error("confirm: confirm appointments", "error", err)
+		}
+
+		// Build procedure names from ALL appointments (deduplicated)
+		seen := make(map[string]bool)
 		var procNames []string
-		for _, p := range appt.Procedures {
-			if p.CupName != "" {
-				procNames = append(procNames, p.CupName)
+		for _, a := range allAppts {
+			for _, p := range a.Procedures {
+				if p.CupName != "" && !seen[p.CupName] {
+					seen[p.CupName] = true
+					procNames = append(procNames, p.CupName)
+				}
 			}
 		}
 		proceduresText := strings.Join(procNames, " y ")
@@ -48,37 +59,39 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 		msg := fmt.Sprintf("Tu cita ha sido confirmada!\n\n"+
 			"*Fecha:* %s\n"+
 			"*Hora:* %s\n"+
-			"*Medico:* %s\n"+
 			"*Procedimiento:* %s",
 			utils.FormatFriendlyDate(appt.Date),
 			services.FormatTimeSlot(appt.TimeSlot),
-			appt.DoctorName,
 			proceduresText,
 		)
 
-		// Look up address and preparations from procedure DB
-		if m.procRepo != nil && len(appt.Procedures) > 0 {
+		// Look up address and preparations from ALL appointments' procedures
+		if m.procRepo != nil {
 			var prepText string
 			address := ""
+			seenCup := make(map[string]bool)
 
-			for _, proc := range appt.Procedures {
-				if proc.CupCode == "" {
-					continue
-				}
-				p, err := m.procRepo.FindByCode(ctx, proc.CupCode)
-				if err != nil || p == nil {
-					continue
-				}
-				if address == "" && p.Address != "" {
-					address = p.Address
-				}
-				if p.Preparation != "" {
-					prepText += fmt.Sprintf("\n- Para *%s*: %s", proc.CupName, p.Preparation)
-					if p.VideoURL != "" {
-						prepText += fmt.Sprintf("\n  📹 Video: %s", p.VideoURL)
+			for _, a := range allAppts {
+				for _, proc := range a.Procedures {
+					if proc.CupCode == "" || seenCup[proc.CupCode] {
+						continue
 					}
-					if p.AudioURL != "" {
-						prepText += fmt.Sprintf("\n  🎵 Audio: %s", p.AudioURL)
+					seenCup[proc.CupCode] = true
+					p, err := m.procRepo.FindByCode(ctx, proc.CupCode)
+					if err != nil || p == nil {
+						continue
+					}
+					if address == "" && p.Address != "" {
+						address = p.Address
+					}
+					if p.Preparation != "" {
+						prepText += fmt.Sprintf("\n- Para *%s*: %s", proc.CupName, p.Preparation)
+						if p.VideoURL != "" {
+							prepText += fmt.Sprintf("\n  📹 Video: %s", p.VideoURL)
+						}
+						if p.AudioURL != "" {
+							prepText += fmt.Sprintf("\n  🎵 Audio: %s", p.AudioURL)
+						}
 					}
 				}
 			}
@@ -109,6 +122,7 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 			m.tracker.LogEvent(ctx, "", phone, "notification_confirmed",
 				map[string]interface{}{
 					"appointment_id":    pending.AppointmentID,
+					"total_confirmed":   len(allAppts),
 					"response_time_min": int(elapsed),
 					"conversation_id":   pending.ConversationID,
 				})
@@ -117,7 +131,7 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 		slog.Info("proactive confirmation success",
 			"phone", phone,
 			"appointment_id", pending.AppointmentID,
-			"block_size", len(block))
+			"total_confirmed", len(allAppts))
 
 	case "reschedule":
 		m.startConfirmRescheduleSession(phone, pending)
@@ -380,6 +394,38 @@ func (m *NotificationManager) startConfirmCancelSession(phone string, pending *P
 		return
 	}
 
+	// Get ALL patient's appointments for this date (may span multiple agendas/doctors)
+	allAppts, err := m.apptSvc.GetPatientAppointmentsForDate(ctx, appt.PatientID, appt.Date)
+	if err != nil || len(allAppts) == 0 {
+		allAppts = []domain.Appointment{*appt}
+	}
+
+	// Collect all appointment IDs, procedure names, and CUPS codes
+	allIDs := make([]string, len(allAppts))
+	seen := make(map[string]bool)
+	seenCups := make(map[string]bool)
+	var procNames []string
+	var cupsCodes []string
+	for i, a := range allAppts {
+		allIDs[i] = a.ID
+		for _, p := range a.Procedures {
+			if p.CupName != "" && !seen[p.CupName] {
+				seen[p.CupName] = true
+				procNames = append(procNames, p.CupName)
+			}
+			if p.CupCode != "" && !seenCups[p.CupCode] {
+				seenCups[p.CupCode] = true
+				cupsCodes = append(cupsCodes, p.CupCode)
+			}
+		}
+	}
+	allIDsJSON, _ := json.Marshal(allIDs)
+	cupsJSON, _ := json.Marshal(cupsCodes)
+	cupsText := strings.Join(procNames, " y ")
+	if cupsText == "" {
+		cupsText = services.GetFirstCupName(*appt)
+	}
+
 	sess := &session.Session{
 		ID:             uuid.New().String(),
 		PhoneNumber:    phone,
@@ -390,12 +436,14 @@ func (m *NotificationManager) startConfirmCancelSession(phone string, pending *P
 	}
 
 	sessCtx := map[string]string{
-		"patient_id":      appt.PatientID,
-		"patient_name":    appt.PatientName,
-		"notif_appt_id":   pending.AppointmentID,
-		"notif_appt_date": utils.FormatFriendlyDate(appt.Date),
-		"notif_appt_time": services.FormatTimeSlot(appt.TimeSlot),
-		"notif_cups_name": services.GetFirstCupName(*appt),
+		"patient_id":         appt.PatientID,
+		"patient_name":       appt.PatientName,
+		"notif_appt_id":     pending.AppointmentID,
+		"notif_appt_ids":    string(allIDsJSON),
+		"notif_cups_codes":  string(cupsJSON),
+		"notif_appt_date":   utils.FormatFriendlyDate(appt.Date),
+		"notif_appt_time":   services.FormatTimeSlot(appt.TimeSlot),
+		"notif_cups_name":   cupsText,
 		"notif_bird_msg_id": pending.BirdMessageID,
 	}
 

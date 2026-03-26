@@ -27,6 +27,22 @@ func (s *AppointmentService) GetUpcomingAppointments(ctx context.Context, patien
 	return s.repo.FindUpcomingByPatient(ctx, patientID)
 }
 
+// GetPatientAppointmentsForDate returns all non-canceled appointments for a patient on a specific date.
+func (s *AppointmentService) GetPatientAppointmentsForDate(ctx context.Context, patientID string, date time.Time) ([]domain.Appointment, error) {
+	all, err := s.repo.FindUpcomingByPatient(ctx, patientID)
+	if err != nil {
+		return nil, err
+	}
+	dateStr := date.Format("2006-01-02")
+	var result []domain.Appointment
+	for _, a := range all {
+		if a.Date.Format("2006-01-02") == dateStr {
+			result = append(result, a)
+		}
+	}
+	return result, nil
+}
+
 // FindConsecutiveBlock detecta un bloque de citas consecutivas a partir de una cita.
 // Regla: mismo paciente + mismo doctor + mismo día + misma agenda + horas consecutivas.
 // Recibe la lista completa de citas del paciente (ya obtenida) para evitar otra query.
@@ -42,13 +58,14 @@ func (s *AppointmentService) FindConsecutiveBlock(appointments []domain.Appointm
 		return nil
 	}
 
-	// Filtrar por mismo día + mismo doctor + misma agenda
+	// Filtrar por mismo día + mismo doctor + misma agenda + mismo paciente
 	dateStr := mainAppt.Date.Format("2006-01-02")
 	var sameDayGroup []domain.Appointment
 	for _, a := range appointments {
 		if a.Date.Format("2006-01-02") == dateStr &&
 			a.DoctorID == mainAppt.DoctorID &&
-			a.AgendaID == mainAppt.AgendaID {
+			a.AgendaID == mainAppt.AgendaID &&
+			a.PatientID == mainAppt.PatientID {
 			sameDayGroup = append(sameDayGroup, a)
 		}
 	}
@@ -110,6 +127,11 @@ func (s *AppointmentService) CancelBlock(ctx context.Context, block []domain.App
 	for i, appt := range block {
 		ids[i] = appt.ID
 	}
+	return s.repo.CancelBatch(ctx, ids, reason, channel, channelID)
+}
+
+// CancelByIDs cancela citas directamente por sus IDs (para flujos de notificación multi-bloque)
+func (s *AppointmentService) CancelByIDs(ctx context.Context, ids []string, reason, channel, channelID string) error {
 	return s.repo.CancelBatch(ctx, ids, reason, channel, channelID)
 }
 

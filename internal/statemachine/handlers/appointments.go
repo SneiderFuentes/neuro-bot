@@ -409,29 +409,50 @@ func confirmCancelNotifHandler(apptSvc *services.AppointmentService, onCancel Ca
 		selected := sm.ValidatedPayload(ctx)
 		switch selected {
 		case "cancel_yes":
-			apptID := sess.GetContext("notif_appt_id")
-			appt, block, err := apptSvc.FindBlockByAppointmentID(ctx, apptID)
-			if err != nil || appt == nil {
-				return sm.NewResult(sm.StateFarewell).
-					WithText("No pudimos encontrar tu cita. Por favor contacta a la clínica."), nil
+			// Get all appointment IDs stored by startConfirmCancelSession
+			allIDsJSON := sess.GetContext("notif_appt_ids")
+			var allIDs []string
+			if allIDsJSON != "" {
+				json.Unmarshal([]byte(allIDsJSON), &allIDs)
 			}
-			if err := apptSvc.CancelBlock(ctx, block, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
+
+			// Fallback: if no batch IDs, use the single appointment block
+			if len(allIDs) == 0 {
+				apptID := sess.GetContext("notif_appt_id")
+				appt, block, err := apptSvc.FindBlockByAppointmentID(ctx, apptID)
+				if err != nil || appt == nil {
+					return sm.NewResult(sm.StateFarewell).
+						WithText("No pudimos encontrar tu cita. Por favor contacta a la clínica."), nil
+				}
+				for _, a := range block {
+					allIDs = append(allIDs, a.ID)
+				}
+			}
+
+			if err := apptSvc.CancelByIDs(ctx, allIDs, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
 				return sm.NewResult(sm.StateFarewell).
 					WithText("Error al cancelar la cita. Por favor contacta a la clínica.").
 					WithEvent("notification_cancel_error", map[string]interface{}{"error": err.Error()}), nil
 			}
+
+			// Notify waiting list for freed CUPS codes (stored in session context before cancel)
 			if onCancel != nil {
-				for _, a := range block {
-					for _, proc := range a.Procedures {
-						if proc.CupCode != "" {
-							go onCancel(ctx, proc.CupCode)
-						}
+				cupsJSON := sess.GetContext("notif_cups_codes")
+				if cupsJSON != "" {
+					var cupsCodes []string
+					json.Unmarshal([]byte(cupsJSON), &cupsCodes)
+					for _, code := range cupsCodes {
+						go onCancel(ctx, code)
 					}
 				}
 			}
+
 			return sm.NewResult(sm.StateFarewell).
 				WithText("Tu cita ha sido cancelada.\n\nSi deseas reagendar, puedes escribirnos cuando lo necesites.").
-				WithEvent("notification_cancel_confirmed", map[string]interface{}{"appointment_id": apptID}), nil
+				WithEvent("notification_cancel_confirmed", map[string]interface{}{
+					"appointment_ids": allIDs,
+					"total_cancelled": len(allIDs),
+				}), nil
 		default: // cancel_no
 			return sm.NewResult(sm.StateFarewell).
 				WithText("Entendido, tu cita queda vigente. ¡Te esperamos!").

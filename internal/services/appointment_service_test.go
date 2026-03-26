@@ -136,13 +136,13 @@ func TestFindConsecutiveBlock(t *testing.T) {
 
 	date := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
 
-	// 3 consecutive appointments: 0700, 0730, 0800 (same doctor, same agenda)
+	// 3 consecutive appointments: 0700, 0730, 0800 (same doctor, same agenda, same patient)
 	appointments := []domain.Appointment{
-		{ID: "a1", Date: date, TimeSlot: "202603150700", DoctorID: "doc1", AgendaID: 1},
-		{ID: "a2", Date: date, TimeSlot: "202603150730", DoctorID: "doc1", AgendaID: 1},
-		{ID: "a3", Date: date, TimeSlot: "202603150800", DoctorID: "doc1", AgendaID: 1},
-		// Isolated appointment (different doctor)
-		{ID: "a4", Date: date, TimeSlot: "202603150900", DoctorID: "doc2", AgendaID: 2},
+		{ID: "a1", Date: date, TimeSlot: "202603150700", DoctorID: "doc1", AgendaID: 1, PatientID: "p1"},
+		{ID: "a2", Date: date, TimeSlot: "202603150730", DoctorID: "doc1", AgendaID: 1, PatientID: "p1"},
+		{ID: "a3", Date: date, TimeSlot: "202603150800", DoctorID: "doc1", AgendaID: 1, PatientID: "p1"},
+		// Isolated appointment (different doctor + different patient)
+		{ID: "a4", Date: date, TimeSlot: "202603150900", DoctorID: "doc2", AgendaID: 2, PatientID: "p2"},
 	}
 
 	// Block starting from a1 should include a1, a2, a3
@@ -578,17 +578,17 @@ func TestFindBlockByAppointmentID_Found(t *testing.T) {
 			if id == "a1" {
 				return &domain.Appointment{
 					ID: "a1", Date: date, TimeSlot: "202603150800",
-					DoctorID: "doc1", AgendaID: 1,
+					DoctorID: "doc1", AgendaID: 1, PatientID: "p1",
 				}, nil
 			}
 			return nil, nil
 		},
 		findByAgendaAndDateFn: func(ctx context.Context, agendaID int, dateStr string) ([]domain.Appointment, error) {
-			// Return 3 consecutive appointments on the same day/doctor/agenda
+			// Return 3 consecutive appointments on the same day/doctor/agenda/patient
 			return []domain.Appointment{
-				{ID: "a1", Date: date, TimeSlot: "202603150800", DoctorID: "doc1", AgendaID: 1},
-				{ID: "a2", Date: date, TimeSlot: "202603150830", DoctorID: "doc1", AgendaID: 1},
-				{ID: "a3", Date: date, TimeSlot: "202603150900", DoctorID: "doc1", AgendaID: 1},
+				{ID: "a1", Date: date, TimeSlot: "202603150800", DoctorID: "doc1", AgendaID: 1, PatientID: "p1"},
+				{ID: "a2", Date: date, TimeSlot: "202603150830", DoctorID: "doc1", AgendaID: 1, PatientID: "p1"},
+				{ID: "a3", Date: date, TimeSlot: "202603150900", DoctorID: "doc1", AgendaID: 1, PatientID: "p1"},
 			}, nil
 		},
 	}
@@ -607,6 +607,29 @@ func TestFindBlockByAppointmentID_Found(t *testing.T) {
 	// Block should contain all 3 consecutive appointments
 	if len(block) != 3 {
 		t.Errorf("expected block of 3, got %d", len(block))
+	}
+}
+
+func TestFindConsecutiveBlock_DoesNotMixPatients(t *testing.T) {
+	svc := NewAppointmentService(&mockAppointmentRepo{}, nil)
+	date := time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC)
+
+	// Same doctor, same agenda, consecutive slots, BUT different patients
+	appointments := []domain.Appointment{
+		{ID: "a1", Date: date, TimeSlot: "202603150700", DoctorID: "doc1", AgendaID: 1, PatientID: "p1"},
+		{ID: "a2", Date: date, TimeSlot: "202603150730", DoctorID: "doc1", AgendaID: 1, PatientID: "p2"},
+		{ID: "a3", Date: date, TimeSlot: "202603150800", DoctorID: "doc1", AgendaID: 1, PatientID: "p3"},
+	}
+
+	// Each appointment should be a block of 1 (not grouped with other patients)
+	block1 := svc.FindConsecutiveBlock(appointments, "a1")
+	if len(block1) != 1 {
+		t.Errorf("expected block of 1 for patient p1, got %d (was grouping other patients' appointments!)", len(block1))
+	}
+
+	block2 := svc.FindConsecutiveBlock(appointments, "a2")
+	if len(block2) != 1 {
+		t.Errorf("expected block of 1 for patient p2, got %d", len(block2))
 	}
 }
 
