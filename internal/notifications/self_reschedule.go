@@ -2,12 +2,14 @@ package notifications
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/neuro-bot/neuro-bot/internal/services"
 	"github.com/neuro-bot/neuro-bot/internal/session"
 )
 
@@ -68,7 +70,26 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 		skipCancelStr = "1"
 	}
 
-	// 5. Create session at SEARCH_SLOTS with pre-populated context
+	// 5. Build procedures_json required by createAppointmentHandler
+	cups := make([]services.CUPSEntry, 0, len(appt.Procedures))
+	for _, p := range appt.Procedures {
+		cups = append(cups, services.CUPSEntry{
+			Code:     p.CupCode,
+			Name:     p.CupName,
+			Quantity: 1,
+		})
+	}
+	if len(cups) == 0 {
+		cups = []services.CUPSEntry{{Code: cupsCode, Name: cupsName, Quantity: 1}}
+	}
+	groups := []services.CUPSGroup{{
+		ServiceType: "general",
+		Cups:        cups,
+		Espacios:    len(block),
+	}}
+	proceduresJSON, _ := json.Marshal(groups)
+
+	// 6. Create session at SEARCH_SLOTS with pre-populated context
 	sess := &session.Session{
 		ID:           uuid.New().String(),
 		PhoneNumber:  phone,
@@ -85,11 +106,12 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 		"patient_age":    "0", // Skip age restrictions (already validated)
 
 		// Procedure data
-		"cups_code":     cupsCode,
-		"cups_name":     cupsName,
-		"is_contrasted": isContrasted,
-		"is_sedated":    isSedated,
-		"espacios":      fmt.Sprintf("%d", len(block)),
+		"cups_code":       cupsCode,
+		"cups_name":       cupsName,
+		"is_contrasted":   isContrasted,
+		"is_sedated":      isSedated,
+		"espacios":        fmt.Sprintf("%d", len(block)),
+		"procedures_json": string(proceduresJSON),
 
 		// Flow control
 		"total_procedures":      "1",
@@ -115,6 +137,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 
 	if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessionCtx); err != nil {
 		slog.Error("self_reschedule: set context", "error", err)
+		m.sessionRepo.UpdateStatus(ctx, sess.ID, session.StatusCompleted) // cleanup orphan
 		m.birdClient.SendText(phone, pending.ConversationID,
 			"Error interno. Por favor intenta mas tarde.")
 		return

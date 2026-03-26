@@ -366,6 +366,7 @@ func (m *NotificationManager) startConfirmRescheduleSession(phone string, pendin
 	}
 	if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessCtx); err != nil {
 		slog.Error("startConfirmRescheduleSession: set context", "error", err)
+		m.sessionRepo.UpdateStatus(ctx, sess.ID, session.StatusCompleted) // cleanup orphan
 		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
 		return
 	}
@@ -454,6 +455,7 @@ func (m *NotificationManager) startConfirmCancelSession(phone string, pending *P
 	}
 	if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessCtx); err != nil {
 		slog.Error("startConfirmCancelSession: set context", "error", err)
+		m.sessionRepo.UpdateStatus(ctx, sess.ID, session.StatusCompleted) // cleanup orphan
 		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
 		return
 	}

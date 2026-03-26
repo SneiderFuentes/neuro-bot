@@ -775,6 +775,10 @@ func (m *mockSessionCreator) SetContextBatch(ctx context.Context, sessionID stri
 	return nil
 }
 
+func (m *mockSessionCreator) UpdateStatus(ctx context.Context, sessionID, status string) error {
+	return nil
+}
+
 type mockVirtualEnqueuer struct {
 	mu      sync.Mutex
 	calls   []string

@@ -78,6 +78,7 @@ func (m *NotificationManager) handleWaitingList(phone, action string, pending *P
 
 		if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessionCtx); err != nil {
 			slog.Error("waiting list: set context", "error", err)
+			m.sessionRepo.UpdateStatus(ctx, sess.ID, session.StatusCompleted) // cleanup orphan
 			return
 		}
 

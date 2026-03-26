@@ -43,6 +43,7 @@ type WaitingListFinder interface {
 type SessionCreator interface {
 	Create(ctx context.Context, s *session.Session) error
 	SetContextBatch(ctx context.Context, sessionID string, kvs map[string]string) error
+	UpdateStatus(ctx context.Context, sessionID, status string) error
 }
 
 // VirtualEnqueuer enqueues virtual messages for the worker pool.
