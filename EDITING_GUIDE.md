@@ -1078,26 +1078,23 @@ El comportamiento de inactividad está controlado por **variables de entorno** l
 ```go
 // En main.go (lectura real del código):
 go sessionManager.StartInactivityChecker(ctx, session.InactivityDeps{
-    BirdClient:   birdClient,
-    Tracker:      tracker,
-    Reminder1Min: cfg.InactivityReminder1Min, // ← minutos para 1er recordatorio
-    Reminder2Min: cfg.InactivityReminder2Min, // ← minutos para 2do recordatorio
-    CloseMin:     cfg.InactivityCloseMin,     // ← minutos para cierre definitivo
+    BirdClient:  birdClient,
+    Tracker:     tracker,
+    ReminderMin: cfg.InactivityReminderMin, // ← minutos para recordatorio único
+    CloseMin:    cfg.InactivityCloseMin,    // ← minutos para cierre silencioso
 })
 ```
 
 ```go
 // internal/config/config.go — campos a cambiar:
-InactivityReminder1Min int // ej: INACTIVITY_REMINDER1_MIN=20
-InactivityReminder2Min int // ej: INACTIVITY_REMINDER2_MIN=25
-InactivityCloseMin     int // ej: INACTIVITY_CLOSE_MIN=30
+InactivityReminderMin int // ej: INACTIVITY_REMINDER_MIN=5
+InactivityCloseMin    int // ej: INACTIVITY_CLOSE_MIN=15
 ```
 
 ```env
 # .env — cambiar los valores:
-INACTIVITY_REMINDER1_MIN=20
-INACTIVITY_REMINDER2_MIN=25
-INACTIVITY_CLOSE_MIN=30
+INACTIVITY_REMINDER_MIN=5
+INACTIVITY_CLOSE_MIN=15
 ```
 
 ---

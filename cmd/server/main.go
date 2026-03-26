@@ -237,14 +237,13 @@ func main() {
 		safeGo("notification-expiry", func() { notifyManager.StartExpirationChecker(ctx) })
 	}
 
-	// Fase 20: Inactivity checker (reminders + auto-close for active, expire for escalated)
+	// Fase 20: Inactivity checker (single reminder + silent close for active, expire for escalated)
 	safeGo("inactivity-checker", func() {
 		sessionManager.StartInactivityChecker(ctx, session.InactivityDeps{
-			BirdClient:   birdClient,
-			Tracker:      tracker,
-			Reminder1Min: cfg.InactivityReminder1Min,
-			Reminder2Min: cfg.InactivityReminder2Min,
-			CloseMin:     cfg.InactivityCloseMin,
+			BirdClient:  birdClient,
+			Tracker:     tracker,
+			ReminderMin: cfg.InactivityReminderMin,
+			CloseMin:    cfg.InactivityCloseMin,
 		})
 	})
 

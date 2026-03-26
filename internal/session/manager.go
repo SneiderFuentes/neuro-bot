@@ -43,11 +43,10 @@ type EventLogger interface {
 
 // InactivityDeps holds dependencies for the inactivity checker goroutine.
 type InactivityDeps struct {
-	BirdClient   InactivityBirdClient
-	Tracker      EventLogger
-	Reminder1Min int
-	Reminder2Min int
-	CloseMin     int
+	BirdClient  InactivityBirdClient
+	Tracker     EventLogger
+	ReminderMin int // Minutes before sending the single reminder
+	CloseMin    int // Minutes before silent close (must be > ReminderMin)
 }
 
 type SessionManager struct {
@@ -234,9 +233,10 @@ func (m *SessionManager) StartInactivityChecker(ctx context.Context, deps Inacti
 }
 
 // checkInactiveSessions handles reminder sending and auto-close for active sessions.
+// Two tiers: (1) single reminder at ReminderMin, (2) silent close at CloseMin.
 func (m *SessionManager) checkInactiveSessions(ctx context.Context, deps InactivityDeps) {
-	// Query sessions idle for at least the first reminder threshold
-	sessions, err := m.repo.FindInactiveSessions(ctx, deps.Reminder1Min)
+	// Query sessions idle for at least the reminder threshold
+	sessions, err := m.repo.FindInactiveSessions(ctx, deps.ReminderMin)
 	if err != nil {
 		slog.Error("inactivity check error", "error", err)
 		return
@@ -246,10 +246,8 @@ func (m *SessionManager) checkInactiveSessions(ctx context.Context, deps Inactiv
 		elapsed := time.Since(s.LastActivity)
 		elapsedMin := int(elapsed.Minutes())
 
-		if elapsedMin >= deps.CloseMin && s.Reminders >= 2 {
-			// Auto-close: send farewell, mark completed, close feed item
-			deps.BirdClient.SendText(s.PhoneNumber, s.ConversationID,
-				"Tu sesión ha sido cerrada por inactividad. Puedes escribirnos de nuevo cuando lo necesites. ¡Hasta pronto!")
+		if elapsedMin >= deps.CloseMin && s.Reminders >= 1 {
+			// Silent close: no message, just mark completed and close feed item
 			if err := m.repo.UpdateStatus(ctx, s.ID, StatusCompleted); err != nil {
 				slog.Error("inactivity close failed", "session_id", s.ID, "error", err)
 				continue
@@ -265,23 +263,15 @@ func (m *SessionManager) checkInactiveSessions(ctx context.Context, deps Inactiv
 			slog.Info("session closed by inactivity",
 				"session_id", s.ID, "phone", s.PhoneNumber, "idle_min", elapsedMin)
 
-		} else if elapsedMin >= deps.Reminder2Min && s.Reminders == 1 {
-			// Second reminder
+		} else if elapsedMin >= deps.ReminderMin && s.Reminders == 0 {
+			// Single reminder with close warning
+			closeIn := deps.CloseMin - deps.ReminderMin
 			deps.BirdClient.SendText(s.PhoneNumber, s.ConversationID,
-				"No hemos recibido tu respuesta. Si necesitas más tiempo, escribe cualquier mensaje para continuar.")
-			if err := m.repo.SetContext(ctx, s.ID, "inactivity_reminders", "2"); err != nil {
-				slog.Error("set reminder 2 failed", "session_id", s.ID, "error", err)
-			}
-			slog.Debug("inactivity reminder 2 sent", "session_id", s.ID, "phone", s.PhoneNumber)
-
-		} else if elapsedMin >= deps.Reminder1Min && s.Reminders == 0 {
-			// First reminder
-			deps.BirdClient.SendText(s.PhoneNumber, s.ConversationID,
-				"Hola, seguimos aquí para ayudarte. ¿Deseas continuar con tu solicitud?")
+				fmt.Sprintf("¿Sigues ahí? Si no responde en %d minutos se cerrará la sesión.\n\nPuedes volver al menú principal enviando *0* o *menu*.", closeIn))
 			if err := m.repo.SetContext(ctx, s.ID, "inactivity_reminders", "1"); err != nil {
-				slog.Error("set reminder 1 failed", "session_id", s.ID, "error", err)
+				slog.Error("set reminder failed", "session_id", s.ID, "error", err)
 			}
-			slog.Debug("inactivity reminder 1 sent", "session_id", s.ID, "phone", s.PhoneNumber)
+			slog.Debug("inactivity reminder sent", "session_id", s.ID, "phone", s.PhoneNumber)
 		}
 	}
 }

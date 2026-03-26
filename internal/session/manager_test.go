@@ -642,9 +642,8 @@ func TestStartInactivityChecker_ContextCancellation(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		mgr.StartInactivityChecker(ctx, InactivityDeps{
-			Reminder1Min: 5,
-			Reminder2Min: 15,
-			CloseMin:     30,
+			ReminderMin: 5,
+			CloseMin:    15,
 		})
 		close(done)
 	}()

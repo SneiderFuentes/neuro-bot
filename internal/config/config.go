@@ -79,10 +79,9 @@ type Config struct {
 	// Session
 	SessionTimeoutMinutes int
 
-	// Inactivity reminders (minutes without patient response)
-	InactivityReminder1Min int // First reminder
-	InactivityReminder2Min int // Second reminder
-	InactivityCloseMin     int // Auto-close session
+	// Inactivity (minutes without patient response)
+	InactivityReminderMin int // Single reminder
+	InactivityCloseMin    int // Silent close (no message)
 
 	// Center
 	CenterKey  string
@@ -211,9 +210,8 @@ func Load() *Config {
 		SessionTimeoutMinutes: getEnvInt("SESSION_TIMEOUT_MINUTES", 120),
 
 		// Inactivity
-		InactivityReminder1Min: getEnvInt("INACTIVITY_REMINDER_1_MIN", 5),
-		InactivityReminder2Min: getEnvInt("INACTIVITY_REMINDER_2_MIN", 15),
-		InactivityCloseMin:     getEnvInt("INACTIVITY_CLOSE_MIN", 30),
+		InactivityReminderMin: getEnvInt("INACTIVITY_REMINDER_MIN", 5),
+		InactivityCloseMin:    getEnvInt("INACTIVITY_CLOSE_MIN", 15),
 
 		// Center
 		CenterKey:  getEnv("CENTER_KEY", "datosipsndx"),
