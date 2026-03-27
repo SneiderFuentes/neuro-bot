@@ -1,222 +1,458 @@
 {
 	"info": {
-		"name": "Neuro Bot - Logs API",
-		"description": "Endpoints para consulta remota de logs del bot Samuel.\n\nTodos los endpoints requieren header `X-API-Key: <INTERNAL_API_KEY>`.\n\nBase URL: `https://{{host}}/api/internal`",
+		"name": "Neuro Bot - Internal API",
+		"description": "Colección completa de endpoints internos del bot Samuel (Neuro-Bot).\n\nTodos los endpoints requieren header `X-API-Key: <INTERNAL_API_KEY>`.\n\nBase URL: `https://{{host}}/api/internal`\n\n---\n\n## Guía rápida: ¿Qué endpoint usar?\n\n| Quiero... | Endpoint |\n|---|---|\n| Ver errores recientes | `Logs - Filtrar por nivel (error)` |\n| Rastrear una sesión específica | `Sessions - Por ID (con contexto)` |\n| Ver todas las sesiones de un teléfono | `Sessions - Por teléfono` |\n| Ver el contexto (variables) de una sesión | `Sessions - Contexto por ID` |\n| Ver qué hizo un paciente paso a paso | `Events - Por teléfono` |\n| Buscar un error específico en logs | `Logs - Buscar texto` |\n| Filtrar logs por teléfono | `Logs - Filtrar por teléfono` |\n| Ver métricas del día | `KPIs - Diarios` |\n| Ver métricas de la semana | `KPIs - Semanales` |\n| Ver embudo de conversión | `KPIs - Funnel` |\n| Ver salud del sistema | `KPIs - Health` |\n| Cancelar agenda de un doctor | `Admin - Cancelar agenda` |\n| Reprogramar agenda | `Admin - Reprogramar agenda` |\n| Verificar lista de espera | `Waiting List - Check` |\n| Ver entradas de lista de espera | `Waiting List - Listar` |\n| Enviar recordatorios manualmente | `Admin - Enviar recordatorios` |\n| Probar llamada IVR | `Admin - Test Voice Call` |\n| Probar alerta Telegram | `Admin - Test Alert` |\n\n---\n\n## Diagnóstico de errores comunes\n\n### Error: `create_appointment_invalid_procedures_json`\n1. Busca el `session_id` en el log de error\n2. Usa `Sessions - Por ID` para ver el estado y contexto\n3. Verifica si `procedures_json` está en el contexto\n4. Usa `Events - Por teléfono` para ver el flujo completo\n\n### Error: `escalation failed: empty conversation ID`\n1. Busca el `session_id` en el log\n2. Usa `Sessions - Por ID` para ver si `conversation_id` está vacío\n3. Usa `Logs - Filtrar por teléfono` para ver toda la actividad del paciente\n\n### Error: Cita cancelada incorrectamente\n1. Usa `Events - Por teléfono` con type=`appointment_cancelled`\n2. Usa `Sessions - Por teléfono` para ver sesiones recientes\n3. Revisa logs con `Logs - Filtrar por teléfono`",
 		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 	},
 	"auth": {
 		"type": "apikey",
 		"apikey": [
-			{
-				"key": "key",
-				"value": "X-API-Key",
-				"type": "string"
-			},
-			{
-				"key": "value",
-				"value": "{{INTERNAL_API_KEY}}",
-				"type": "string"
-			},
-			{
-				"key": "in",
-				"value": "header",
-				"type": "string"
-			}
+			{ "key": "key", "value": "X-API-Key", "type": "string" },
+			{ "key": "value", "value": "{{INTERNAL_API_KEY}}", "type": "string" },
+			{ "key": "in", "value": "header", "type": "string" }
 		]
 	},
 	"variable": [
-		{
-			"key": "host",
-			"value": "app.colibrixa.com",
-			"type": "string"
-		},
-		{
-			"key": "INTERNAL_API_KEY",
-			"value": "f3a76d7b8b82dsfd565d928e1c4c3eaa3c6ef04a713d67b0f27fa",
-			"type": "string"
-		}
+		{ "key": "host", "value": "app.colibrixa.com", "type": "string" },
+		{ "key": "INTERNAL_API_KEY", "value": "f3a76d7b8b82dsfd565d928e1c4c3eaa3c6ef04a713d67b0f27fa", "type": "string" }
 	],
 	"item": [
 		{
-			"name": "Logs - Ultimas 200 lineas",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "https://{{host}}/api/internal/logs",
-					"protocol": "https",
-					"host": ["{{host}}"],
-					"path": ["api", "internal", "logs"]
+			"name": "📋 Logs",
+			"description": "Consulta de logs del servidor. Los logs se almacenan en archivos diarios (`/app/logs/neuro-bot-YYYY-MM-DD.log`) en formato JSON estructurado.\n\nCada línea contiene: `time`, `level`, `msg`, y campos adicionales como `phone`, `session_id`, `error`.",
+			"item": [
+				{
+					"name": "Logs - Últimas 200 líneas",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/logs",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "logs"]
+						},
+						"description": "Retorna las últimas 200 líneas de log (default).\n\n**Cuándo usar:** Vista rápida de la actividad reciente del bot."
+					}
 				},
-				"description": "Retorna las últimas 200 líneas de log (default)."
-			}
+				{
+					"name": "Logs - Filtrar por nivel (error)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/logs?level=error&lines=500",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "logs"],
+							"query": [
+								{ "key": "level", "value": "error", "description": "Nivel: debug, info, warn, error" },
+								{ "key": "lines", "value": "500", "description": "Máx líneas (max 10000)" }
+							]
+						},
+						"description": "Retorna solo logs de nivel ERROR.\n\n**Cuándo usar:** Cuando quieres ver TODOS los errores recientes.\n\n**Niveles disponibles:** `debug`, `info`, `warn`, `error`"
+					}
+				},
+				{
+					"name": "Logs - Filtrar por fecha",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/logs?from=2026-03-27T07:00&to=2026-03-27T18:00&lines=1000",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "logs"],
+							"query": [
+								{ "key": "from", "value": "2026-03-27T07:00", "description": "Inicio: YYYY-MM-DD o YYYY-MM-DDTHH:MM" },
+								{ "key": "to", "value": "2026-03-27T18:00", "description": "Fin: YYYY-MM-DD o YYYY-MM-DDTHH:MM" },
+								{ "key": "lines", "value": "1000" }
+							]
+						},
+						"description": "Retorna logs dentro de un rango de fecha/hora específico.\n\n**Cuándo usar:** Investigar un incidente que ocurrió en un horario conocido.\n\n**Formatos aceptados:** `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM`, `YYYY-MM-DD HH:MM:SS`"
+					}
+				},
+				{
+					"name": "Logs - Filtrar por teléfono",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/logs?phone=573218969280&lines=500",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "logs"],
+							"query": [
+								{ "key": "phone", "value": "573218969280", "description": "Teléfono (se agrega + automático)" },
+								{ "key": "lines", "value": "500" }
+							]
+						},
+						"description": "Filtra logs que contengan el número de teléfono.\n\n**Cuándo usar:** Rastrear toda la actividad de un paciente específico (mensajes, errores, estados).\n\n**Tip:** No necesitas el +, se agrega automáticamente."
+					}
+				},
+				{
+					"name": "Logs - Buscar texto",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/logs?search=procedures_json&lines=500",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "logs"],
+							"query": [
+								{ "key": "search", "value": "procedures_json", "description": "Buscar substring en el campo msg del log" },
+								{ "key": "lines", "value": "500" }
+							]
+						},
+						"description": "Busca un texto específico en los mensajes de log.\n\n**Cuándo usar:** Buscar errores específicos como `create_appointment_invalid_procedures_json`, `escalation failed`, `save_state_error`, `slot_taken`, etc.\n\n**Búsquedas útiles:**\n- `procedures_json` → errores de JSON de procedimientos\n- `escalation` → errores de escalación a agente\n- `save_state` → errores al guardar estado\n- `cancel` → actividad de cancelaciones\n- `bird` → errores de API de Bird/WhatsApp"
+					}
+				},
+				{
+					"name": "Logs - Filtros combinados",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/logs?level=error&from=2026-03-27&phone=573218969280&lines=1000",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "logs"],
+							"query": [
+								{ "key": "level", "value": "error" },
+								{ "key": "from", "value": "2026-03-27" },
+								{ "key": "phone", "value": "573218969280" },
+								{ "key": "lines", "value": "1000" }
+							]
+						},
+						"description": "Combina múltiples filtros: nivel + fecha + teléfono.\n\n**Cuándo usar:** Investigar errores de un paciente en un día específico."
+					}
+				},
+				{
+					"name": "Logs - Descargar archivo",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/logs?lines=5000&download=true",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "logs"],
+							"query": [
+								{ "key": "lines", "value": "5000" },
+								{ "key": "download", "value": "true", "description": "Retorna como archivo .log descargable" }
+							]
+						},
+						"description": "Descarga los logs como archivo .log.\n\n**Cuándo usar:** Exportar logs para análisis offline o compartir con el equipo.\n\nArchivo nombrado: `neuro-bot-logs-YYYY-MM-DD_HH-MM.log`"
+					}
+				}
+			]
 		},
 		{
-			"name": "Logs - Filtrar por nivel (error)",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "https://{{host}}/api/internal/logs?level=error&lines=500",
-					"protocol": "https",
-					"host": ["{{host}}"],
-					"path": ["api", "internal", "logs"],
-					"query": [
-						{
-							"key": "level",
-							"value": "error",
-							"description": "Filtrar por nivel: debug, info, warn, error"
+			"name": "🔍 Sessions (Debug)",
+			"description": "Consulta de sesiones y su contexto almacenado en base de datos.\n\nCada sesión tiene:\n- **Datos de sesión:** estado actual, teléfono, paciente, estado (active/completed/escalated/abandoned)\n- **Contexto:** pares clave-valor que almacenan datos del flujo (cups_code, procedures_json, patient_id, etc.)\n\n**Tip:** El `session_id` aparece en los logs de error. Cópialo y úsalo aquí para investigar.",
+			"item": [
+				{
+					"name": "Sessions - Por ID (con contexto)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/sessions?id=34c1124d-8d22-465c-8130-e9a93149f9d8",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "sessions"],
+							"query": [
+								{ "key": "id", "value": "34c1124d-8d22-465c-8130-e9a93149f9d8", "description": "UUID de la sesión (del log de error)" }
+							]
 						},
-						{
-							"key": "lines",
-							"value": "500",
-							"description": "Cantidad máxima de líneas (max 10000)"
-						}
-					]
+						"description": "Retorna una sesión específica CON todo su contexto.\n\n**Cuándo usar:** Cuando tienes un `session_id` de un log de error y quieres ver:\n- En qué estado quedó la sesión\n- Qué valores tenía el contexto (procedures_json, cups_code, etc.)\n- Si el conversation_id estaba vacío\n- Datos del paciente asociado\n\n**Respuesta incluye:**\n- `session`: datos de la sesión (estado, teléfono, paciente)\n- `context`: TODOS los pares clave-valor del contexto\n\n**Ejemplo de diagnóstico:**\n1. Log dice: `create_appointment_invalid_procedures_json session_id=abc123`\n2. Consulta este endpoint con `id=abc123`\n3. Verifica si `procedures_json` está en el contexto\n4. Si está vacío → confirma que SetContextBatch falló"
+					}
 				},
-				"description": "Retorna solo logs de nivel ERROR."
-			}
+				{
+					"name": "Sessions - Por teléfono",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/sessions?phone=573218969280&limit=10",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "sessions"],
+							"query": [
+								{ "key": "phone", "value": "573218969280", "description": "Teléfono (se agrega + automático)" },
+								{ "key": "limit", "value": "10", "description": "Cantidad máxima (default 10, max 100)" }
+							]
+						},
+						"description": "Retorna las últimas N sesiones de un teléfono (cualquier estado).\n\n**Cuándo usar:** Ver el historial de sesiones de un paciente:\n- ¿Cuántas sesiones ha tenido?\n- ¿Cuántas completaron vs abandonaron?\n- ¿En qué estado quedó la última?\n- ¿Ha sido escalado a agente?\n\n**No incluye contexto.** Para ver el contexto, usa el `id` de la sesión con el endpoint anterior."
+					}
+				},
+				{
+					"name": "Sessions - Contexto por ID",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/sessions/context?id=34c1124d-8d22-465c-8130-e9a93149f9d8",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "sessions", "context"],
+							"query": [
+								{ "key": "id", "value": "34c1124d-8d22-465c-8130-e9a93149f9d8", "description": "UUID de la sesión" }
+							]
+						},
+						"description": "Retorna SOLO el contexto (pares clave-valor) de una sesión.\n\n**Cuándo usar:** Cuando solo necesitas ver las variables de contexto sin los datos de sesión.\n\n**Claves comunes en el contexto:**\n- `patient_id`, `patient_name`, `patient_doc` → datos del paciente\n- `cups_code`, `cups_name` → procedimiento seleccionado\n- `procedures_json` → JSON completo de procedimientos agrupados\n- `espacios` → slots requeridos\n- `is_contrasted`, `is_sedated` → flags médicos\n- `selected_slot_json` → slot seleccionado\n- `notif_appt_id`, `notif_appt_ids` → IDs de citas en notificaciones\n- `reschedule_appt_id` → cita siendo reprogramada\n- `menu_option` → opción del menú (agendar, cancelar, etc.)"
+					}
+				}
+			]
 		},
 		{
-			"name": "Logs - Filtrar por fecha",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "https://{{host}}/api/internal/logs?from=2026-03-24T07:00&to=2026-03-24T18:00&lines=1000",
-					"protocol": "https",
-					"host": ["{{host}}"],
-					"path": ["api", "internal", "logs"],
-					"query": [
-						{
-							"key": "from",
-							"value": "2026-03-24T07:00",
-							"description": "Fecha/hora inicio (YYYY-MM-DD o YYYY-MM-DDTHH:MM)"
+			"name": "📊 Events",
+			"description": "Eventos del chat almacenados en la tabla `chat_events`. Cada transición de estado, acción de paciente o error se registra como evento.\n\nCada evento tiene: `session_id`, `phone`, `type`, `data` (JSON), `state_from`, `state_to`, `created_at`.",
+			"item": [
+				{
+					"name": "Events - Por teléfono",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/events?phone=573218969280&limit=200",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "events"],
+							"query": [
+								{ "key": "phone", "value": "573218969280", "description": "Teléfono (REQUERIDO, se agrega + automático)" },
+								{ "key": "limit", "value": "200", "description": "Máx eventos (default 200, max 500)" }
+							]
 						},
-						{
-							"key": "to",
-							"value": "2026-03-24T18:00",
-							"description": "Fecha/hora fin"
-						},
-						{
-							"key": "lines",
-							"value": "1000"
-						}
-					]
+						"description": "Retorna todos los eventos de un teléfono ordenados cronológicamente.\n\n**Cuándo usar:** Ver el flujo completo paso a paso de un paciente.\n\n**Tipos de evento comunes:**\n- `session_started` → inicio de sesión\n- `document_entered` → paciente ingresó cédula\n- `patient_found` → paciente identificado en el sistema\n- `menu_selected` → opción de menú elegida\n- `ocr_success` / `ocr_failed` → resultado de OCR\n- `appointment_created` → cita creada exitosamente\n- `appointment_confirmed` → cita confirmada via notificación\n- `appointment_cancelled` → cita cancelada\n- `escalated_to_agent` → escalado a agente humano\n- `notification_sent` → notificación proactiva enviada\n- `session_completed` → sesión finalizada\n- `max_retries_reached` → máximo de reintentos alcanzado"
+					}
 				},
-				"description": "Retorna logs dentro de un rango de fecha/hora específico."
-			}
+				{
+					"name": "Events - Por teléfono + fecha",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/events?phone=573218969280&from=2026-03-27&to=2026-03-28&limit=500",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "events"],
+							"query": [
+								{ "key": "phone", "value": "573218969280" },
+								{ "key": "from", "value": "2026-03-27", "description": "Fecha inicio" },
+								{ "key": "to", "value": "2026-03-28", "description": "Fecha fin" },
+								{ "key": "limit", "value": "500" }
+							]
+						},
+						"description": "Eventos de un teléfono en un rango de fechas.\n\n**Cuándo usar:** Investigar qué pasó con un paciente en un día específico."
+					}
+				},
+				{
+					"name": "Events - Por tipo específico",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/events?phone=573218969280&type=appointment_cancelled&limit=100",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "events"],
+							"query": [
+								{ "key": "phone", "value": "573218969280" },
+								{ "key": "type", "value": "appointment_cancelled", "description": "Tipo de evento a filtrar" },
+								{ "key": "limit", "value": "100" }
+							]
+						},
+						"description": "Filtra eventos por tipo específico.\n\n**Cuándo usar:** Buscar solo cancelaciones, escalaciones, o creaciones de citas.\n\n**Tipos útiles para diagnóstico:**\n- `appointment_cancelled` → ver cancelaciones\n- `escalated_to_agent` → ver escalaciones\n- `appointment_created` → ver citas creadas\n- `notification_sent` → ver notificaciones enviadas\n- `notification_cancel_confirmed` → cancelaciones vía notificación"
+					}
+				}
+			]
 		},
 		{
-			"name": "Logs - Buscar texto",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "https://{{host}}/api/internal/logs?search=webhook&lines=500",
-					"protocol": "https",
-					"host": ["{{host}}"],
-					"path": ["api", "internal", "logs"],
-					"query": [
-						{
-							"key": "search",
-							"value": "webhook",
-							"description": "Buscar substring en el campo msg del log"
+			"name": "📈 KPIs",
+			"description": "Métricas y analytics del bot. Incluye KPIs diarios, semanales, embudo de conversión y salud del sistema.",
+			"item": [
+				{
+					"name": "KPIs - Diarios",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/kpis/daily?date=2026-03-27",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "kpis", "daily"],
+							"query": [
+								{ "key": "date", "value": "2026-03-27", "description": "Fecha YYYY-MM-DD (default: hoy)" }
+							]
 						},
-						{
-							"key": "lines",
-							"value": "500"
-						}
-					]
+						"description": "Métricas del día: sesiones, citas, OCR, escalaciones, notificaciones, etc.\n\n**Cuándo usar:** Resumen diario de la operación del bot.\n\n**Métricas incluidas:** total_sessions, completed_sessions, appointments_created, appointments_confirmed, appointments_cancelled, proactives_sent, proactives_confirmed, avg_session_duration, y más."
+					}
 				},
-				"description": "Busca un texto específico en los mensajes de log."
-			}
+				{
+					"name": "KPIs - Semanales",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/kpis/weekly?week=2026-W13",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "kpis", "weekly"],
+							"query": [
+								{ "key": "week", "value": "2026-W13", "description": "Semana ISO YYYY-Wnn (default: semana actual)" }
+							]
+						},
+						"description": "Métricas agregadas por semana ISO.\n\n**Cuándo usar:** Comparar rendimiento entre semanas.\n\n**Formato semana:** `YYYY-Wnn` donde nn es el número de semana ISO (01-53)."
+					}
+				},
+				{
+					"name": "KPIs - Funnel de conversión",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/kpis/funnel?from=2026-03-01&to=2026-03-31",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "kpis", "funnel"],
+							"query": [
+								{ "key": "from", "value": "2026-03-01", "description": "Fecha inicio (REQUERIDO)" },
+								{ "key": "to", "value": "2026-03-31", "description": "Fecha fin (REQUERIDO)" }
+							]
+						},
+						"description": "Embudo de conversión: cuántos pacientes pasan de cada etapa a la siguiente.\n\n**Cuándo usar:** Identificar dónde se pierden pacientes en el flujo.\n\n**Etapas:** entries → greeted → identified → registered → procedure_selected → slot_selected → appointment_created → appointment_confirmed → completed"
+					}
+				},
+				{
+					"name": "KPIs - Health (Salud del sistema)",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/kpis/health",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "kpis", "health"]
+						},
+						"description": "Snapshot en tiempo real de la salud del sistema.\n\n**Cuándo usar:** Monitorear el estado del bot en producción.\n\n**Incluye:** uptime, conexiones DB, tamaño de cola de workers, notificaciones pendientes, memoria, goroutines."
+					}
+				}
+			]
 		},
 		{
-			"name": "Logs - Filtros combinados",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "https://{{host}}/api/internal/logs?level=error&from=2026-03-24&search=bird&lines=1000",
-					"protocol": "https",
-					"host": ["{{host}}"],
-					"path": ["api", "internal", "logs"],
-					"query": [
-						{
-							"key": "level",
-							"value": "error"
+			"name": "⚙️ Admin",
+			"description": "Endpoints administrativos para gestión de agendas, recordatorios, llamadas de prueba y alertas.",
+			"item": [
+				{
+					"name": "Admin - Cancelar agenda",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"agenda_id\": 123,\n  \"doctor_document\": \"1234567890\",\n  \"date\": \"2026-03-31\",\n  \"reason\": \"Doctor no disponible\",\n  \"notify_patients\": true\n}"
 						},
-						{
-							"key": "from",
-							"value": "2026-03-24"
+						"url": {
+							"raw": "https://{{host}}/api/internal/cancel-agenda",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "cancel-agenda"]
 						},
-						{
-							"key": "search",
-							"value": "bird"
-						},
-						{
-							"key": "lines",
-							"value": "1000"
-						}
-					]
+						"description": "Cancela TODAS las citas de una agenda en una fecha.\n\n**Cuándo usar:** Cuando un doctor cancela su agenda completa para un día.\n\n**Campos requeridos:** `agenda_id`, `date`\n**Opcionales:** `doctor_document`, `reason`, `notify_patients`\n\nSi `notify_patients=true`, envía templates de cancelación por WhatsApp a cada paciente (con delay de 2s entre mensajes).\n\n**Respuesta:** `{cancelled: N, to_notify: N}`"
+					}
 				},
-				"description": "Combina múltiples filtros: nivel + fecha + texto."
-			}
+				{
+					"name": "Admin - Reprogramar agenda",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"agenda_id\": 123,\n  \"doctor_document\": \"1234567890\",\n  \"old_date\": \"2026-03-31\",\n  \"new_date\": \"2026-04-01\",\n  \"reason\": \"Cambio de fecha\",\n  \"notify_patients\": true\n}"
+						},
+						"url": {
+							"raw": "https://{{host}}/api/internal/reschedule-agenda",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "reschedule-agenda"]
+						},
+						"description": "Reprograma todas las citas de una agenda a una nueva fecha.\n\n**Campos requeridos:** `agenda_id`, `doctor_document`, `old_date`, `new_date`\n**Opcionales:** `new_agenda_id` (para mover a otra agenda), `reason`, `notify_patients`\n\n**Dos escenarios:**\n1. **Misma agenda:** Mueve las citas de old_date a new_date\n2. **Otra agenda:** Cancela en agenda original, notifica pacientes de nueva agenda\n\n`new_date` debe ser >= hoy."
+					}
+				},
+				{
+					"name": "Admin - Enviar recordatorios",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "https://{{host}}/api/internal/send-reminders",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "send-reminders"]
+						},
+						"description": "Dispara manualmente el envío de recordatorios de citas por WhatsApp.\n\n**Cuándo usar:** Si el scheduler de las 7:00 AM no se ejecutó o quieres enviar recordatorios adicionales.\n\nSe ejecuta en background y retorna inmediatamente."
+					}
+				},
+				{
+					"name": "Admin - Test Voice Call (IVR)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"phone\": \"+573001234567\",\n  \"patient_name\": \"Paciente de prueba\",\n  \"appointment_date\": \"mañana\",\n  \"appointment_time\": \"8:00 AM\"\n}"
+						},
+						"url": {
+							"raw": "https://{{host}}/api/internal/test-voice-call",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "test-voice-call"]
+						},
+						"description": "Realiza una llamada IVR de prueba.\n\n**Campo requerido:** `phone` (formato E.164)\n**Opcionales:** `patient_name`, `appointment_date`, `appointment_time`, `clinic_address`\n\n**Cuándo usar:** Probar la integración de voz con Bird y el flujo de DTMF."
+					}
+				},
+				{
+					"name": "Admin - Test Alert (Telegram)",
+					"request": {
+						"method": "POST",
+						"url": {
+							"raw": "https://{{host}}/api/internal/test-alert",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "test-alert"]
+						},
+						"description": "Genera un error de prueba para verificar que las alertas de Telegram están funcionando.\n\n**Cuándo usar:** Verificar la integración de alertas.\n\nLogea un ERROR que aparecerá en Telegram si está configurado."
+					}
+				}
+			]
 		},
 		{
-			"name": "Logs - Descargar archivo",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "https://{{host}}/api/internal/logs?lines=5000&download=true",
-					"protocol": "https",
-					"host": ["{{host}}"],
-					"path": ["api", "internal", "logs"],
-					"query": [
-						{
-							"key": "lines",
-							"value": "5000"
+			"name": "📋 Waiting List",
+			"description": "Consulta y gestión de la lista de espera de pacientes.",
+			"item": [
+				{
+					"name": "Waiting List - Check (disparar notificaciones)",
+					"request": {
+						"method": "POST",
+						"header": [{ "key": "Content-Type", "value": "application/json" }],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"cups_code\": \"\",\n  \"dry_run\": false\n}"
 						},
-						{
-							"key": "download",
-							"value": "true",
-							"description": "Retorna como archivo descargable .log"
-						}
-					]
+						"url": {
+							"raw": "https://{{host}}/api/internal/waiting-list/check",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "waiting-list", "check"]
+						},
+						"description": "Verifica la lista de espera y notifica pacientes si hay slots disponibles.\n\n**Campos opcionales:**\n- `cups_code`: código CUPS específico (vacío = todos)\n- `dry_run`: `true` para simular sin enviar notificaciones\n\n**Cuándo usar:** Cuando se abre disponibilidad y quieres notificar pacientes en espera manualmente."
+					}
 				},
-				"description": "Descarga los logs como archivo .log.\nEl archivo se nombra automáticamente: neuro-bot-logs-YYYY-MM-DD_HH-MM.log"
-			}
-		},
-		{
-			"name": "Logs - Solo warnings de hoy",
-			"request": {
-				"method": "GET",
-				"header": [],
-				"url": {
-					"raw": "https://{{host}}/api/internal/logs?level=warn&from={{today}}&lines=500",
-					"protocol": "https",
-					"host": ["{{host}}"],
-					"path": ["api", "internal", "logs"],
-					"query": [
-						{
-							"key": "level",
-							"value": "warn"
+				{
+					"name": "Waiting List - Listar entradas",
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "https://{{host}}/api/internal/waiting-list?phone=&status=pending&cups_code=&page=1&limit=20",
+							"protocol": "https",
+							"host": ["{{host}}"],
+							"path": ["api", "internal", "waiting-list"],
+							"query": [
+								{ "key": "phone", "value": "", "description": "Filtrar por teléfono" },
+								{ "key": "status", "value": "pending", "description": "Estado: pending, notified, scheduled, expired" },
+								{ "key": "cups_code", "value": "", "description": "Filtrar por código CUPS" },
+								{ "key": "page", "value": "1", "description": "Página (1-indexed)" },
+								{ "key": "limit", "value": "20", "description": "Resultados por página (max 100)" }
+							]
 						},
-						{
-							"key": "from",
-							"value": "{{today}}",
-							"description": "Reemplazar con fecha de hoy: YYYY-MM-DD"
-						},
-						{
-							"key": "lines",
-							"value": "500"
-						}
-					]
-				},
-				"description": "Muestra solo warnings del día actual."
-			}
+						"description": "Lista entradas de la lista de espera con filtros.\n\n**Filtros disponibles:** phone, status, cups_code, from, to, page, limit\n\n**Cuándo usar:** Ver quién está esperando turno para un procedimiento."
+					}
+				}
+			]
 		}
 	]
 }

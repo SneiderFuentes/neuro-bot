@@ -360,6 +360,7 @@ func main() {
 		if schedulerTasks != nil {
 			internalHandler.SetReminderRunner(schedulerTasks)
 		}
+		internalHandler.SetSessionReader(sessionRepo)
 	}
 
 	// HTTP Server
@@ -388,6 +389,8 @@ func main() {
 		internalMux.HandleFunc("POST /api/internal/test-voice-call", internalHandler.HandleTestVoiceCall)
 		internalMux.HandleFunc("GET /api/internal/logs", internalHandler.HandleLogs)
 		internalMux.HandleFunc("GET /api/internal/events", internalHandler.HandleEvents)
+		internalMux.HandleFunc("GET /api/internal/sessions", internalHandler.HandleSessions)
+		internalMux.HandleFunc("GET /api/internal/sessions/context", internalHandler.HandleSessionContext)
 		mux.Handle("/api/internal/",
 			api.RateLimiter(30, time.Minute)(
 				api.MaxBodySize(

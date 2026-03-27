@@ -713,15 +713,39 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 		proceduresJSON := sess.GetContext("procedures_json")
 		var groups []services.CUPSGroup
 		if err := json.Unmarshal([]byte(proceduresJSON), &groups); err != nil {
-			slog.Error("create_appointment_invalid_procedures_json",
-				"session_id", sess.ID,
-				"phone", msg.Phone,
-				"error", err,
-				"procedures_json_preview", truncate(proceduresJSON, 150),
-			)
-			return sm.NewResult(sm.StateBookingFailed).
-				WithContext("booking_failure_reason", "error").
-				WithEvent("appointment_create_error", map[string]interface{}{"error": "invalid procedures_json"}), nil
+			// Defensive fallback: rebuild from individual context keys
+			cupsCode := sess.GetContext("cups_code")
+			cupsName := sess.GetContext("cups_name")
+			espacios, _ := strconv.Atoi(sess.GetContext("espacios"))
+			if espacios == 0 {
+				espacios = 1
+			}
+			if cupsCode != "" {
+				slog.Warn("procedures_json_recovered_from_context",
+					"session_id", sess.ID,
+					"phone", msg.Phone,
+					"cups_code", cupsCode,
+					"original_error", err,
+				)
+				groups = []services.CUPSGroup{{
+					ServiceType: "general",
+					Cups:        []services.CUPSEntry{{Code: cupsCode, Name: cupsName, Quantity: 1}},
+					Espacios:    espacios,
+				}}
+				// Re-persist so advanceToNextProcedure can find it
+				recovered, _ := json.Marshal(groups)
+				sess.SetContext("procedures_json", string(recovered))
+			} else {
+				slog.Error("create_appointment_invalid_procedures_json",
+					"session_id", sess.ID,
+					"phone", msg.Phone,
+					"error", err,
+					"procedures_json_preview", truncate(proceduresJSON, 150),
+				)
+				return sm.NewResult(sm.StateBookingFailed).
+					WithContext("booking_failure_reason", "error").
+					WithEvent("appointment_create_error", map[string]interface{}{"error": "invalid procedures_json"}), nil
+			}
 		}
 		
 		currentIdx, _ := strconv.Atoi(sess.GetContext("current_procedure_idx"))

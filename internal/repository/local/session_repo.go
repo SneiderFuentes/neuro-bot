@@ -331,6 +331,71 @@ func (r *SessionRepo) ClearAllContext(ctx context.Context, sessionID string) err
 	return nil
 }
 
+// FindByID returns a single session by its UUID.
+func (r *SessionRepo) FindByID(ctx context.Context, sessionID string) (*session.Session, error) {
+	query := `SELECT id, phone_number, current_state, status, menu_option,
+	          patient_id, patient_doc, patient_name, patient_age, patient_gender, patient_entity,
+	          retry_count, conversation_id, escalated_at, escalated_team, resumed_at,
+	          last_activity_at, expires_at, created_at
+	          FROM sessions WHERE id = ?`
+	return r.scanSession(ctx, query, sessionID)
+}
+
+// FindRecentByPhone returns the last N sessions for a phone, any status.
+func (r *SessionRepo) FindRecentByPhone(ctx context.Context, phone string, limit int) ([]session.Session, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, phone_number, current_state, status, menu_option,
+		 patient_id, patient_doc, patient_name, patient_age, patient_gender, patient_entity,
+		 retry_count, conversation_id, escalated_at, escalated_team, resumed_at,
+		 last_activity_at, expires_at, created_at
+		 FROM sessions WHERE phone_number = ? ORDER BY created_at DESC LIMIT ?`, phone, limit)
+	if err != nil {
+		return nil, fmt.Errorf("find recent by phone: %w", err)
+	}
+	defer rows.Close()
+
+	var result []session.Session
+	for rows.Next() {
+		var s session.Session
+		var menuOption, patientID, patientDoc, patientName, patientGender, patientEntity, conversationID sql.NullString
+		var escalatedTeam sql.NullString
+		var escalatedAt, resumedAt sql.NullTime
+		var patientAge sql.NullInt32
+
+		if err := rows.Scan(
+			&s.ID, &s.PhoneNumber, &s.CurrentState, &s.Status, &menuOption,
+			&patientID, &patientDoc, &patientName, &patientAge, &patientGender, &patientEntity,
+			&s.RetryCount, &conversationID, &escalatedAt, &escalatedTeam, &resumedAt,
+			&s.LastActivity, &s.ExpiresAt, &s.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan session row: %w", err)
+		}
+
+		s.MenuOption = menuOption.String
+		s.PatientID = patientID.String
+		s.PatientDoc = patientDoc.String
+		s.PatientName = patientName.String
+		if patientAge.Valid {
+			s.PatientAge = int(patientAge.Int32)
+		}
+		s.PatientGender = patientGender.String
+		s.PatientEntity = patientEntity.String
+		s.ConversationID = conversationID.String
+		s.EscalatedTeam = escalatedTeam.String
+		if escalatedAt.Valid {
+			s.EscalatedAt = &escalatedAt.Time
+		}
+		if resumedAt.Valid {
+			s.ResumedAt = &resumedAt.Time
+		}
+		result = append(result, s)
+	}
+	return result, rows.Err()
+}
+
 // --- Helpers ---
 
 func nullString(s string) sql.NullString {

@@ -12,12 +12,13 @@ import (
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/config"
-	"github.com/neuro-bot/neuro-bot/internal/logging"
 	"github.com/neuro-bot/neuro-bot/internal/domain"
+	"github.com/neuro-bot/neuro-bot/internal/logging"
 	"github.com/neuro-bot/neuro-bot/internal/notifications"
 	"github.com/neuro-bot/neuro-bot/internal/repository"
 	localrepo "github.com/neuro-bot/neuro-bot/internal/repository/local"
 	"github.com/neuro-bot/neuro-bot/internal/services"
+	"github.com/neuro-bot/neuro-bot/internal/session"
 	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
@@ -51,6 +52,13 @@ type WaitingListReader interface {
 	List(ctx context.Context, filters domain.WaitingListFilters, page, pageSize int) ([]domain.WaitingListEntry, int, error)
 }
 
+// SessionDebugReader provides read-only session queries for debug endpoints.
+type SessionDebugReader interface {
+	FindByID(ctx context.Context, sessionID string) (*session.Session, error)
+	FindRecentByPhone(ctx context.Context, phone string, limit int) ([]session.Session, error)
+	GetAllContext(ctx context.Context, sessionID string) (map[string]string, error)
+}
+
 // InternalEventLogger logs events for auditing (matches tracking.EventTracker).
 type InternalEventLogger interface {
 	LogEvent(ctx context.Context, sessionID, phone, eventType string, data map[string]interface{})
@@ -69,7 +77,8 @@ type InternalHandler struct {
 	tracker         InternalEventLogger
 	cfg             *config.Config
 	startTime       time.Time
-	reminderRunner  ReminderRunner // optional: manual trigger for WA reminders
+	reminderRunner  ReminderRunner      // optional: manual trigger for WA reminders
+	sessionReader   SessionDebugReader  // optional: session debug queries
 }
 
 // NewInternalHandler creates a new internal handler.
@@ -104,6 +113,11 @@ func NewInternalHandler(
 // SetReminderRunner injects the task runner for manual reminder triggers.
 func (h *InternalHandler) SetReminderRunner(r ReminderRunner) {
 	h.reminderRunner = r
+}
+
+// SetSessionReader injects the session debug reader for session/context queries.
+func (h *InternalHandler) SetSessionReader(r SessionDebugReader) {
+	h.sessionReader = r
 }
 
 // HandleSendReminders manually triggers the WhatsApp confirmation reminders task.
@@ -1043,6 +1057,124 @@ func (h *InternalHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 		"count":  len(result),
 		"events": result,
 	})
+}
+
+// HandleSessions returns recent sessions for a phone or a single session by ID.
+// GET /api/internal/sessions?phone=+573001234567&limit=10
+// GET /api/internal/sessions?id=<session-uuid>
+func (h *InternalHandler) HandleSessions(w http.ResponseWriter, r *http.Request) {
+	if h.sessionReader == nil {
+		http.Error(w, `{"error":"session reader not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+	ctx := r.Context()
+
+	// Query by ID (single session + context)
+	if id := r.URL.Query().Get("id"); id != "" {
+		sess, err := h.sessionReader.FindByID(ctx, id)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		if sess == nil {
+			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+			return
+		}
+		ctxMap, _ := h.sessionReader.GetAllContext(ctx, id)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"session": sessionToJSON(sess),
+			"context": ctxMap,
+		})
+		return
+	}
+
+	// Query by phone (list)
+	phone := r.URL.Query().Get("phone")
+	if phone == "" {
+		http.Error(w, `{"error":"'phone' or 'id' query parameter required"}`, http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(phone, "+") {
+		phone = "+" + phone
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 10
+	}
+
+	sessions, err := h.sessionReader.FindRecentByPhone(ctx, phone, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	result := make([]map[string]interface{}, len(sessions))
+	for i := range sessions {
+		result[i] = sessionToJSON(&sessions[i])
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"phone":    phone,
+		"count":    len(result),
+		"sessions": result,
+	})
+}
+
+// HandleSessionContext returns all context key-values for a given session ID.
+// GET /api/internal/sessions/context?id=<session-uuid>
+func (h *InternalHandler) HandleSessionContext(w http.ResponseWriter, r *http.Request) {
+	if h.sessionReader == nil {
+		http.Error(w, `{"error":"session reader not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, `{"error":"'id' query parameter required"}`, http.StatusBadRequest)
+		return
+	}
+
+	ctxMap, err := h.sessionReader.GetAllContext(r.Context(), id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"session_id": id,
+		"count":      len(ctxMap),
+		"context":    ctxMap,
+	})
+}
+
+func sessionToJSON(s *session.Session) map[string]interface{} {
+	m := map[string]interface{}{
+		"id":              s.ID,
+		"phone":           s.PhoneNumber,
+		"current_state":   s.CurrentState,
+		"status":          s.Status,
+		"menu_option":     s.MenuOption,
+		"patient_id":      s.PatientID,
+		"patient_doc":     s.PatientDoc,
+		"patient_name":    s.PatientName,
+		"patient_entity":  s.PatientEntity,
+		"retry_count":     s.RetryCount,
+		"conversation_id": s.ConversationID,
+		"last_activity":   s.LastActivity.Format(time.RFC3339),
+		"expires_at":      s.ExpiresAt.Format(time.RFC3339),
+		"created_at":      s.CreatedAt.Format(time.RFC3339),
+	}
+	if s.EscalatedAt != nil {
+		m["escalated_at"] = s.EscalatedAt.Format(time.RFC3339)
+		m["escalated_team"] = s.EscalatedTeam
+	}
+	if s.ResumedAt != nil {
+		m["resumed_at"] = s.ResumedAt.Format(time.RFC3339)
+	}
+	return m
 }
 
 // parseFlexTime parses datetime in flexible formats.

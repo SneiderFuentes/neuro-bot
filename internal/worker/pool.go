@@ -902,7 +902,18 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 	}
 
 	if err := p.sessionManager.SaveState(ctx, sess, result.NextState, result.UpdateCtx, result.ClearCtx); err != nil {
-		slog.Error("save state error", "phone", phone, "session_id", sess.ID, "conversation_id", convID, "error", err)
+		ctxKeys := make([]string, 0, len(result.UpdateCtx))
+		for k := range result.UpdateCtx {
+			ctxKeys = append(ctxKeys, k)
+		}
+		slog.Error("save_state_error",
+			"phone", phone,
+			"session_id", sess.ID,
+			"conversation_id", convID,
+			"next_state", result.NextState,
+			"context_keys", ctxKeys,
+			"error", err,
+		)
 	}
 
 	// Close feed items in Bird Inbox when session completes (bot-driven termination).
