@@ -461,7 +461,7 @@ func (r *AppointmentRepo) CountMonthlyByGroup(ctx context.Context, cupsCodes []s
 		args[i] = c
 	}
 
-	query := fmt.Sprintf(`SELECT COUNT(DISTINCT c.IdCita) FROM citas c
+	query := fmt.Sprintf(`SELECT COALESCE(SUM(px.Cantidad), 0) FROM citas c
 	          INNER JOIN pxcita px ON px.IdCita = c.IdCita
 	          WHERE px.CUPS IN (%s)
 	            AND MONTH(c.FeCita) = ?
