@@ -255,6 +255,20 @@ func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo rep
 				espacios = 1
 			}
 
+			// Build procedures_json required by createAppointmentHandler
+			cups := make([]services.CUPSEntry, 0, len(selectedAppt.Procedures))
+			for _, p := range selectedAppt.Procedures {
+				cups = append(cups, services.CUPSEntry{
+					Code: p.CupCode, Name: p.CupName, Quantity: 1,
+				})
+			}
+			groups := []services.CUPSGroup{{
+				ServiceType: "general",
+				Cups:        cups,
+				Espacios:    espacios,
+			}}
+			proceduresJSON, _ := json.Marshal(groups)
+
 			return sm.NewResult(sm.StateSearchSlots).
 				WithContext("cups_code", cupsCode).
 				WithContext("cups_name", cupsName).
@@ -266,6 +280,7 @@ func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo rep
 				WithContext("current_procedure_idx", "0").
 				WithContext("reschedule_appt_id", selectedAppt.ID).
 				WithContext("patient_age", "0").
+				WithContext("procedures_json", string(proceduresJSON)).
 				WithText("Buscando horarios disponibles para reprogramar tu cita de *"+cupsName+"*...").
 				WithEvent("appointment_reschedule_started", map[string]interface{}{
 					"old_appt_id": selectedAppt.ID,
