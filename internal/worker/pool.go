@@ -384,6 +384,16 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 		}
 	}
 
+	// Log warning if conversation_id is still empty after all resolution attempts
+	if sess.ConversationID == "" && !isNew {
+		slog.Warn("conversation_id_still_empty",
+			"session_id", sess.ID,
+			"phone", msg.Phone,
+			"state", sess.CurrentState,
+			"msg_conv_id", msg.ConversationID,
+		)
+	}
+
 	slog.Debug("session_state",
 		"session_id", sess.ID,
 		"phone", msg.Phone,
@@ -882,6 +892,21 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 		slog.Debug("message_sent_ok", "phone", phone, "type", outMsg.Type(), "bird_msg_id", birdMsgID)
 		if p.tracker != nil {
 			p.tracker.LogMessageSent(ctx, sess.ID, phone, outMsg.Type(), birdMsgID)
+		}
+	}
+
+	// Post-loop: capture conversation_id from Channels API response.
+	// For single-message results, the in-loop cache check runs before the send
+	// (cache empty), so the conversationId from the API response is missed.
+	// This final check ensures it's captured and persisted by SaveState below.
+	if sess.ConversationID == "" {
+		if cached := p.birdClient.GetCachedConversationID(phone); cached != "" {
+			sess.ConversationID = cached
+			slog.Info("conversation_id_captured_post_send",
+				"session_id", sess.ID,
+				"phone", phone,
+				"conversation_id", cached,
+			)
 		}
 	}
 

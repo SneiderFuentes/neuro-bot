@@ -61,9 +61,29 @@ func escalateHandler(birdClient *bird.Client, cfg *config.Config) sm.StateHandle
 		// The Channels API response contains conversationId which gets cached.
 		patientNotified := false
 		if conversationID == "" {
-			birdClient.SendText(msg.Phone, "", "Te voy a conectar con un agente. Un momento por favor...")
+			slog.Warn("escalation_no_conversation_id",
+				"session_id", sess.ID,
+				"phone", msg.Phone,
+				"msg_conv_id", msg.ConversationID,
+				"sess_conv_id", sess.ConversationID,
+			)
+			_, sendErr := birdClient.SendText(msg.Phone, "", "Te voy a conectar con un agente. Un momento por favor...")
 			patientNotified = true
+			if sendErr != nil {
+				slog.Error("escalation_pre_send_failed",
+					"phone", msg.Phone,
+					"session_id", sess.ID,
+					"error", sendErr,
+				)
+			}
+			// Check cache — Channels API response should have populated it
 			conversationID = birdClient.GetCachedConversationID(msg.Phone)
+			// If cache still empty, try explicit API lookup as last resort
+			if conversationID == "" && sendErr == nil {
+				if looked, lookErr := birdClient.LookupConversationByPhone(msg.Phone); lookErr == nil && looked != "" {
+					conversationID = looked
+				}
+			}
 			if conversationID != "" {
 				sess.ConversationID = conversationID
 			}
