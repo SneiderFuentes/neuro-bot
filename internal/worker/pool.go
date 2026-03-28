@@ -325,6 +325,9 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 
 	if isNew {
 		slog.Info("new session created", "session_id", sess.ID, "phone", msg.Phone)
+		if p.tracker != nil {
+			p.tracker.LogEvent(parentCtx, sess.ID, msg.Phone, "session_started", nil)
+		}
 	}
 
 	// 3b. Store conversationId from Bird webhook (needed for escalation)

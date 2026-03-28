@@ -40,6 +40,8 @@ type NotificationCounter interface {
 // EventKPIReader provides KPI and analytics queries (enables testing without DB).
 type EventKPIReader interface {
 	GetDailyKPIs(ctx context.Context, date time.Time) (*localrepo.DailyKPIs, error)
+	GetNotificationBreakdown(ctx context.Context, date time.Time) (*localrepo.NotificationBreakdown, error)
+	GetAppointmentBreakdown(ctx context.Context, date time.Time) (*localrepo.AppointmentBreakdown, error)
 	GetFunnel(ctx context.Context, from, to time.Time) (*localrepo.FunnelData, error)
 	GetHealthMetrics(ctx context.Context) (*localrepo.HealthMetrics, error)
 	FindByPhone(ctx context.Context, phone string, from, to time.Time, eventType string, maxRows int) ([]localrepo.ChatEvent, error)
@@ -744,8 +746,15 @@ func (h *InternalHandler) HandleDailyKPIs(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	breakdown, _ := h.eventRepo.GetNotificationBreakdown(r.Context(), date)
+	apptBreakdown, _ := h.eventRepo.GetAppointmentBreakdown(r.Context(), date)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(kpis)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"kpis":                     kpis,
+		"notification_breakdown":   breakdown,
+		"appointment_breakdown":    apptBreakdown,
+	})
 }
 
 // HandleWeeklyKPIs returns aggregated KPI metrics for an ISO week.
@@ -813,10 +822,15 @@ func (h *InternalHandler) HandleWeeklyKPIs(w http.ResponseWriter, r *http.Reques
 		aggregate.AdminAgendasCancelled += daily.AdminAgendasCancelled
 		aggregate.AdminAgendasRescheduled += daily.AdminAgendasRescheduled
 		aggregate.RescheduleConfirmed += daily.RescheduleConfirmed
-		aggregate.RescheduleCancelled += daily.RescheduleCancelled
 		aggregate.CancelAcknowledged += daily.CancelAcknowledged
-		aggregate.CancelRescheduleRequested += daily.CancelRescheduleRequested
 		aggregate.RescheduleSelfService += daily.RescheduleSelfService
+		aggregate.NotificationEscalated += daily.NotificationEscalated
+		aggregate.IVRConfirmed += daily.IVRConfirmed
+		aggregate.IVRCancelled += daily.IVRCancelled
+		aggregate.WaitingListAccepted += daily.WaitingListAccepted
+		aggregate.WaitingListDeclined += daily.WaitingListDeclined
+		aggregate.TotalMessagesSent += daily.TotalMessagesSent
+		aggregate.NoSlotsFound += daily.NoSlotsFound
 		aggregate.AvgSessionDuration += daily.AvgSessionDuration
 	}
 

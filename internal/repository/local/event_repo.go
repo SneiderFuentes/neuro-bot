@@ -148,21 +148,30 @@ type DailyKPIs struct {
 	AvgSessionDuration    float64 `json:"avg_session_duration_min"`
 	OutOfHoursAttempts    int     `json:"out_of_hours_attempts"`
 	MaxRetriesReached     int     `json:"max_retries_reached"`
-	ProactivesSent        int     `json:"proactives_sent"`
-	ProactivesConfirmed   int     `json:"proactives_confirmed"`
-	ProactivesCancelled   int     `json:"proactives_cancelled"`
-	ProactivesNoResponse  int     `json:"proactives_no_response"`
-	IVRCallsSent          int     `json:"ivr_calls_sent"`
-	WaitingListJoined     int     `json:"waiting_list_joined"`
-	WaitingListScheduled  int     `json:"waiting_list_scheduled"`
+	// Notification KPIs
+	ProactivesSent        int `json:"proactives_sent"`
+	ProactivesConfirmed   int `json:"proactives_confirmed"`
+	ProactivesCancelled   int `json:"proactives_cancelled"`
+	ProactivesNoResponse  int `json:"proactives_no_response"`
+	NotificationEscalated int `json:"notification_escalated"`
+	// IVR KPIs
+	IVRCallsSent int `json:"ivr_calls_sent"`
+	IVRConfirmed int `json:"ivr_confirmed"`
+	IVRCancelled int `json:"ivr_cancelled"`
+	// Waiting list KPIs
+	WaitingListJoined    int `json:"waiting_list_joined"`
+	WaitingListScheduled int `json:"waiting_list_scheduled"`
+	WaitingListAccepted  int `json:"waiting_list_accepted"`
+	WaitingListDeclined  int `json:"waiting_list_declined"`
 	// Admin flow KPIs
-	AdminAgendasCancelled     int `json:"admin_agendas_cancelled"`
-	AdminAgendasRescheduled   int `json:"admin_agendas_rescheduled"`
-	RescheduleConfirmed       int `json:"reschedule_confirmed"`
-	RescheduleCancelled       int `json:"reschedule_cancelled"`
-	CancelAcknowledged        int `json:"cancel_acknowledged"`
-	CancelRescheduleRequested int `json:"cancel_reschedule_requested"`
-	RescheduleSelfService     int `json:"reschedule_self_service"`
+	AdminAgendasCancelled   int `json:"admin_agendas_cancelled"`
+	AdminAgendasRescheduled int `json:"admin_agendas_rescheduled"`
+	RescheduleConfirmed     int `json:"reschedule_confirmed"`
+	CancelAcknowledged      int `json:"cancel_acknowledged"`
+	RescheduleSelfService   int `json:"reschedule_self_service"`
+	// Operational KPIs
+	TotalMessagesSent int `json:"total_messages_sent"`
+	NoSlotsFound      int `json:"no_slots_found"`
 }
 
 // GetDailyKPIs returns aggregated KPI metrics for a given date.
@@ -192,7 +201,7 @@ func (r *EventRepo) GetDailyKPIs(ctx context.Context, date time.Time) (*DailyKPI
 			kpis.TotalSessions = count
 		case "session_completed":
 			kpis.CompletedSessions = count
-		case "session_timeout":
+		case "session_closed_inactivity": // Bug 2 fix
 			kpis.AbandonedSessions = count
 		case "escalated_to_agent":
 			kpis.EscalatedSessions = count
@@ -221,30 +230,40 @@ func (r *EventRepo) GetDailyKPIs(ctx context.Context, date time.Time) (*DailyKPI
 			kpis.ProactivesSent = count
 		case "notification_confirmed":
 			kpis.ProactivesConfirmed = count
-		case "notification_cancelled":
+		case "notification_cancel_confirmed": // Bug 3 fix
 			kpis.ProactivesCancelled = count
 		case "notification_timeout":
 			kpis.ProactivesNoResponse = count
+		case "notification_escalated_agent":
+			kpis.NotificationEscalated = count
 		case "notification_ivr_sent":
 			kpis.IVRCallsSent = count
+		case "notification_confirmed_ivr":
+			kpis.IVRConfirmed = count
+		case "notification_cancelled_ivr":
+			kpis.IVRCancelled = count
 		case "admin_cancel_agenda":
 			kpis.AdminAgendasCancelled = count
 		case "admin_reschedule_agenda":
 			kpis.AdminAgendasRescheduled = count
 		case "notification_reschedule_confirmed":
 			kpis.RescheduleConfirmed = count
-		case "notification_reschedule_cancelled":
-			kpis.RescheduleCancelled = count
 		case "notification_cancel_acknowledged":
 			kpis.CancelAcknowledged = count
-		case "notification_cancel_reschedule_requested":
-			kpis.CancelRescheduleRequested = count
 		case "notification_reschedule_self_service":
 			kpis.RescheduleSelfService = count
 		case "waiting_list_joined":
 			kpis.WaitingListJoined = count
 		case "waiting_list_booking_success":
 			kpis.WaitingListScheduled = count
+		case "waiting_list_schedule_accepted":
+			kpis.WaitingListAccepted = count
+		case "waiting_list_schedule_declined":
+			kpis.WaitingListDeclined = count
+		case "message_sent":
+			kpis.TotalMessagesSent = count
+		case "no_slots_found":
+			kpis.NoSlotsFound = count
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -258,10 +277,101 @@ func (r *EventRepo) GetDailyKPIs(ctx context.Context, date time.Time) (*DailyKPI
 			ce.created_at
 		 )), 0)
 		 FROM chat_events ce
-		 WHERE ce.event_type IN ('session_completed', 'session_timeout')
+		 WHERE ce.event_type IN ('session_completed', 'session_closed_inactivity')
 		 AND DATE(ce.created_at) = ?`, dateStr).Scan(&kpis.AvgSessionDuration)
 
 	return kpis, nil
+}
+
+// NotificationBreakdown contains notification_sent counts by notification type.
+type NotificationBreakdown struct {
+	Confirmation int `json:"confirmation"`
+	Reschedule   int `json:"reschedule"`
+	Cancellation int `json:"cancellation"`
+	WaitingList  int `json:"waiting_list"`
+}
+
+// GetNotificationBreakdown returns notification_sent counts broken down by type for a date.
+func (r *EventRepo) GetNotificationBreakdown(ctx context.Context, date time.Time) (*NotificationBreakdown, error) {
+	dateStr := date.Format("2006-01-02")
+	bd := &NotificationBreakdown{}
+
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.type')) AS ntype, COUNT(*) AS cnt
+		 FROM chat_events
+		 WHERE DATE(created_at) = ? AND event_type = 'notification_sent'
+		 GROUP BY ntype`, dateStr)
+	if err != nil {
+		return nil, fmt.Errorf("get notification breakdown: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ntype sql.NullString
+		var count int
+		if err := rows.Scan(&ntype, &count); err != nil {
+			return nil, fmt.Errorf("scan notification breakdown: %w", err)
+		}
+		switch ntype.String {
+		case "confirmation":
+			bd.Confirmation = count
+		case "reschedule":
+			bd.Reschedule = count
+		case "cancellation":
+			bd.Cancellation = count
+		case "waiting_list":
+			bd.WaitingList = count
+		}
+	}
+	return bd, rows.Err()
+}
+
+// AppointmentBreakdown contains appointment_created counts by service type and CUPS code.
+type AppointmentBreakdown struct {
+	ByService map[string]int `json:"by_service"`
+	ByCups    map[string]int `json:"by_cups"`
+}
+
+// GetAppointmentBreakdown returns appointment_created counts broken down by service and CUPS for a date.
+func (r *EventRepo) GetAppointmentBreakdown(ctx context.Context, date time.Time) (*AppointmentBreakdown, error) {
+	dateStr := date.Format("2006-01-02")
+	bd := &AppointmentBreakdown{
+		ByService: make(map[string]int),
+		ByCups:    make(map[string]int),
+	}
+
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT
+			JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.service_type')) AS service_type,
+			JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.cups_code')) AS cups_code,
+			JSON_UNQUOTE(JSON_EXTRACT(event_data, '$.cups_name')) AS cups_name,
+			COUNT(*) AS cnt
+		 FROM chat_events
+		 WHERE DATE(created_at) = ? AND event_type = 'appointment_created'
+		 GROUP BY service_type, cups_code, cups_name`, dateStr)
+	if err != nil {
+		return nil, fmt.Errorf("get appointment breakdown: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var serviceType, cupsCode, cupsName sql.NullString
+		var count int
+		if err := rows.Scan(&serviceType, &cupsCode, &cupsName, &count); err != nil {
+			return nil, fmt.Errorf("scan appointment breakdown: %w", err)
+		}
+		if serviceType.Valid && serviceType.String != "" {
+			bd.ByService[serviceType.String] += count
+		}
+		if cupsCode.Valid && cupsCode.String != "" {
+			key := cupsCode.String
+			if cupsName.Valid && cupsName.String != "" {
+				key += " - " + cupsName.String
+			}
+			bd.ByCups[key] += count
+		}
+	}
+	return bd, rows.Err()
 }
 
 // FunnelData contains conversion funnel metrics.

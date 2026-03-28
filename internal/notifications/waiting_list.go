@@ -88,6 +88,13 @@ func (m *NotificationManager) handleWaitingList(phone, action string, pending *P
 		// Encolar mensaje virtual para que el worker pool ejecute SEARCH_SLOTS
 		m.workerPool.EnqueueVirtual(phone)
 
+		if m.tracker != nil {
+			m.tracker.LogEvent(ctx, sess.ID, phone, "waiting_list_schedule_accepted", map[string]interface{}{
+				"waiting_list_id": pending.WaitingListID,
+				"cups_code":       entry.CupsCode,
+			})
+		}
+
 		slog.Info("waiting list session created",
 			"phone", phone,
 			"entry_id", entry.ID,
@@ -101,6 +108,12 @@ func (m *NotificationManager) handleWaitingList(phone, action string, pending *P
 
 		if pending.ConversationID != "" {
 			m.birdClient.CloseFeedItems(pending.ConversationID)
+		}
+
+		if m.tracker != nil {
+			m.tracker.LogEvent(ctx, "", phone, "waiting_list_schedule_declined", map[string]interface{}{
+				"waiting_list_id": pending.WaitingListID,
+			})
 		}
 
 		slog.Info("waiting list declined", "phone", phone, "entry_id", pending.WaitingListID)

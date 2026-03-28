@@ -41,6 +41,7 @@ func askMedicalOrderHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		return sm.NewResult(sm.StateUploadMedicalOrder).
 			WithText("Envía una *foto clara* o *PDF* de tu orden médica.\n\nAsegúrate de que:\n- Se vean bien los procedimientos\n- La foto no esté borrosa\n- Se lea el texto").
+			WithEvent("order_method_selected", map[string]interface{}{"method": "photo"}).
 			WithEvent("order_photo_requested", nil), nil
 	}
 }

@@ -961,17 +961,29 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 			}
 		}
 
-		return sm.NewResult(sm.StateBookingSuccess).
+		result := sm.NewResult(sm.StateBookingSuccess).
 			WithContext("created_appointment_id", apptID).
 			WithEvent("appointment_created", map[string]interface{}{
 				"appointment_id":  apptID,
 				"cups_codes":      len(procedures),
+				"cups_code":       sess.GetContext("cups_code"),
+				"cups_name":       sess.GetContext("cups_name"),
+				"service_type":    currentGroup.ServiceType,
 				"date":            slot.Date,
 				"time":            slot.TimeDisplay,
 				"doctor":          slot.DoctorName,
 				"espacios":        espacios,
 				"reschedule_from": rescheduleApptID,
-			}), nil
+			})
+
+		if wlID := sess.GetContext("waiting_list_entry_id"); wlID != "" {
+			result.WithEvent("waiting_list_booking_success", map[string]interface{}{
+				"waiting_list_id": wlID,
+				"appointment_id":  apptID,
+			})
+		}
+
+		return result, nil
 	}
 }
 
