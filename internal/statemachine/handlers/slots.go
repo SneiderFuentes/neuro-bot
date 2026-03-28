@@ -254,7 +254,9 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 			msgText.WriteString(fmt.Sprintf("%d. %s a las %s%s\n", optionNum, dateStr, slot.TimeDisplay, doctorInfo))
 		}
 		
-		msgText.WriteString(fmt.Sprintf("\n%d. Ver más horarios\n", len(slots)+1))
+		if len(slots) >= 5 {
+			msgText.WriteString(fmt.Sprintf("\n%d. Ver más horarios\n", len(slots)+1))
+		}
 		msgText.WriteString("\n💬 Escribe el número de tu opción:")
 
 		return sm.NewResult(sm.StateShowSlots).
@@ -363,10 +365,15 @@ func noSlotsHandler(wlRepo WaitingListCreator) sm.StateHandler {
 		}
 
 		// Cambio 12b: Self-reschedule from active appointment (confirmation/reschedule template).
-		// The old appointment is still active → don't offer WL (patient still has their slot).
+		// The old appointment is still active → offer Confirmar/Cancelar (not WL).
 		if sess.GetContext("reschedule_appt_id") != "" {
-			return buildAutoCloseResult("No hay horarios disponibles para *"+cupsName+"* en otra fecha.\n\n"+
-				"Tu cita original sigue vigente.").
+			return sm.NewResult(sm.StateNotifPending).
+				WithButtons(
+					fmt.Sprintf("No hay horarios disponibles para *%s* en otra fecha.\n\nTu cita original sigue vigente. ¿Qué deseas hacer?", cupsName),
+					sm.Button{Text: "Confirmar cita", Payload: "confirm"},
+					sm.Button{Text: "Reprogramar", Payload: "reschedule"},
+					sm.Button{Text: "Cancelar cita", Payload: "cancel"},
+				).
 				WithEvent("no_slots_reschedule_active", map[string]interface{}{
 					"cups_code":          sess.GetContext("cups_code"),
 					"reschedule_appt_id": sess.GetContext("reschedule_appt_id"),
@@ -615,8 +622,12 @@ func confirmBookingHandler() sm.StateHandler {
 
 		switch selected {
 		case "booking_confirm":
+			confirmMsg := "¿Estás seguro de *confirmar* esta cita?"
+			if sess.GetContext("reschedule_appt_id") != "" {
+				confirmMsg = "⚠️ Al confirmar, tu cita actual será *cancelada* y se asignará este nuevo horario.\n\n¿Deseas continuar con la reprogramación?"
+			}
 			return sm.NewResult(sm.StateReconfirmBooking).
-				WithButtons("¿Estás seguro de *confirmar* esta cita?",
+				WithButtons(confirmMsg,
 					sm.Button{Text: "Sí, confirmar", Payload: "reconfirm_yes"},
 					sm.Button{Text: "No, volver", Payload: "reconfirm_no"},
 				).
@@ -659,7 +670,20 @@ func reconfirmBookingHandler(addrMapper *services.AddressMapper) sm.StateHandler
 				WithEvent("booking_confirmed", nil), nil
 
 		case "reconfirm_no":
-			// Re-mostrar resumen de la cita
+			// Reschedule: volver al menú principal de notificación
+			if sess.GetContext("reschedule_appt_id") != "" {
+				return sm.NewResult(sm.StateNotifPending).
+					WithButtons(
+						fmt.Sprintf("Entendido, tu cita actual no será modificada.\n\n📅 *Fecha:* %s\n🕐 *Hora:* %s\n💊 *Procedimiento:* %s\n\n¿Qué deseas hacer?",
+							sess.GetContext("notif_appt_date"), sess.GetContext("notif_appt_time"), sess.GetContext("notif_cups_name")),
+						sm.Button{Text: "Confirmar cita", Payload: "confirm"},
+						sm.Button{Text: "Reprogramar", Payload: "reschedule"},
+						sm.Button{Text: "Cancelar cita", Payload: "cancel"},
+					).
+					WithClearCtx("selected_slot_id", "available_slots_json", "slots_after_date").
+					WithEvent("reschedule_declined_at_reconfirm", nil), nil
+			}
+			// Cita nueva: volver al resumen con Confirmar/Elegir otro
 			slot := findSelectedSlot(sess)
 			if slot == nil {
 				return sm.NewResult(sm.StateSearchSlots).

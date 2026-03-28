@@ -489,7 +489,7 @@ func (r *AppointmentRepo) FindPendingByDate(ctx context.Context, date string) ([
 	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
 	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
 	          LEFT JOIN pacientes p ON p.NumeroPaciente = c.NumeroPaciente
-	          WHERE c.FeCita = ? AND c.Cancelada = 0 AND c.Remonte = 0 AND c.Confirmada = 0
+	          WHERE c.FeCita = ? AND c.Cancelada = 0 AND c.Remonte = 0
 	          ORDER BY c.FechaCita`
 
 	rows, err := r.db.QueryContext(ctx, query, date)

@@ -82,7 +82,7 @@ func (m *NotificationManager) handleWaitingList(phone, action string, pending *P
 			return
 		}
 
-		m.birdClient.SendText(phone, "",
+		m.birdClient.SendText(phone, pending.ConversationID,
 			"Vamos a buscar horarios disponibles para *"+entry.CupsName+"*...")
 
 		// Encolar mensaje virtual para que el worker pool ejecute SEARCH_SLOTS
@@ -100,7 +100,7 @@ func (m *NotificationManager) handleWaitingList(phone, action string, pending *P
 			"Entendido. Si cambias de opinion, puedes escribirnos para agendar tu cita.")
 
 		if pending.ConversationID != "" {
-			m.birdClient.UpdateFeedItem(pending.ConversationID, pending.BirdMessageID, true, "", "")
+			m.birdClient.CloseFeedItems(pending.ConversationID)
 		}
 
 		slog.Info("waiting list declined", "phone", phone, "entry_id", pending.WaitingListID)

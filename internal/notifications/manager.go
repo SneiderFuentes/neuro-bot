@@ -44,6 +44,7 @@ type SessionCreator interface {
 	Create(ctx context.Context, s *session.Session) error
 	SetContextBatch(ctx context.Context, sessionID string, kvs map[string]string) error
 	UpdateStatus(ctx context.Context, sessionID, status string) error
+	CompleteActiveByPhone(ctx context.Context, phone string) error
 }
 
 // VirtualEnqueuer enqueues virtual messages for the worker pool.
@@ -223,7 +224,20 @@ func (m *NotificationManager) HandleResponse(phone, payload, conversationID stri
 
 	pending := val.(*PendingNotification)
 	pending.Timer.Stop()
-	pending.ConversationID = conversationID
+	// Only overwrite if the webhook provides a non-empty conversationID.
+	// Template responses often arrive without conversationId; don't lose the
+	// stored value from the original template send or outbound webhook.
+	if conversationID != "" {
+		pending.ConversationID = conversationID
+	}
+	// If still empty, try cache (outbound webhook may have populated it) or API lookup
+	if pending.ConversationID == "" {
+		if cached := m.birdClient.GetCachedConversationID(phone); cached != "" {
+			pending.ConversationID = cached
+		} else if looked, err := m.birdClient.LookupConversationByPhone(phone); err == nil && looked != "" {
+			pending.ConversationID = looked
+		}
+	}
 
 	// Remove from DB
 	if m.persister != nil {
@@ -329,6 +343,13 @@ func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) b
 	convID := conversationID
 	if convID == "" {
 		convID = p.ConversationID
+	}
+	if convID == "" {
+		if cached := m.birdClient.GetCachedConversationID(phone); cached != "" {
+			convID = cached
+		} else if looked, lookErr := m.birdClient.LookupConversationByPhone(phone); lookErr == nil && looked != "" {
+			convID = looked
+		}
 	}
 
 	// Actualizar caché: el paciente puede estar en una conversación diferente al template
@@ -734,6 +755,16 @@ func (m *NotificationManager) handleTimeout(phone string) {
 	// Remove from DB (will be re-inserted if retry)
 	if m.persister != nil {
 		m.persister.Delete(context.Background(), phone)
+	}
+
+	// Resolve conversationID if still empty (template sends don't always return it).
+	// By timeout time, outbound webhooks or conversation.created may have populated the cache.
+	if pending.ConversationID == "" {
+		if cached := m.birdClient.GetCachedConversationID(phone); cached != "" {
+			pending.ConversationID = cached
+		} else if looked, err := m.birdClient.LookupConversationByPhone(phone); err == nil && looked != "" {
+			pending.ConversationID = looked
+		}
 	}
 
 	// Log timeout event

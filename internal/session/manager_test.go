@@ -111,6 +111,9 @@ func (r *mockRepo) ResumeSession(ctx context.Context, sessionID, newState string
 	}
 	return nil
 }
+func (r *mockRepo) CompleteActiveByPhone(ctx context.Context, phone string) error {
+	return nil
+}
 
 func newTestSession() *Session {
 	return &Session{

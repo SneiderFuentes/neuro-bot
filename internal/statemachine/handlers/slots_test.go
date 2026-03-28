@@ -697,10 +697,10 @@ func TestNoSlots_ActiveReschedule_NoWL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.NextState != sm.StateTerminated {
-		t.Errorf("expected TERMINATED, got %s", result.NextState)
+	if result.NextState != sm.StateNotifRescheduleFallback {
+		t.Errorf("expected NOTIF_RESCHEDULE_FALLBACK, got %s", result.NextState)
 	}
-	// Should NOT go to OFFER_WAITING_LIST (patient still has their appointment)
+	// Should show Confirmar/Cancelar buttons (patient still has their appointment)
 }
 
 func TestNoSlots_NormalFlow_NoAutoAdd(t *testing.T) {

@@ -55,8 +55,8 @@ func TestFetchAppointments_NoAppts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NextState != sm.StateNoAppointments {
-		t.Errorf("expected NO_APPOINTMENTS, got %s", result.NextState)
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED (auto-close), got %s", result.NextState)
 	}
 }
 

@@ -113,7 +113,14 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 		m.birdClient.SendText(phone, pending.ConversationID, msg)
 
 		if pending.ConversationID != "" {
-			m.birdClient.UpdateFeedItem(pending.ConversationID, pending.BirdMessageID, true, "", "")
+			m.birdClient.CloseFeedItems(pending.ConversationID)
+		}
+
+		// Close any active session so inactivity reminders don't fire
+		if m.sessionRepo != nil {
+			if err := m.sessionRepo.CompleteActiveByPhone(ctx, phone); err != nil {
+				slog.Error("confirm: close active session", "phone", phone, "error", err)
+			}
 		}
 
 		// Log event
@@ -317,6 +324,11 @@ func (m *NotificationManager) startConfirmRescheduleSession(phone string, pendin
 	}}
 	proceduresJSON, _ := json.Marshal(groups)
 
+	// Close any pre-existing session to avoid orphan inactivity timers
+	if err := m.sessionRepo.CompleteActiveByPhone(ctx, phone); err != nil {
+		slog.Error("startConfirmRescheduleSession: close old session", "phone", phone, "error", err)
+	}
+
 	sess := &session.Session{
 		ID:             uuid.New().String(),
 		PhoneNumber:    phone,
@@ -425,6 +437,11 @@ func (m *NotificationManager) startConfirmCancelSession(phone string, pending *P
 	cupsText := strings.Join(procNames, " y ")
 	if cupsText == "" {
 		cupsText = services.GetFirstCupName(*appt)
+	}
+
+	// Close any pre-existing session to avoid orphan inactivity timers
+	if err := m.sessionRepo.CompleteActiveByPhone(ctx, phone); err != nil {
+		slog.Error("startConfirmCancelSession: close old session", "phone", phone, "error", err)
 	}
 
 	sess := &session.Session{

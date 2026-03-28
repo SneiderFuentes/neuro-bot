@@ -27,6 +27,7 @@ type SessionRepo interface {
 	FindInactiveSessions(ctx context.Context, idleMinutes int) ([]InactiveSession, error)
 	FindExpiredEscalatedSessions(ctx context.Context) ([]ExpiredEscalatedSession, error)
 	MarkAbandoned(ctx context.Context, sessionID string) error
+	CompleteActiveByPhone(ctx context.Context, phone string) error
 }
 
 // InactivityBirdClient defines the Bird client methods needed by the inactivity checker.

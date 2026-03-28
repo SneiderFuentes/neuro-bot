@@ -669,6 +669,16 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume CONFIRM_CANCEL_NOTIF cancel_no — No, mantener la cita\n" +
 			"  /bot resume CONFIRM_CANCEL_NOTIF — Mostrar confirmacion de nuevo"
 
+	case sm.StateNotifRescheduleFallback:
+		apptDate := sess.GetContext("notif_appt_date")
+		apptTime := sess.GetContext("notif_appt_time")
+		cupsNotif := sess.GetContext("notif_cups_name")
+		situation = fmt.Sprintf("Paciente intento reprogramar pero no hay slots disponibles.\nCita: %s %s — %s\nPaciente: %s",
+			apptDate, apptTime, cupsNotif, patientName)
+		actions = "- Preguntale si desea confirmar o cancelar la cita:\n" +
+			"  /bot resume NOTIF_RESCHEDULE_FALLBACK confirm — Confirmar la cita\n" +
+			"  /bot resume NOTIF_RESCHEDULE_FALLBACK cancel — Cancelar la cita"
+
 	// --- Post-Accion y Cierre ---
 	case sm.StatePostActionMenu:
 		situation = "El paciente solicito hablar con un agente directamente."

@@ -150,6 +150,18 @@ func (r *SessionRepo) UpdateStatus(ctx context.Context, sessionID, status string
 	return nil
 }
 
+// CompleteActiveByPhone marks any active/escalated session for the given phone as completed.
+// Used by the notification handler to close leftover sessions after confirm/cancel.
+func (r *SessionRepo) CompleteActiveByPhone(ctx context.Context, phone string) error {
+	_, err := r.db.ExecContext(ctx,
+		"UPDATE sessions SET status = 'completed', updated_at = NOW() WHERE phone_number = ? AND status IN ('active','escalated') AND expires_at > NOW()",
+		phone)
+	if err != nil {
+		return fmt.Errorf("complete active by phone: %w", err)
+	}
+	return nil
+}
+
 // RenewExpiry renueva el expires_at
 func (r *SessionRepo) RenewExpiry(ctx context.Context, sessionID string, expiresAt time.Time) error {
 	_, err := r.db.ExecContext(ctx,

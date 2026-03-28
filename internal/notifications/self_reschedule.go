@@ -144,7 +144,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 	}
 
 	// 6. Send "searching..." message and enqueue virtual message
-	m.birdClient.SendText(phone, "", "Vamos a buscar horarios disponibles para *"+cupsName+"*...")
+	m.birdClient.SendText(phone, pending.ConversationID, "Vamos a buscar horarios disponibles para *"+cupsName+"*...")
 	m.workerPool.EnqueueVirtual(phone)
 
 	// 7. Log KPI event

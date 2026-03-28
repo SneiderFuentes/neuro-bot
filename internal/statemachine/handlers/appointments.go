@@ -31,18 +31,19 @@ func RegisterAppointmentHandlers(m *sm.Machine, apptSvc *services.AppointmentSer
 
 	// Flujos de confirmación desde notificaciones proactivas
 	confirmReschedulePrompt := func(sess *session.Session, result *sm.StateResult) {
-		result.WithText(fmt.Sprintf(
-			"¿Confirmas que deseas reprogramar tu cita?\n\n"+
-				"📅 *Fecha actual:* %s\n"+
-				"🕐 *Hora:* %s\n"+
-				"💊 *Procedimiento:* %s\n\n"+
-				"Responde con el número de tu elección:\n"+
-				"*1.* Sí, buscar nuevos horarios\n"+
-				"*2.* No, mantener mi cita",
-			sess.GetContext("notif_appt_date"),
-			sess.GetContext("notif_appt_time"),
-			sess.GetContext("notif_cups_name"),
-		))
+		result.WithButtons(
+			fmt.Sprintf(
+				"¿Confirmas que deseas reprogramar tu cita?\n\n"+
+					"📅 *Fecha actual:* %s\n"+
+					"🕐 *Hora:* %s\n"+
+					"💊 *Procedimiento:* %s",
+				sess.GetContext("notif_appt_date"),
+				sess.GetContext("notif_appt_time"),
+				sess.GetContext("notif_cups_name"),
+			),
+			sm.Button{Text: "Sí, reprogramar", Payload: "reschedule_yes"},
+			sm.Button{Text: "No, mantener", Payload: "reschedule_no"},
+		)
 	}
 	m.RegisterWithConfig(sm.StateConfirmRescheduleNotif, sm.HandlerConfig{
 		InputType:   sm.InputButton,
@@ -53,18 +54,19 @@ func RegisterAppointmentHandlers(m *sm.Machine, apptSvc *services.AppointmentSer
 	})
 
 	confirmCancelPrompt := func(sess *session.Session, result *sm.StateResult) {
-		result.WithText(fmt.Sprintf(
-			"¿Confirmas que deseas cancelar tu cita?\n\n"+
-				"📅 *Fecha:* %s\n"+
-				"🕐 *Hora:* %s\n"+
-				"💊 *Procedimiento:* %s\n\n"+
-				"Responde con el número de tu elección:\n"+
-				"*1.* Sí, cancelar mi cita\n"+
-				"*2.* No, mantener mi cita",
-			sess.GetContext("notif_appt_date"),
-			sess.GetContext("notif_appt_time"),
-			sess.GetContext("notif_cups_name"),
-		))
+		result.WithButtons(
+			fmt.Sprintf(
+				"¿Confirmas que deseas cancelar tu cita?\n\n"+
+					"📅 *Fecha:* %s\n"+
+					"🕐 *Hora:* %s\n"+
+					"💊 *Procedimiento:* %s",
+				sess.GetContext("notif_appt_date"),
+				sess.GetContext("notif_appt_time"),
+				sess.GetContext("notif_cups_name"),
+			),
+			sm.Button{Text: "Sí, cancelar", Payload: "cancel_yes"},
+			sm.Button{Text: "No, mantener", Payload: "cancel_no"},
+		)
 	}
 	m.RegisterWithConfig(sm.StateConfirmCancelNotif, sm.HandlerConfig{
 		InputType:   sm.InputButton,
@@ -72,6 +74,39 @@ func RegisterAppointmentHandlers(m *sm.Machine, apptSvc *services.AppointmentSer
 		ErrorMsg:    "Por favor responde 1 o 2.",
 		RetryPrompt: confirmCancelPrompt,
 		Handler:     confirmCancelNotifHandler(apptSvc, onCancel),
+	})
+
+	// NOTIF_PENDING: menú principal de notificación (3 botones)
+	notifPendingPrompt := func(sess *session.Session, result *sm.StateResult) {
+		result.WithButtons(
+			fmt.Sprintf(
+				"📅 *Fecha:* %s\n"+
+					"🕐 *Hora:* %s\n"+
+					"💊 *Procedimiento:* %s\n\n"+
+					"¿Qué deseas hacer con tu cita?",
+				sess.GetContext("notif_appt_date"),
+				sess.GetContext("notif_appt_time"),
+				sess.GetContext("notif_cups_name"),
+			),
+			sm.Button{Text: "Confirmar cita", Payload: "confirm"},
+			sm.Button{Text: "Reprogramar", Payload: "reschedule"},
+			sm.Button{Text: "Cancelar cita", Payload: "cancel"},
+		)
+	}
+	m.RegisterWithConfig(sm.StateNotifPending, sm.HandlerConfig{
+		InputType:   sm.InputButton,
+		Options:     []string{"confirm", "reschedule", "cancel"},
+		ErrorMsg:    "Por favor selecciona una opción.",
+		RetryPrompt: notifPendingPrompt,
+		Handler:     notifPendingHandler(apptSvc, procRepo, addrMapper),
+	})
+
+	// Fallback: reschedule sin slots → ofrece Confirmar/Cancelar
+	m.RegisterWithConfig(sm.StateNotifRescheduleFallback, sm.HandlerConfig{
+		InputType: sm.InputButton,
+		Options:   []string{"confirm", "cancel"},
+		ErrorMsg:  "Por favor selecciona una opción.",
+		Handler:   notifRescheduleFallbackHandler(apptSvc, procRepo, addrMapper, onCancel),
 	})
 }
 
@@ -409,8 +444,19 @@ func confirmRescheduleNotifHandler() sm.StateHandler {
 			return sm.NewResult(sm.StateSearchSlots).
 				WithEvent("notification_reschedule_confirmed", nil), nil
 		default: // reschedule_no
-			return sm.NewResult(sm.StateFarewell).
-				WithText("Entendido, tu cita queda vigente. ¡Te esperamos!").
+			return sm.NewResult(sm.StateNotifPending).
+				WithButtons(
+					fmt.Sprintf(
+						"Entendido, tu cita queda vigente.\n\n"+
+							"📅 *Fecha:* %s\n🕐 *Hora:* %s\n💊 *Procedimiento:* %s\n\n¿Qué deseas hacer?",
+						sess.GetContext("notif_appt_date"),
+						sess.GetContext("notif_appt_time"),
+						sess.GetContext("notif_cups_name"),
+					),
+					sm.Button{Text: "Confirmar cita", Payload: "confirm"},
+					sm.Button{Text: "Reprogramar", Payload: "reschedule"},
+					sm.Button{Text: "Cancelar cita", Payload: "cancel"},
+				).
 				WithEvent("notification_reschedule_declined", nil), nil
 		}
 	}
@@ -434,10 +480,12 @@ func confirmCancelNotifHandler(apptSvc *services.AppointmentService, onCancel Ca
 			// Fallback: if no batch IDs, use the single appointment block
 			if len(allIDs) == 0 {
 				apptID := sess.GetContext("notif_appt_id")
+				if apptID == "" {
+					apptID = sess.GetContext("reschedule_appt_id")
+				}
 				appt, block, err := apptSvc.FindBlockByAppointmentID(ctx, apptID)
 				if err != nil || appt == nil {
-					return sm.NewResult(sm.StateFarewell).
-						WithText("No pudimos encontrar tu cita. Por favor contacta a la clínica."), nil
+					return buildAutoCloseResult("No pudimos encontrar tu cita. Por favor contacta a la clínica."), nil
 				}
 				for _, a := range block {
 					allIDs = append(allIDs, a.ID)
@@ -445,8 +493,7 @@ func confirmCancelNotifHandler(apptSvc *services.AppointmentService, onCancel Ca
 			}
 
 			if err := apptSvc.CancelByIDs(ctx, allIDs, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
-				return sm.NewResult(sm.StateFarewell).
-					WithText("Error al cancelar la cita. Por favor contacta a la clínica.").
+				return buildAutoCloseResult("Error al cancelar la cita. Por favor contacta a la clínica.").
 					WithEvent("notification_cancel_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 
@@ -462,18 +509,214 @@ func confirmCancelNotifHandler(apptSvc *services.AppointmentService, onCancel Ca
 				}
 			}
 
-			return sm.NewResult(sm.StateFarewell).
-				WithText("Tu cita ha sido cancelada.\n\nSi deseas reagendar, puedes escribirnos cuando lo necesites.").
+			return buildAutoCloseResult("Tu cita ha sido cancelada.\n\nSi deseas reagendar, puedes escribirnos cuando lo necesites.").
 				WithEvent("notification_cancel_confirmed", map[string]interface{}{
 					"appointment_ids": allIDs,
 					"total_cancelled": len(allIDs),
 				}), nil
 		default: // cancel_no
-			return sm.NewResult(sm.StateFarewell).
-				WithText("Entendido, tu cita queda vigente. ¡Te esperamos!").
+			return sm.NewResult(sm.StateNotifPending).
+				WithButtons(
+					fmt.Sprintf(
+						"Entendido, tu cita queda vigente.\n\n"+
+							"📅 *Fecha:* %s\n🕐 *Hora:* %s\n💊 *Procedimiento:* %s\n\n¿Qué deseas hacer?",
+						sess.GetContext("notif_appt_date"),
+						sess.GetContext("notif_appt_time"),
+						sess.GetContext("notif_cups_name"),
+					),
+					sm.Button{Text: "Confirmar cita", Payload: "confirm"},
+					sm.Button{Text: "Reprogramar", Payload: "reschedule"},
+					sm.Button{Text: "Cancelar cita", Payload: "cancel"},
+				).
 				WithEvent("notification_cancel_declined", nil), nil
 		}
 	}
+}
+
+// notifPendingHandler handles NOTIF_PENDING state.
+// Shows Confirmar/Reprogramar/Cancelar and routes to the appropriate sub-flow.
+func notifPendingHandler(apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository, addrMapper *services.AddressMapper) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		selected := sm.ValidatedPayload(ctx)
+		apptID := sess.GetContext("notif_appt_id")
+		if apptID == "" {
+			apptID = sess.GetContext("reschedule_appt_id")
+		}
+
+		switch selected {
+		case "confirm":
+			appt, _, err := apptSvc.FindBlockByAppointmentID(ctx, apptID)
+			if err != nil || appt == nil {
+				return buildAutoCloseResult("No pudimos encontrar tu cita. Por favor contacta a la clinica."), nil
+			}
+			allAppts, _ := apptSvc.GetPatientAppointmentsForDate(ctx, appt.PatientID, appt.Date)
+			if len(allAppts) == 0 {
+				allAppts = []domain.Appointment{*appt}
+			}
+			if err := apptSvc.ConfirmBlock(ctx, allAppts, "whatsapp_bot", sess.ConversationID); err != nil {
+				return buildAutoCloseResult("Error al confirmar la cita. Intenta mas tarde."), nil
+			}
+			confirmMsg := buildNotifConfirmDetail(allAppts, appt, procRepo, addrMapper, ctx)
+			return buildAutoCloseResult(confirmMsg).
+				WithEvent("notif_pending_confirmed", map[string]interface{}{"appointment_id": apptID}), nil
+
+		case "reschedule":
+			return sm.NewResult(sm.StateSearchSlots).
+				WithContext("reschedule_appt_id", apptID).
+				WithEvent("notif_pending_reschedule", nil), nil
+
+		default: // cancel
+			return sm.NewResult(sm.StateConfirmCancelNotif).
+				WithButtons(
+					fmt.Sprintf(
+						"¿Confirmas que deseas cancelar tu cita?\n\n"+
+							"📅 *Fecha:* %s\n🕐 *Hora:* %s\n💊 *Procedimiento:* %s",
+						sess.GetContext("notif_appt_date"),
+						sess.GetContext("notif_appt_time"),
+						sess.GetContext("notif_cups_name"),
+					),
+					sm.Button{Text: "Si, cancelar", Payload: "cancel_yes"},
+					sm.Button{Text: "No, mantener", Payload: "cancel_no"},
+				), nil
+		}
+	}
+}
+
+// notifRescheduleFallbackHandler handles NOTIF_RESCHEDULE_FALLBACK state.
+// When notification reschedule found no available slots, the patient can still
+// confirm or cancel the original appointment.
+func notifRescheduleFallbackHandler(apptSvc *services.AppointmentService, procRepo repository.ProcedureRepository, addrMapper *services.AddressMapper, onCancel CancellationCallback) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		selected := sm.ValidatedPayload(ctx)
+		apptID := sess.GetContext("reschedule_appt_id")
+
+		switch selected {
+		case "confirm":
+			appt, _, err := apptSvc.FindBlockByAppointmentID(ctx, apptID)
+			if err != nil || appt == nil {
+				return buildAutoCloseResult("No pudimos encontrar tu cita. Por favor contacta a la clínica."), nil
+			}
+
+			allAppts, _ := apptSvc.GetPatientAppointmentsForDate(ctx, appt.PatientID, appt.Date)
+			if len(allAppts) == 0 {
+				allAppts = []domain.Appointment{*appt}
+			}
+			if err := apptSvc.ConfirmBlock(ctx, allAppts, "whatsapp_bot", sess.ConversationID); err != nil {
+				return buildAutoCloseResult("Error al confirmar la cita. Intenta más tarde."), nil
+			}
+
+			// Build confirmation detail (same structure as handleConfirmation confirm)
+			confirmMsg := buildNotifConfirmDetail(allAppts, appt, procRepo, addrMapper, ctx)
+
+			return buildAutoCloseResult(confirmMsg).
+				WithEvent("notif_reschedule_fallback_confirmed", map[string]interface{}{
+					"appointment_id": apptID,
+				}), nil
+
+		default: // cancel
+			appt, block, err := apptSvc.FindBlockByAppointmentID(ctx, apptID)
+			if err != nil || appt == nil {
+				return buildAutoCloseResult("No pudimos encontrar tu cita. Por favor contacta a la clínica."), nil
+			}
+
+			allIDs := make([]string, len(block))
+			for i, a := range block {
+				allIDs[i] = a.ID
+			}
+			if err := apptSvc.CancelByIDs(ctx, allIDs, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
+				return buildAutoCloseResult("Error al cancelar la cita. Intenta más tarde."), nil
+			}
+
+			// Notify waiting list for freed CUPS codes
+			if onCancel != nil {
+				seen := make(map[string]bool)
+				for _, a := range block {
+					for _, p := range a.Procedures {
+						if p.CupCode != "" && !seen[p.CupCode] {
+							seen[p.CupCode] = true
+							go onCancel(ctx, p.CupCode)
+						}
+					}
+				}
+			}
+
+			return buildAutoCloseResult("Tu cita ha sido cancelada.\n\nSi deseas reagendar, puedes escribirnos cuando lo necesites.").
+				WithEvent("notif_reschedule_fallback_cancelled", map[string]interface{}{
+					"appointment_id": apptID,
+					"total_cancelled": len(allIDs),
+				}), nil
+		}
+	}
+}
+
+// buildNotifConfirmDetail builds the confirmation detail message with preparations and address.
+func buildNotifConfirmDetail(allAppts []domain.Appointment, appt *domain.Appointment, procRepo repository.ProcedureRepository, addrMapper *services.AddressMapper, ctx context.Context) string {
+	seen := make(map[string]bool)
+	var procNames []string
+	for _, a := range allAppts {
+		for _, p := range a.Procedures {
+			if p.CupName != "" && !seen[p.CupName] {
+				seen[p.CupName] = true
+				procNames = append(procNames, p.CupName)
+			}
+		}
+	}
+	proceduresText := strings.Join(procNames, " y ")
+	if proceduresText == "" {
+		proceduresText = "Procedimiento"
+	}
+
+	msg := fmt.Sprintf("Tu cita ha sido confirmada!\n\n"+
+		"*Fecha:* %s\n"+
+		"*Hora:* %s\n"+
+		"*Procedimiento:* %s",
+		utils.FormatFriendlyDate(appt.Date),
+		services.FormatTimeSlot(appt.TimeSlot),
+		proceduresText,
+	)
+
+	if procRepo != nil {
+		var prepText string
+		address := ""
+		seenCup := make(map[string]bool)
+		for _, a := range allAppts {
+			for _, proc := range a.Procedures {
+				if proc.CupCode == "" || seenCup[proc.CupCode] {
+					continue
+				}
+				seenCup[proc.CupCode] = true
+				p, err := procRepo.FindByCode(ctx, proc.CupCode)
+				if err != nil || p == nil {
+					continue
+				}
+				if address == "" && p.Address != "" {
+					address = p.Address
+				}
+				if p.Preparation != "" {
+					prepText += fmt.Sprintf("\n- Para *%s*: %s", proc.CupName, p.Preparation)
+					if p.VideoURL != "" {
+						prepText += fmt.Sprintf("\n  📹 Video: %s", p.VideoURL)
+					}
+					if p.AudioURL != "" {
+						prepText += fmt.Sprintf("\n  🎵 Audio: %s", p.AudioURL)
+					}
+				}
+			}
+		}
+		if address != "" {
+			if addrMapper != nil {
+				msg += "\n" + addrMapper.FormatAddress(address)
+			} else {
+				msg += fmt.Sprintf("\n*Dirección:* %s", address)
+			}
+		}
+		if prepText != "" {
+			msg += "\n\n*Preparación:*" + prepText
+		}
+	}
+
+	msg += "\n\nRecuerda presentarte 15 minutos antes. ¡Te esperamos!"
+	return msg
 }
 
 // --- Helpers privados ---

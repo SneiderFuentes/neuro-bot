@@ -411,6 +411,24 @@ func (m *MockSessionRepo) ClearAllContext(ctx context.Context, sessionID string)
 	}
 	return nil
 }
+func (m *MockSessionRepo) MarkEscalated(ctx context.Context, sessionID, teamID string) error {
+	return nil
+}
+func (m *MockSessionRepo) ResumeSession(ctx context.Context, sessionID, newState string, timeoutMinutes int) error {
+	return nil
+}
+func (m *MockSessionRepo) FindInactiveSessions(ctx context.Context, idleMinutes int) ([]session.InactiveSession, error) {
+	return nil, nil
+}
+func (m *MockSessionRepo) FindExpiredEscalatedSessions(ctx context.Context) ([]session.ExpiredEscalatedSession, error) {
+	return nil, nil
+}
+func (m *MockSessionRepo) MarkAbandoned(ctx context.Context, sessionID string) error {
+	return nil
+}
+func (m *MockSessionRepo) CompleteActiveByPhone(ctx context.Context, phone string) error {
+	return nil
+}
 
 // === WaitingList Mock ===
 

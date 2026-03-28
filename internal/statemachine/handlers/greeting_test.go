@@ -257,13 +257,13 @@ func TestMainMenu_Ayuda(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// SHOW_HELP is automatic → auto-chains to MAIN_MENU
-	if result.NextState != sm.StateMainMenu {
-		t.Errorf("expected MAIN_MENU (auto-chained from SHOW_HELP), got %s", result.NextState)
+	// SHOW_HELP is automatic → auto-closes session
+	if result.NextState != sm.StateTerminated {
+		t.Errorf("expected TERMINATED (auto-close from SHOW_HELP), got %s", result.NextState)
 	}
-	// Should have help messages (1 text + 1 list with tips in body)
-	if len(result.Messages) < 2 {
-		t.Errorf("expected at least 2 messages (help text + menu list), got %d", len(result.Messages))
+	// Should have help message (combined text)
+	if len(result.Messages) < 1 {
+		t.Errorf("expected at least 1 message (help text), got %d", len(result.Messages))
 	}
 }
 

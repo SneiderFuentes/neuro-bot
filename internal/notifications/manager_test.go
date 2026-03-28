@@ -779,6 +779,10 @@ func (m *mockSessionCreator) UpdateStatus(ctx context.Context, sessionID, status
 	return nil
 }
 
+func (m *mockSessionCreator) CompleteActiveByPhone(ctx context.Context, phone string) error {
+	return nil
+}
+
 type mockVirtualEnqueuer struct {
 	mu      sync.Mutex
 	calls   []string
