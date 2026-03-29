@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/neuro-bot/neuro-bot/internal/services"
 	"github.com/neuro-bot/neuro-bot/internal/session"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 // startSelfReschedule creates a new session at SEARCH_SLOTS pre-populated with
@@ -25,7 +26,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 	if err != nil || appt == nil {
 		slog.Error("self_reschedule: find appointment", "error", err, "appointment_id", pending.AppointmentID)
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"No pudimos encontrar tu cita. Por favor contacta a la clinica.")
+			"No pudimos encontrar tu cita. Por favor contacta a la clínica.")
 		return
 	}
 
@@ -33,7 +34,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 	if m.sessionRepo == nil || m.workerPool == nil {
 		slog.Error("self_reschedule: missing session/worker dependencies")
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"Servicio temporalmente no disponible. Por favor intenta mas tarde.")
+			"Servicio temporalmente no disponible. Por favor intenta más tarde.")
 		return
 	}
 
@@ -47,7 +48,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 	if cupsCode == "" {
 		slog.Error("self_reschedule: no procedure on appointment", "appointment_id", pending.AppointmentID)
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"No pudimos identificar el procedimiento de tu cita. Un agente te ayudara.")
+			"No pudimos identificar el procedimiento de tu cita. Un agente te ayudará.")
 		if pending.ConversationID != "" {
 			m.birdClient.UpdateFeedItem(pending.ConversationID, pending.BirdMessageID,
 				false, m.cfg.BirdTeamFallback, "")
@@ -61,7 +62,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 		isContrasted = "1"
 	}
 	isSedated := "0"
-	if strings.Contains(appt.Observations, "Sedacion") {
+	if strings.Contains(appt.Observations, "Sedaci") {
 		isSedated = "1"
 	}
 
@@ -131,7 +132,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 	if err := m.sessionRepo.Create(ctx, sess); err != nil {
 		slog.Error("self_reschedule: create session", "error", err)
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"Error interno. Por favor intenta mas tarde.")
+			"Lo sentimos, ocurrió un problema. Por favor intenta más tarde.")
 		return
 	}
 
@@ -139,7 +140,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 		slog.Error("self_reschedule: set context", "error", err)
 		m.sessionRepo.UpdateStatus(ctx, sess.ID, session.StatusCompleted) // cleanup orphan
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"Error interno. Por favor intenta mas tarde.")
+			"Lo sentimos, ocurrió un problema. Por favor intenta más tarde.")
 		return
 	}
 
@@ -160,7 +161,7 @@ func (m *NotificationManager) startSelfReschedule(phone string, pending *Pending
 	}
 
 	slog.Info("self_reschedule session created",
-		"phone", phone,
+		"phone", utils.MaskPhone(phone),
 		"appointment_id", pending.AppointmentID,
 		"cups_code", cupsCode,
 		"skip_cancel", skipCancel,

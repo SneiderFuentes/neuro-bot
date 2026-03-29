@@ -81,6 +81,9 @@ func (m *mockAppointmentRepo) RescheduleDate(ctx context.Context, agendaID int, 
 func (m *mockAppointmentRepo) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
 	return nil
 }
+func (m *mockAppointmentRepo) CreatePxCitaBatch(ctx context.Context, inputs []domain.CreatePxCitaInput) error {
+	return nil
+}
 
 // --- Tests ---
 

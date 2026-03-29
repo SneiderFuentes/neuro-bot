@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -59,6 +60,7 @@ type CUPSEntry struct {
 	Quantity     int    `json:"quantity"`
 	IsSedated    bool   `json:"is_sedated"`
 	IsContrasted bool   `json:"is_contrasted"`
+	Observations string `json:"observations"`
 }
 
 type CUPSGroup struct {
@@ -88,7 +90,8 @@ FORMATO DE SALIDA:
       "cups_name": "<descripcion_exacta_de_la_orden>",
       "quantity": <int>,
       "is_sedated": <boolean>,
-      "is_contrasted": <boolean>
+      "is_contrasted": <boolean>,
+      "observations": "<string>"
     }
   ],
   "entity": "<nombre_EPS_o_entidad|null>",
@@ -126,8 +129,9 @@ DATOS POR PROCEDIMIENTO:
   2. Si no hay (#N) pero hay un número explícito de sesiones/extremidades/nervios al final (ej: "/ 4 EXTREMIDADES", "4 SESIONES"), usa ese número.
   3. Si no hay ningún indicador de cantidad, usa 1.
   IMPORTANTE: En órdenes colombianas, (#N) es la notación estándar para indicar la cantidad del procedimiento. Siempre tiene prioridad sobre cualquier otro texto numérico en la misma fila.
+- observations: texto adicional o marcadores del procedimiento como "AMB", "SUPERIORES", "BILATERAL", lateralidad, etc. Aplica corrección OCR mínima (ej: "CIN"→"SIN"). Si no hay observaciones, usa "".
 - is_sedated: busca en descripción y observaciones del procedimiento:
-  "sedación", "sedacion", "bajo sedación", "bajo anestesia", "con anestesia", "anestesia general"
+  "sedación", "sedacion", "bajo sedación", "bajo anestesia", "con anestesia", "anestesia general", "sedado", "sedada", "anestesiado", "anestesiada"
   Si encuentra alguna: true para ESE procedimiento. Si no: false.
 - is_contrasted: busca en descripción y observaciones del procedimiento:
   "contraste", "contrastado", "contrastada", "con medio de contraste", "con contraste", "medio de contraste", "gadolinio", "yodo"
@@ -183,18 +187,76 @@ func (s *OCRService) callOpenAI(ctx context.Context, messages []map[string]inter
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.apiKey)
 
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("openai request: %w", err)
-	}
-	defer resp.Body.Close()
+	const maxRetries = 2 // 3 total attempts
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
+	var resp *http.Response
+	var respBody []byte
 
-	if resp.StatusCode != http.StatusOK {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			req, err = http.NewRequestWithContext(ctx, "POST", s.apiURL, bytes.NewReader(bodyBytes))
+			if err != nil {
+				return nil, fmt.Errorf("create retry request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+s.apiKey)
+		}
+
+		resp, err = s.client.Do(req)
+		if err != nil {
+			if attempt == maxRetries {
+				return nil, fmt.Errorf("openai request after %d attempts: %w", attempt+1, err)
+			}
+			delay := time.Duration((attempt+1)*(attempt+1)) * time.Second
+			slog.Warn("openai_retry_network", "attempt", attempt+1, "delay", delay, "error", err)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, fmt.Errorf("openai retry cancelled: %w", ctx.Err())
+			}
+			continue
+		}
+
+		respBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		// 429 rate limit — respect Retry-After
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if attempt == maxRetries {
+				slog.Error("openai rate limited after retries", "attempts", attempt+1)
+				return nil, fmt.Errorf("openai rate limited after %d attempts", attempt+1)
+			}
+			delay := parseRetryAfterHeader(resp.Header.Get("Retry-After"))
+			slog.Warn("openai_retry_rate_limited", "attempt", attempt+1, "retry_after", delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, fmt.Errorf("openai retry cancelled: %w", ctx.Err())
+			}
+			continue
+		}
+
+		// 5xx server error — retry with backoff
+		if resp.StatusCode >= 500 {
+			if attempt == maxRetries {
+				slog.Error("openai server error after retries", "status", resp.StatusCode, "attempts", attempt+1)
+				return nil, fmt.Errorf("openai api status %d after %d attempts", resp.StatusCode, attempt+1)
+			}
+			delay := time.Duration((attempt+1)*(attempt+1)) * time.Second
+			slog.Warn("openai_retry_server_error", "attempt", attempt+1, "status", resp.StatusCode, "delay", delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, fmt.Errorf("openai retry cancelled: %w", ctx.Err())
+			}
+			continue
+		}
+
+		// 4xx client error (not 429) — no retry
 		slog.Error("openai api error", "status", resp.StatusCode, "body", string(respBody))
 		return nil, fmt.Errorf("openai api status %d", resp.StatusCode)
 	}
@@ -522,4 +584,16 @@ func extractJSON(content string) string {
 
 	// Ya es JSON directo
 	return content
+}
+
+// parseRetryAfterHeader parses the Retry-After header (integer seconds).
+// Returns 2s default if missing or unparseable.
+func parseRetryAfterHeader(value string) time.Duration {
+	if value == "" {
+		return 2 * time.Second
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 && seconds <= 120 {
+		return time.Duration(seconds) * time.Second
+	}
+	return 2 * time.Second
 }

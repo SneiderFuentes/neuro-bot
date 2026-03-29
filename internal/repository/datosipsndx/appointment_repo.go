@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/domain"
 	"github.com/neuro-bot/neuro-bot/internal/repository"
@@ -29,8 +30,10 @@ func (r *AppointmentRepo) FindByID(ctx context.Context, id string) (*domain.Appo
 	            c.Confirmada, c.FechaConfirmacion, c.MedioConfirmacion, c.IdMedioConfirmacion,
 	            c.Cumplida, c.Observaciones, c.Remonte
 	          FROM citas c
-	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
-	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
+	          LEFT JOIN (
+	              SELECT doctor_documento, MIN(doctor_nombre_completo) AS doctor_nombre_completo
+	              FROM cup_medico WHERE activo = 1 GROUP BY doctor_documento
+	          ) cm ON cm.doctor_documento = c.IdMedico
 	          WHERE c.IdCita = ? AND c.Remonte = 0`
 
 	var appt domain.Appointment
@@ -91,8 +94,10 @@ func (r *AppointmentRepo) FindUpcomingByPatient(ctx context.Context, patientID s
 	            COALESCE(cm.doctor_nombre_completo, c.IdMedico) AS DoctorName,
 	            c.NumeroPaciente, c.Entidad, c.Agenda, c.Confirmada, c.Observaciones
 	          FROM citas c
-	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
-	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
+	          LEFT JOIN (
+	              SELECT doctor_documento, MIN(doctor_nombre_completo) AS doctor_nombre_completo
+	              FROM cup_medico WHERE activo = 1 GROUP BY doctor_documento
+	          ) cm ON cm.doctor_documento = c.IdMedico
 	          WHERE c.NumeroPaciente = ? AND c.FeCita >= CURDATE()
 	            AND c.Cancelada = 0 AND c.Remonte = 0
 	          ORDER BY c.FeCita, c.FechaCita`
@@ -245,50 +250,43 @@ func (r *AppointmentRepo) ConfirmBatch(ctx context.Context, ids []string, channe
 	if len(ids) == 0 {
 		return nil
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx confirm batch: %w", err)
-	}
-	defer tx.Rollback()
-
 	medio := mapToMedioConfirmacion(channel)
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE citas SET Confirmada = -1, Cancelada = 0,
-			        FechaConfirmacion = NOW(), FechaCancelacion = NULL,
-			        MedioConfirmacion = NULLIF(?, ''), IdMedioConfirmacion = NULLIF(?, '')
-			 WHERE IdCita = ?`,
-			medio, channelID, id); err != nil {
-			return fmt.Errorf("confirm %s: %w", id, err)
-		}
+	placeholders := make([]string, len(ids))
+	args := []interface{}{medio, channelID}
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
 	}
-	return tx.Commit()
+	query := fmt.Sprintf(`UPDATE citas SET Confirmada = -1, Cancelada = 0,
+	        FechaConfirmacion = NOW(), FechaCancelacion = NULL,
+	        MedioConfirmacion = NULLIF(?, ''), IdMedioConfirmacion = NULLIF(?, '')
+	 WHERE IdCita IN (%s)`, strings.Join(placeholders, ","))
+	_, err := r.db.ExecContext(ctx, query, args...)
+	return err
 }
 
 func (r *AppointmentRepo) CancelBatch(ctx context.Context, ids []string, reason, channel, channelID string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin tx cancel batch: %w", err)
-	}
-	defer tx.Rollback()
-
 	medio := mapToMedioConfirmacion(channel)
 	observation := fmt.Sprintf(" [Cancelada via %s: %s]", channel, reason)
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE citas SET Cancelada = -1, Confirmada = 0,
-			        FechaCancelacion = NOW(), FechaConfirmacion = NULL,
-			        MedioConfirmacion = NULLIF(?, ''), IdMedioConfirmacion = NULLIF(?, ''),
-			        Observaciones = CONCAT(COALESCE(Observaciones, ''), CONVERT(? USING latin1))
-			 WHERE IdCita = ?`,
-			medio, channelID, observation, id); err != nil {
-			return fmt.Errorf("cancel %s: %w", id, err)
-		}
+	placeholders := make([]string, len(ids))
+	args := []interface{}{medio, channelID, observation}
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
 	}
-	return tx.Commit()
+	query := fmt.Sprintf(`UPDATE citas SET Cancelada = -1, Confirmada = 0,
+	        FechaCancelacion = NOW(), FechaConfirmacion = NULL,
+	        MedioConfirmacion = NULLIF(?, ''), IdMedioConfirmacion = NULLIF(?, ''),
+	        Observaciones = CONCAT(COALESCE(Observaciones, ''), CONVERT(? USING latin1))
+	 WHERE IdCita IN (%s)`, strings.Join(placeholders, ","))
+	_, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("cancel batch (%d ids): %w", len(ids), err)
+	}
+	return nil
 }
 
 func (r *AppointmentRepo) FindByAgendaAndDate(ctx context.Context, agendaID int, date string) ([]domain.Appointment, error) {
@@ -299,8 +297,10 @@ func (r *AppointmentRepo) FindByAgendaAndDate(ctx context.Context, agendaID int,
 	            COALESCE(p.Telefono, '') AS PatientPhone,
 	            c.Entidad, c.Agenda, c.Cancelada, c.Observaciones
 	          FROM citas c
-	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
-	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
+	          LEFT JOIN (
+	              SELECT doctor_documento, MIN(doctor_nombre_completo) AS doctor_nombre_completo
+	              FROM cup_medico WHERE activo = 1 GROUP BY doctor_documento
+	          ) cm ON cm.doctor_documento = c.IdMedico
 	          LEFT JOIN pacientes p ON p.NumeroPaciente = c.NumeroPaciente
 	          WHERE c.Agenda = ? AND c.FeCita = ?
 	            AND c.Cancelada = 0 AND c.Remonte = 0
@@ -461,14 +461,16 @@ func (r *AppointmentRepo) CountMonthlyByGroup(ctx context.Context, cupsCodes []s
 		args[i] = c
 	}
 
+	startDate := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+	endDate := startDate.AddDate(0, 1, 0)
+
 	query := fmt.Sprintf(`SELECT COALESCE(SUM(px.Cantidad), 0) FROM citas c
 	          INNER JOIN pxcita px ON px.IdCita = c.IdCita
 	          WHERE px.CUPS IN (%s)
-	            AND MONTH(c.FeCita) = ?
-	            AND YEAR(c.FeCita) = ?
+	            AND c.FeCita >= ? AND c.FeCita < ?
 	            AND c.Cancelada = 0 AND c.Remonte = 0`, strings.Join(placeholders, ","))
 
-	args = append(args, month, year)
+	args = append(args, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
 
 	var count int
 	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)
@@ -486,8 +488,10 @@ func (r *AppointmentRepo) FindPendingByDate(ctx context.Context, date string) ([
 	            COALESCE(p.Telefono, '') AS PatientPhone,
 	            c.Entidad, c.Agenda, c.Confirmada, c.Observaciones
 	          FROM citas c
-	          LEFT JOIN cup_medico cm ON cm.doctor_documento = c.IdMedico AND cm.activo = 1
-	            AND cm.id = (SELECT MIN(cm2.id) FROM cup_medico cm2 WHERE cm2.doctor_documento = c.IdMedico AND cm2.activo = 1)
+	          LEFT JOIN (
+	              SELECT doctor_documento, MIN(doctor_nombre_completo) AS doctor_nombre_completo
+	              FROM cup_medico WHERE activo = 1 GROUP BY doctor_documento
+	          ) cm ON cm.doctor_documento = c.IdMedico
 	          LEFT JOIN pacientes p ON p.NumeroPaciente = c.NumeroPaciente
 	          WHERE c.FeCita = ? AND c.Cancelada = 0 AND c.Remonte = 0
 	          ORDER BY c.FechaCita`
@@ -585,6 +589,33 @@ func (r *AppointmentRepo) CreatePxCita(ctx context.Context, input domain.CreateP
 	)
 	if err != nil {
 		return fmt.Errorf("create pxcita: %w", err)
+	}
+	return nil
+}
+
+// CreatePxCitaBatch inserts multiple pxcita records in a single multi-row INSERT.
+func (r *AppointmentRepo) CreatePxCitaBatch(ctx context.Context, inputs []domain.CreatePxCitaInput) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	if len(inputs) == 1 {
+		return r.CreatePxCita(ctx, inputs[0])
+	}
+	query := `INSERT INTO pxcita (IdCita, CUPS, Cantidad, VrUnitario, IdServicio, FechaCreado) VALUES `
+	var placeholders []string
+	var args []interface{}
+	for _, in := range inputs {
+		qty := in.Quantity
+		if qty == 0 {
+			qty = 1
+		}
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, NOW())")
+		args = append(args, in.AppointmentID, in.CupCode, qty, in.UnitValue, in.ServiceID)
+	}
+	query += strings.Join(placeholders, ", ")
+	_, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("create pxcita batch: %w", err)
 	}
 	return nil
 }

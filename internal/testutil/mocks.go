@@ -100,6 +100,9 @@ func (m *MockAppointmentRepo) CreatePxCita(ctx context.Context, input domain.Cre
 	}
 	return nil
 }
+func (m *MockAppointmentRepo) CreatePxCitaBatch(ctx context.Context, inputs []domain.CreatePxCitaInput) error {
+	return nil
+}
 func (m *MockAppointmentRepo) Confirm(ctx context.Context, id string, channel, channelID string) error {
 	if m.ConfirmFn != nil {
 		return m.ConfirmFn(ctx, id, channel, channelID)
@@ -280,8 +283,10 @@ func (m *MockProcedureRepo) FindAllActive(ctx context.Context) ([]domain.Procedu
 
 // MockEntityRepo implements repository.EntityRepository.
 type MockEntityRepo struct {
-	FindActiveFn func(ctx context.Context) ([]domain.Entity, error)
-	FindByCodeFn func(ctx context.Context, code string) (*domain.Entity, error)
+	FindActiveFn                func(ctx context.Context) ([]domain.Entity, error)
+	FindActiveByCategoryFn      func(ctx context.Context, category string) ([]domain.Entity, error)
+	FindByCodeFn                func(ctx context.Context, code string) (*domain.Entity, error)
+	GetCodeByIndexAndCategoryFn func(ctx context.Context, index int, category string) (string, error)
 }
 
 func (m *MockEntityRepo) FindActive(ctx context.Context) ([]domain.Entity, error) {
@@ -290,11 +295,23 @@ func (m *MockEntityRepo) FindActive(ctx context.Context) ([]domain.Entity, error
 	}
 	return nil, nil
 }
+func (m *MockEntityRepo) FindActiveByCategory(ctx context.Context, category string) ([]domain.Entity, error) {
+	if m.FindActiveByCategoryFn != nil {
+		return m.FindActiveByCategoryFn(ctx, category)
+	}
+	return nil, nil
+}
 func (m *MockEntityRepo) FindByCode(ctx context.Context, code string) (*domain.Entity, error) {
 	if m.FindByCodeFn != nil {
 		return m.FindByCodeFn(ctx, code)
 	}
 	return nil, nil
+}
+func (m *MockEntityRepo) GetCodeByIndexAndCategory(ctx context.Context, index int, category string) (string, error) {
+	if m.GetCodeByIndexAndCategoryFn != nil {
+		return m.GetCodeByIndexAndCategoryFn(ctx, index, category)
+	}
+	return "", nil
 }
 
 // MockMunicipalityRepo implements repository.MunicipalityRepository.

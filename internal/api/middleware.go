@@ -40,6 +40,11 @@ func InternalAuth(apiKey string) func(http.Handler) http.Handler {
 			}
 			key := r.Header.Get("X-API-Key")
 			if subtle.ConstantTimeCompare([]byte(key), []byte(apiKey)) != 1 {
+				slog.Warn("security: invalid API key",
+					"path", r.URL.Path,
+					"ip", r.RemoteAddr,
+					"has_key", key != "",
+				)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -108,4 +113,13 @@ func RateLimiter(maxRequests int, window time.Duration) func(http.Handler) http.
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// SecurityHeaders adds standard security headers to all responses.
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
 }

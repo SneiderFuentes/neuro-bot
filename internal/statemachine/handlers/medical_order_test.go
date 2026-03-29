@@ -524,7 +524,7 @@ func TestValidateOCR_EnrichesFromDB(t *testing.T) {
 	}
 }
 
-func TestValidateOCR_DocumentMismatch(t *testing.T) {
+func TestValidateOCR_DocumentMismatch_NoWarning(t *testing.T) {
 	procRepo := &mockProcedureRepo{
 		findByCodeFn: func(ctx context.Context, code string) (*domain.Procedure, error) {
 			return &domain.Procedure{ID: 1, Code: code, Name: "Procedimiento Test"}, nil
@@ -549,17 +549,13 @@ func TestValidateOCR_DocumentMismatch(t *testing.T) {
 	if result.NextState != sm.StateConfirmOCRResult {
 		t.Errorf("expected CONFIRM_OCR_RESULT, got %s", result.NextState)
 	}
-	// Check that the result message contains "no coincide" warning
-	foundWarning := false
+	// Document mismatch warning was removed — OCR document is unreliable
 	for _, msg := range result.Messages {
 		if bm, ok := msg.(*sm.ButtonMessage); ok {
 			if strings.Contains(bm.Text, "no coincide") {
-				foundWarning = true
+				t.Error("document mismatch warning should not appear (feature removed)")
 			}
 		}
-	}
-	if !foundWarning {
-		t.Error("expected warning message containing 'no coincide' for document mismatch")
 	}
 }
 

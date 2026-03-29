@@ -739,3 +739,581 @@ func TestFisiatria_EMGExactly3(t *testing.T) {
 		t.Errorf("expected NC quantity=12 (3 EMG * 4), got %d", nc.Quantity)
 	}
 }
+
+// ===========================================================================
+// Radiografía rules tests (applyRadiografiaRules)
+// ===========================================================================
+
+// 21. Single standard Rx = 1 space.
+func TestRadiografia_SingleDefault(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups:        []CUPSEntry{cup("873100", "Rx Mano", 1)},
+	})
+	if g.Espacios != 1 {
+		t.Errorf("expected Espacios=1, got %d", g.Espacios)
+	}
+}
+
+// 22. Exception code: 871060 = 3 spaces.
+func TestRadiografia_ExceptionCode(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups:        []CUPSEntry{cup("871060", "Columna vertebral total", 1)},
+	})
+	if g.Espacios != 3 {
+		t.Errorf("expected Espacios=3 (871060 exception), got %d", g.Espacios)
+	}
+}
+
+// 23. Multiple Rx → sum of individual spaces.
+func TestRadiografia_MultipleRx(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups: []CUPSEntry{
+			cup("873100", "Rx Mano", 1),      // 1 space
+			cup("871030", "Columna DL", 1),    // 2 spaces (exception)
+			cup("871060", "Col Total", 1),     // 3 spaces (exception)
+		},
+	})
+	if g.Espacios != 6 { // 1 + 2 + 3
+		t.Errorf("expected Espacios=6 (1+2+3), got %d", g.Espacios)
+	}
+}
+
+// 24. Quantity multiplier on exception code.
+func TestRadiografia_QuantityMultiplier(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups:        []CUPSEntry{cup("871040", "Columna LS", 2)}, // 2 spaces * qty 2 = 4
+	})
+	if g.Espacios != 4 {
+		t.Errorf("expected Espacios=4 (2 spaces * qty 2), got %d", g.Espacios)
+	}
+}
+
+// 25. Exception code 873302 = 3 spaces.
+func TestRadiografia_ExceptionCode3Spaces(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups:        []CUPSEntry{cup("873302", "Medición MMII", 1)},
+	})
+	if g.Espacios != 3 {
+		t.Errorf("expected Espacios=3 (873302 exception), got %d", g.Espacios)
+	}
+}
+
+// 26. Zero-quantity Rx defaults to 1.
+func TestRadiografia_ZeroQuantity(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups:        []CUPSEntry{cup("873100", "Rx Mano", 0)},
+	})
+	if g.Espacios != 1 {
+		t.Errorf("expected Espacios=1 (zero qty defaults to 1), got %d", g.Espacios)
+	}
+}
+
+// 27. Force-mapping: Rx code without DB service → "Radiografia".
+func TestRadiografia_ForceMapping(t *testing.T) {
+	mock := newMock(struct {
+		code, name, service string
+		spaces              int
+	}{"873100", "RX MANO", "", 1}) // Empty service in DB
+
+	cups := []CUPSEntry{cup("873100", "Rx Mano", 1)}
+	groups, err := GroupByServiceFromDB(context.Background(), cups, mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	g := findGroup(groups, "Radiografia")
+	if g == nil {
+		t.Fatal("missing 'Radiografia' group — forceServiceByCode should override empty DB service")
+	}
+}
+
+// ===========================================================================
+// Tomografía rules tests (applyTomografiaRules)
+// ===========================================================================
+
+// 28. Simple TAC = 1 space.
+func TestTomografia_Simple(t *testing.T) {
+	g := applyTomografiaRules(CUPSGroup{
+		ServiceType: "Tomografia",
+		Cups:        []CUPSEntry{cup("879101", "TAC Cerebral Simple", 1)},
+	})
+	if g.Espacios != 1 {
+		t.Errorf("expected Espacios=1, got %d", g.Espacios)
+	}
+}
+
+// 29. Contrasted TAC = 2 spaces.
+func TestTomografia_Contrasted(t *testing.T) {
+	g := applyTomografiaRules(CUPSGroup{
+		ServiceType: "Tomografia",
+		Cups:        []CUPSEntry{{Code: "879102", Name: "TAC Cerebral C", Quantity: 1, IsContrasted: true}},
+	})
+	if g.Espacios != 2 {
+		t.Errorf("expected Espacios=2 (contrasted), got %d", g.Espacios)
+	}
+}
+
+// 30. 3D code (879910) → always 3 regardless of other entries.
+func TestTomografia_3DOverride(t *testing.T) {
+	g := applyTomografiaRules(CUPSGroup{
+		ServiceType: "Tomografia",
+		Cups: []CUPSEntry{
+			cup("879101", "TAC Simple", 1),
+			cup("879910", "Reconstrucción 3D", 1),
+		},
+	})
+	if g.Espacios != 3 {
+		t.Errorf("expected Espacios=3 (3D override), got %d", g.Espacios)
+	}
+}
+
+// 31. Fixed code 879112 = 2 spaces.
+func TestTomografia_FixedCode(t *testing.T) {
+	g := applyTomografiaRules(CUPSGroup{
+		ServiceType: "Tomografia",
+		Cups:        []CUPSEntry{cup("879112", "TAC Cráneo con Contraste", 1)},
+	})
+	if g.Espacios != 2 {
+		t.Errorf("expected Espacios=2 (fixed code 879112), got %d", g.Espacios)
+	}
+}
+
+// 32. Mixed simple + contrasted TAC.
+func TestTomografia_Mixed(t *testing.T) {
+	g := applyTomografiaRules(CUPSGroup{
+		ServiceType: "Tomografia",
+		Cups: []CUPSEntry{
+			cup("879101", "TAC Simple", 1),                                            // 1
+			{Code: "879102", Name: "TAC Contraste", Quantity: 1, IsContrasted: true},  // 2
+		},
+	})
+	if g.Espacios != 3 { // 1 + 2
+		t.Errorf("expected Espacios=3 (1+2), got %d", g.Espacios)
+	}
+}
+
+// 33. Force-mapping: TAC code without DB service → "Tomografia".
+func TestTomografia_ForceMapping(t *testing.T) {
+	mock := newMock(struct {
+		code, name, service string
+		spaces              int
+	}{"879101", "TAC CEREBRAL SIMPLE", "", 1})
+
+	cups := []CUPSEntry{cup("879101", "TAC", 1)}
+	groups, err := GroupByServiceFromDB(context.Background(), cups, mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	g := findGroup(groups, "Tomografia")
+	if g == nil {
+		t.Fatal("missing 'Tomografia' group — forceServiceByCode should override empty DB service")
+	}
+}
+
+// ===========================================================================
+// Ecografía rules tests (applyEcografiaRules)
+// ===========================================================================
+
+// 34. Standard echo = 1 space.
+func TestEcografia_Standard(t *testing.T) {
+	g := applyEcografiaRules(CUPSGroup{
+		ServiceType: "Ecografia",
+		Cups:        []CUPSEntry{cup("881101", "Eco Abdomen", 1)},
+	})
+	if g.Espacios != 1 {
+		t.Errorf("expected Espacios=1, got %d", g.Espacios)
+	}
+}
+
+// 35. Obstetric echo = 2 spaces.
+func TestEcografia_Obstetric(t *testing.T) {
+	g := applyEcografiaRules(CUPSGroup{
+		ServiceType: "Ecografia",
+		Cups:        []CUPSEntry{cup("881436", "Eco Obstétrica TN", 1)},
+	})
+	if g.Espacios != 2 {
+		t.Errorf("expected Espacios=2 (obstetric), got %d", g.Espacios)
+	}
+}
+
+// 36. Doppler = qty-based (1 per unit).
+func TestEcografia_Doppler(t *testing.T) {
+	g := applyEcografiaRules(CUPSGroup{
+		ServiceType: "Ecografia",
+		Cups:        []CUPSEntry{cup("882308", "Doppler Art MMII", 3)},
+	})
+	if g.Espacios != 3 {
+		t.Errorf("expected Espacios=3 (Doppler qty=3), got %d", g.Espacios)
+	}
+}
+
+// 37. Mixed obstetric + standard.
+func TestEcografia_Mixed(t *testing.T) {
+	g := applyEcografiaRules(CUPSGroup{
+		ServiceType: "Ecografia",
+		Cups: []CUPSEntry{
+			cup("881436", "Eco Obstétrica TN", 1),  // 2 spaces
+			cup("881101", "Eco Abdomen", 1),         // 1 space
+			cup("882317", "Doppler Venoso MMII", 2), // 2 spaces (qty-based)
+		},
+	})
+	if g.Espacios != 5 { // 2 + 1 + 2
+		t.Errorf("expected Espacios=5 (2+1+2), got %d", g.Espacios)
+	}
+}
+
+// 38. Both obstetric codes.
+func TestEcografia_BothObstetric(t *testing.T) {
+	g := applyEcografiaRules(CUPSGroup{
+		ServiceType: "Ecografia",
+		Cups: []CUPSEntry{
+			cup("881436", "Eco Obstétrica TN", 1),
+			cup("881437", "Eco Detalle Anat", 1),
+		},
+	})
+	if g.Espacios != 4 { // 2 + 2
+		t.Errorf("expected Espacios=4 (2+2), got %d", g.Espacios)
+	}
+}
+
+// 39. Force-mapping: echo code without DB service → "Ecografia".
+func TestEcografia_ForceMapping(t *testing.T) {
+	mock := newMock(struct {
+		code, name, service string
+		spaces              int
+	}{"881101", "ECOGRAFIA ABDOMEN", "", 1})
+
+	cups := []CUPSEntry{cup("881101", "Eco", 1)}
+	groups, err := GroupByServiceFromDB(context.Background(), cups, mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	g := findGroup(groups, "Ecografia")
+	if g == nil {
+		t.Fatal("missing 'Ecografia' group — forceServiceByCode should override empty DB service")
+	}
+}
+
+// ===========================================================================
+// Neurología rules tests (applyNeurologiaRules)
+// ===========================================================================
+
+// 40. First visit only → 1 group.
+func TestNeurologia_FirstVisitOnly(t *testing.T) {
+	groups := applyNeurologiaRules(CUPSGroup{
+		ServiceType: "Neurologia",
+		Cups:        []CUPSEntry{cup("890274", "Consulta Neuro 1ra vez", 1)},
+	})
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].Espacios != 1 {
+		t.Errorf("expected Espacios=1, got %d", groups[0].Espacios)
+	}
+}
+
+// 41. Both consultations → 2 separate groups (never together).
+func TestNeurologia_BothConsultations(t *testing.T) {
+	groups := applyNeurologiaRules(CUPSGroup{
+		ServiceType: "Neurologia",
+		Cups: []CUPSEntry{
+			cup("890274", "Consulta 1ra vez", 1),
+			cup("890374", "Control", 1),
+		},
+	})
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups (890274 + 890374 never together), got %d", len(groups))
+	}
+	// First group: first visit
+	if findCup(groups[0].Cups, "890274") == nil {
+		t.Error("first group should contain 890274")
+	}
+	// Second group: control
+	if findCup(groups[1].Cups, "890374") == nil {
+		t.Error("second group should contain 890374")
+	}
+}
+
+// 42. Procedure (053105) always separate with 1 fixed space.
+func TestNeurologia_ProcedureSeparate(t *testing.T) {
+	groups := applyNeurologiaRules(CUPSGroup{
+		ServiceType: "Neurologia",
+		Cups: []CUPSEntry{
+			cup("890274", "Consulta", 1),
+			cup("053105", "Bloqueo", 1),
+		},
+	})
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups (consultation + procedure), got %d", len(groups))
+	}
+	// Find procedure group
+	var procGroup *CUPSGroup
+	for i, g := range groups {
+		if findCup(g.Cups, "053105") != nil {
+			procGroup = &groups[i]
+			break
+		}
+	}
+	if procGroup == nil {
+		t.Fatal("missing procedure group")
+	}
+	if procGroup.Espacios != 1 {
+		t.Errorf("expected Espacios=1 (fixed), got %d", procGroup.Espacios)
+	}
+}
+
+// 43. All three → 3 separate groups.
+func TestNeurologia_AllThree(t *testing.T) {
+	groups := applyNeurologiaRules(CUPSGroup{
+		ServiceType: "Neurologia",
+		Cups: []CUPSEntry{
+			cup("890274", "Consulta 1ra", 1),
+			cup("890374", "Control", 1),
+			cup("053105", "Bloqueo", 1),
+		},
+	})
+	if len(groups) != 3 {
+		t.Fatalf("expected 3 groups, got %d", len(groups))
+	}
+}
+
+// 44. Procedure ignores quantity — always 1 space.
+func TestNeurologia_ProcedureIgnoresQuantity(t *testing.T) {
+	groups := applyNeurologiaRules(CUPSGroup{
+		ServiceType: "Neurologia",
+		Cups: []CUPSEntry{cup("053105", "Bloqueo", 10)},
+	})
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].Espacios != 1 {
+		t.Errorf("expected Espacios=1 (fixed, ignores qty=10), got %d", groups[0].Espacios)
+	}
+}
+
+// 45. Control visit only → 1 group.
+func TestNeurologia_ControlOnly(t *testing.T) {
+	groups := applyNeurologiaRules(CUPSGroup{
+		ServiceType: "Neurologia",
+		Cups:        []CUPSEntry{cup("890374", "Control Neuro", 1)},
+	})
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].Espacios != 1 {
+		t.Errorf("expected Espacios=1, got %d", groups[0].Espacios)
+	}
+}
+
+// 46. Force-mapping: 890274 without DB service → "Neurologia".
+func TestNeurologia_ForceMapping(t *testing.T) {
+	mock := newMock(struct {
+		code, name, service string
+		spaces              int
+	}{"890274", "CONSULTA NEUROLOGIA", "", 1})
+
+	cups := []CUPSEntry{cup("890274", "Consulta", 1)}
+	groups, err := GroupByServiceFromDB(context.Background(), cups, mock)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	g := findGroup(groups, "Neurologia")
+	if g == nil {
+		t.Fatal("missing 'Neurologia' group — forceServiceByCode should override empty DB service")
+	}
+}
+
+// ===========================================================================
+// forceServiceByCode tests
+// ===========================================================================
+
+// 47. Force mapping returns correct service for each code type.
+func TestForceServiceByCode(t *testing.T) {
+	tests := []struct {
+		code     string
+		expected string
+	}{
+		{"29120", "Fisiatria"},        // EMG
+		{"891509", "Fisiatria"},       // NC
+		{"891514", "Fisiatria"},       // Dependent
+		{"883101", "Resonancia"},      // RM code
+		{"998702", "Resonancia"},      // Sedación resonancia
+		{"053105", "Neurologia"},      // Bloqueo
+		{"890274", "Neurologia"},      // Consulta 1ra vez
+		{"890374", "Neurologia"},      // Control
+		{"879101", "Tomografia"},      // TAC
+		{"879910", "Tomografia"},      // 3D
+		{"881436", "Ecografia"},       // Obstetric
+		{"882308", "Ecografia"},       // Doppler
+		{"873100", "Radiografia"},     // Rx
+		{"871060", "Radiografia"},     // Rx exception
+		{"999999", ""},                // Unknown
+	}
+
+	for _, tt := range tests {
+		got := forceServiceByCode(tt.code)
+		if got != tt.expected {
+			t.Errorf("forceServiceByCode(%q) = %q, want %q", tt.code, got, tt.expected)
+		}
+	}
+}
+
+// ===========================================================================
+// Bilateral helper and rules tests
+// ===========================================================================
+
+func cupWithObs(code, name string, qty int, obs string) CUPSEntry {
+	return CUPSEntry{Code: code, Name: name, Quantity: qty, Observations: obs}
+}
+
+// 48. isBilateral positive cases.
+func TestIsBilateral_Positive(t *testing.T) {
+	for _, obs := range []string{"bilateral", "BILATERAL", "Bilateral", "rodilla bilateral", "BILATERAL AMB"} {
+		if !isBilateral(obs) {
+			t.Errorf("isBilateral(%q) should be true", obs)
+		}
+	}
+}
+
+// 49. isBilateral negative cases.
+func TestIsBilateral_Negative(t *testing.T) {
+	for _, obs := range []string{"", "normal", "unilateral", "AMB SUPERIORES"} {
+		if isBilateral(obs) {
+			t.Errorf("isBilateral(%q) should be false", obs)
+		}
+	}
+}
+
+// ===========================================================================
+// Radiografía bilateral tests
+// ===========================================================================
+
+// 50. Rx + bilateral → ×2.
+func TestRadiografia_Bilateral(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups:        []CUPSEntry{cupWithObs("873100", "Rx Rodilla", 1, "bilateral")},
+	})
+	if g.Espacios != 2 { // 1 * 2
+		t.Errorf("expected Espacios=2 (1 space ×2 bilateral), got %d", g.Espacios)
+	}
+}
+
+// 51. Rx comparative + bilateral → NO duplica (already includes both sides).
+func TestRadiografia_BilateralComparative(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups:        []CUPSEntry{cupWithObs("873422", "Rodillas comparativas", 1, "bilateral")},
+	})
+	if g.Espacios != 2 { // 2 spaces (exception), NOT doubled
+		t.Errorf("expected Espacios=2 (comparative, no bilateral doubling), got %d", g.Espacios)
+	}
+}
+
+// 52. Rx exception code + bilateral → ×2.
+func TestRadiografia_BilateralException(t *testing.T) {
+	g := applyRadiografiaRules(CUPSGroup{
+		ServiceType: "Radiografia",
+		Cups:        []CUPSEntry{cupWithObs("871040", "Columna LS", 1, "BILATERAL")},
+	})
+	if g.Espacios != 4 { // 2 spaces (exception) ×2
+		t.Errorf("expected Espacios=4 (2 exception ×2 bilateral), got %d", g.Espacios)
+	}
+}
+
+// ===========================================================================
+// Tomografía bilateral tests
+// ===========================================================================
+
+// 53. TAC simple + bilateral → ×2.
+func TestTomografia_BilateralSimple(t *testing.T) {
+	g := applyTomografiaRules(CUPSGroup{
+		ServiceType: "Tomografia",
+		Cups:        []CUPSEntry{cupWithObs("879101", "TAC Rodilla Simple", 1, "bilateral")},
+	})
+	if g.Espacios != 2 { // 1 ×2
+		t.Errorf("expected Espacios=2 (simple ×2 bilateral), got %d", g.Espacios)
+	}
+}
+
+// 54. TAC contrasted + bilateral → ×2 (2→4).
+func TestTomografia_BilateralContrasted(t *testing.T) {
+	g := applyTomografiaRules(CUPSGroup{
+		ServiceType: "Tomografia",
+		Cups:        []CUPSEntry{{Code: "879102", Name: "TAC Hombro C", Quantity: 1, IsContrasted: true, Observations: "Bilateral"}},
+	})
+	if g.Espacios != 4 { // 2 ×2
+		t.Errorf("expected Espacios=4 (contrasted 2 ×2 bilateral), got %d", g.Espacios)
+	}
+}
+
+// 55. TAC 3D override ignores bilateral.
+func TestTomografia_3DOverrideBilateral(t *testing.T) {
+	g := applyTomografiaRules(CUPSGroup{
+		ServiceType: "Tomografia",
+		Cups:        []CUPSEntry{cupWithObs("879910", "3D Reconstrucción", 1, "bilateral")},
+	})
+	if g.Espacios != 3 { // 3D override = always 3
+		t.Errorf("expected Espacios=3 (3D override), got %d", g.Espacios)
+	}
+}
+
+// ===========================================================================
+// Resonancia bilateral tests
+// ===========================================================================
+
+// 56. RM extremity + bilateral → ×2.
+func TestResonancia_BilateralExtremity(t *testing.T) {
+	g := applyResonanciaRules(CUPSGroup{
+		ServiceType: "Resonancia",
+		Cups:        []CUPSEntry{cupWithObs("883512", "RM Articulación MS", 1, "bilateral")},
+	})
+	// 883512 simple=1, bilateral ×2 = 2
+	if g.Espacios != 2 {
+		t.Errorf("expected Espacios=2 (1 ×2 bilateral), got %d", g.Espacios)
+	}
+}
+
+// 57. RM non-eligible (cerebro) + bilateral → NO duplica.
+func TestResonancia_BilateralNonEligible(t *testing.T) {
+	g := applyResonanciaRules(CUPSGroup{
+		ServiceType: "Resonancia",
+		Cups:        []CUPSEntry{cupWithObs("883101", "RM Cerebral", 1, "bilateral")},
+	})
+	// 883101 simple=1, NOT in bilateral-eligible → stays 1
+	if g.Espacios != 1 {
+		t.Errorf("expected Espacios=1 (cerebro, no bilateral), got %d", g.Espacios)
+	}
+}
+
+// 58. RM extremity contrasted + bilateral → ×2.
+func TestResonancia_BilateralContrasted(t *testing.T) {
+	g := applyResonanciaRules(CUPSGroup{
+		ServiceType: "Resonancia",
+		Cups:        []CUPSEntry{{Code: "883522", Name: "RM Art MI", Quantity: 1, IsContrasted: true, Observations: "BILATERAL"}},
+	})
+	// 883522 contrasted=2, bilateral ×2 = 4
+	if g.Espacios != 4 {
+		t.Errorf("expected Espacios=4 (contrasted 2 ×2 bilateral), got %d", g.Espacios)
+	}
+}
+
+// 59. RM bilateral + sedation: bilateral applied before sedation.
+func TestResonancia_BilateralPlusSedation(t *testing.T) {
+	g := applyResonanciaRules(CUPSGroup{
+		ServiceType: "Resonancia",
+		Cups: []CUPSEntry{
+			cupWithObs("883512", "RM Articulación MS", 1, "bilateral"),
+			cup("998702", "Sedación", 1),
+		},
+	})
+	// 883512 simple=1 ×2 bilateral = 2, sedation +1 (simple) = 3
+	if g.Espacios != 3 {
+		t.Errorf("expected Espacios=3 (1×2 bilateral + 1 sedation), got %d", g.Espacios)
+	}
+}

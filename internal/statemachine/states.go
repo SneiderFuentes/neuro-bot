@@ -121,6 +121,7 @@ const (
 // === Búsqueda y Agendamiento ===
 const (
 	StateSearchSlots        = "SEARCH_SLOTS"
+	StateSlotSearchRetry    = "SLOT_SEARCH_RETRY"
 	StateShowSlots          = "SHOW_SLOTS"
 	StateNoSlotsAvailable   = "NO_SLOTS_AVAILABLE"
 	StateOfferWaitingList   = "OFFER_WAITING_LIST"
@@ -254,6 +255,7 @@ var stateTypes = map[string]StateType{
 
 	// Búsqueda y Agendamiento
 	StateSearchSlots:       StateTypeAutomatic,
+	StateSlotSearchRetry:   StateTypeInteractive,
 	StateShowSlots:         StateTypeInteractive,
 	StateNoSlotsAvailable:  StateTypeAutomatic,
 	StateOfferWaitingList:  StateTypeInteractive,

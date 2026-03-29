@@ -9,11 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/config"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 // ErrConversationNotActive is returned when the Conversations API rejects a
@@ -44,8 +46,9 @@ type Client struct {
 	teamIDs []string
 	// ConversationID cache: phone → conversationID (from conversation.created webhook).
 	// Self-replacing: new conversation.created overwrites the old entry automatically.
-	mu        sync.RWMutex
-	convCache map[string]string
+	mu          sync.RWMutex
+	convCache   map[string]string
+	convCacheTS map[string]time.Time
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -70,7 +73,8 @@ func NewClient(cfg *config.Config) *Client {
 		voiceFlowID:     cfg.BirdVoiceFlowID,
 		voiceWebhookURL: voiceNotificationURL(cfg),
 		teamIDs:   collectTeamIDs(cfg),
-		convCache: make(map[string]string),
+		convCache:   make(map[string]string),
+		convCacheTS: make(map[string]time.Time),
 	}
 }
 
@@ -83,6 +87,7 @@ func NewClientForTest(baseURL string) *Client {
 		workspaceID:         "ws-test",
 		channelID:           "ch-test",
 		convCache:           make(map[string]string),
+		convCacheTS:         make(map[string]time.Time),
 	}
 }
 
@@ -97,12 +102,61 @@ func collectTeamIDs(cfg *config.Config) []string {
 	return ids
 }
 
+// maxConvCacheEntries is a safety cap to prevent unbounded memory growth.
+// Under normal load the 4h TTL eviction keeps the cache well below this.
+const maxConvCacheEntries = 50000
+
 // CacheConversationID stores the conversationID for a phone (from conversation.created webhook).
 // Self-replacing: a new conversation.created webhook overwrites the previous entry.
+// If the cache exceeds maxConvCacheEntries, the oldest entry is evicted.
 func (c *Client) CacheConversationID(phone, conversationID string) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Evict oldest entry if at capacity (skip if overwriting existing key)
+	if _, exists := c.convCache[phone]; !exists && len(c.convCache) >= maxConvCacheEntries {
+		var oldestPhone string
+		var oldestTS time.Time
+		for p, ts := range c.convCacheTS {
+			if oldestTS.IsZero() || ts.Before(oldestTS) {
+				oldestPhone = p
+				oldestTS = ts
+			}
+		}
+		if oldestPhone != "" {
+			delete(c.convCache, oldestPhone)
+			delete(c.convCacheTS, oldestPhone)
+		}
+	}
+
 	c.convCache[phone] = conversationID
-	c.mu.Unlock()
+	c.convCacheTS[phone] = time.Now()
+}
+
+// StartCacheCleanup periodically evicts stale entries from convCache.
+func (c *Client) StartCacheCleanup(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.evictStaleCache(4 * time.Hour)
+		}
+	}
+}
+
+func (c *Client) evictStaleCache(ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cutoff := time.Now().Add(-ttl)
+	for phone, ts := range c.convCacheTS {
+		if ts.Before(cutoff) {
+			delete(c.convCache, phone)
+			delete(c.convCacheTS, phone)
+		}
+	}
 }
 
 // GetCachedConversationID returns the cached conversationID for a phone, or "" if not found.
@@ -110,6 +164,15 @@ func (c *Client) GetCachedConversationID(phone string) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.convCache[phone]
+}
+
+// InvalidateCachedConversationID removes the cached conversationID for a phone.
+// Called when a conversation is closed or deleted via Bird webhook.
+func (c *Client) InvalidateCachedConversationID(phone string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.convCache, phone)
+	delete(c.convCacheTS, phone)
 }
 
 // conversationsBase returns the base URL for the Conversations/Collaborations API.
@@ -155,9 +218,11 @@ func (c *Client) MarkConversationEscalated(conversationID, teamName, patientName
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		slog.Warn("mark conversation escalated failed",
-			"status", resp.StatusCode, "body", string(respBody))
+			"status", resp.StatusCode, "body", string(respBody),
+			"conversation_id", conversationID)
+		return fmt.Errorf("mark escalated HTTP %d", resp.StatusCode)
 	}
 
 	return nil
@@ -197,7 +262,7 @@ func (c *Client) sendToConversation(conversationID string, body interface{}, dra
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	slog.Debug("conversations_api_response", "status", resp.StatusCode, "conversation_id", conversationID, "body_len", len(respBody))
 
@@ -260,6 +325,7 @@ func (c *Client) FetchMessageText(messageID string) string {
 	url := fmt.Sprintf("%s/%s", c.messagesURL(), messageID)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
+		slog.Warn("fetch_message_text_request_failed", "error", err, "message_id", messageID)
 		return ""
 	}
 	req.Header.Set("Authorization", "AccessKey "+c.apiKeyWA)
@@ -285,6 +351,7 @@ func (c *Client) FetchMessageText(messageID string) string {
 		} `json:"body"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		slog.Warn("fetch_message_text_decode_failed", "error", err, "message_id", messageID)
 		return ""
 	}
 	return result.Body.Text.Text
@@ -315,7 +382,7 @@ func (c *Client) trySendToConversation(phone, conversationID string, body interf
 
 		if freshID, lookErr := c.LookupConversationByPhone(phone); lookErr == nil && freshID != "" && freshID != conversationID {
 			slog.Info("conversation_id_self_healed",
-				"phone", phone,
+				"phone", utils.MaskPhone(phone),
 				"old", conversationID,
 				"new", freshID,
 			)
@@ -326,7 +393,7 @@ func (c *Client) trySendToConversation(phone, conversationID string, body interf
 		}
 	}
 
-	slog.Warn("conversations_api_fallback", "error", err, "phone", phone)
+	slog.Warn("conversations_api_fallback", "error", err, "phone", utils.MaskPhone(phone))
 	return "", err, false
 }
 
@@ -383,7 +450,7 @@ func (c *Client) SendButtons(to, conversationID, text string, buttons []Button) 
 		return id, nil
 	}
 	// Fallback: Channels API — interactive buttons not supported, send as numbered text
-	slog.Info("send_buttons_text_fallback", "phone", to, "buttons", len(buttons))
+	slog.Info("send_buttons_text_fallback", "phone", utils.MaskPhone(to), "buttons", len(buttons))
 	var textFallback string
 	textFallback = text + "\n"
 	for i, btn := range buttons {
@@ -399,7 +466,7 @@ func (c *Client) SendList(to, conversationID, body, buttonLabel string, sections
 	for _, s := range sections {
 		totalRows += len(s.Rows)
 	}
-	slog.Debug("send_list_building", "phone", to, "sections", len(sections), "total_rows", totalRows, "button", buttonLabel)
+	slog.Debug("send_list_building", "phone", utils.MaskPhone(to), "sections", len(sections), "total_rows", totalRows, "button", buttonLabel)
 
 	items := make([]map[string]interface{}, len(sections))
 	for i, section := range sections {
@@ -432,15 +499,17 @@ func (c *Client) SendList(to, conversationID, body, buttonLabel string, sections
 	}
 
 	// Debug: log the full payload for list messages
-	if debugJSON, err := json.Marshal(msgBody); err == nil {
-		slog.Debug("send_list_payload", "phone", to, "payload", string(debugJSON))
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		if debugJSON, err := json.Marshal(msgBody); err == nil {
+			slog.Debug("send_list_payload", "phone", utils.MaskPhone(to), "payload", string(debugJSON))
+		}
 	}
 
 	if id, _, ok := c.trySendToConversation(to, conversationID, msgBody); ok {
 		return id, nil
 	}
 	// Fallback: Channels API — interactive lists not supported, send as numbered text
-	slog.Info("send_list_text_fallback", "phone", to, "sections", len(sections))
+	slog.Info("send_list_text_fallback", "phone", utils.MaskPhone(to), "sections", len(sections))
 	var textFallback string
 	textFallback = body + "\n"
 	idx := 1
@@ -500,8 +569,10 @@ func (c *Client) SendTemplate(to string, tmpl TemplateConfig) (string, error) {
 		},
 	}
 
-	if debugJSON, err := json.Marshal(payload); err == nil {
-		slog.Debug("send_template_payload", "to", to, "payload", string(debugJSON))
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		if debugJSON, err := json.Marshal(payload); err == nil {
+			slog.Debug("send_template_payload", "to", to, "payload", string(debugJSON))
+		}
 	}
 
 	return c.sendMessage(c.templatesURL(), payload, to)
@@ -635,7 +706,7 @@ func (c *Client) PlaceCall(to string, params map[string]string) (string, error) 
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("voice call API error %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -696,7 +767,7 @@ func (c *Client) SendGather(callID string) (commandID string, err error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("gather API error %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -711,8 +782,12 @@ func (c *Client) SendGather(callID string) (commandID string, err error) {
 	// Schedule hangup after max gather duration: retries(4) × timeout(10s) + 15s buffer.
 	// Bird keeps the call alive after gather — we must explicitly hang it up.
 	// The completed webhook will then trigger GetGatherResult.
+	hangupCtx, hangupCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	go func() {
-		time.Sleep(55 * time.Second)
+		defer hangupCancel()
+		if err := sleepWithContext(hangupCtx, 55*time.Second); err != nil {
+			return // context cancelled (shutdown)
+		}
 		if err := c.HangupCall(callID); err != nil {
 			slog.Debug("hangup after gather (may already be closed)", "callId", callID, "error", err)
 		}
@@ -747,7 +822,7 @@ func (c *Client) GetGatherResult(callID, commandID string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	slog.Info("get gather command result", "callId", callID, "commandId", commandID, "raw", string(body))
 
 	if resp.StatusCode >= 400 {
@@ -788,7 +863,7 @@ func (c *Client) HangupCall(callID string) error {
 		return fmt.Errorf("hangup http: %w", err)
 	}
 	defer resp.Body.Close()
-	io.ReadAll(resp.Body) // drain
+	io.Copy(io.Discard, resp.Body) // drain
 
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("hangup API error %d", resp.StatusCode)
@@ -834,7 +909,7 @@ func (c *Client) GetCallDetails(callID string) (*CallDetails, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("get call API error %d: %s", resp.StatusCode, string(body))
 	}
@@ -912,7 +987,7 @@ func (c *Client) listAgents(statusFilter string) ([]AgentInfo, error) {
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("list agents: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
@@ -1011,7 +1086,7 @@ func (c *Client) searchFeedItem(conversationID string) (string, string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return "", "", fmt.Errorf("search feed items: status %d, body: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -1048,10 +1123,10 @@ func (c *Client) doPatchFeedItem(url string, jsonBody []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { io.Copy(io.Discard, resp.Body); resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if resp.StatusCode == 404 {
 			return 404, nil
 		}
@@ -1136,7 +1211,7 @@ func (c *Client) CloseFeedItems(conversationID string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		slog.Warn("close_feed_items_search_error",
 			"status", resp.StatusCode,
 			"body", string(respBody),
@@ -1274,7 +1349,7 @@ func (c *Client) LookupConversationByPhone(phone string) (string, error) {
 		}
 		defer resp.Body.Close()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if resp.StatusCode >= 400 {
 			return "", fmt.Errorf("lookup conversation: status %d, body: %s", resp.StatusCode, string(respBody))
 		}
@@ -1303,7 +1378,7 @@ func (c *Client) LookupConversationByPhone(phone string) (string, error) {
 			for _, p := range conv.FeaturedParticipants {
 				if p.IdentifierValue == phone || p.Contact.IdentifierValue == phone {
 					slog.Info("conversation_lookup_success",
-						"phone", phone,
+						"phone", utils.MaskPhone(phone),
 						"conversation_id", conv.ID,
 						"page", pages,
 					)
@@ -1321,7 +1396,7 @@ func (c *Client) LookupConversationByPhone(phone string) (string, error) {
 	}
 
 	slog.Warn("conversation_lookup_not_found",
-		"phone", phone,
+		"phone", utils.MaskPhone(phone),
 		"pages_searched", pages,
 	)
 	return "", nil
@@ -1352,7 +1427,7 @@ func (c *Client) EscalateToAgent(conversationID, phone, teamID, teamName, patien
 				}
 				lookedUp, err := c.LookupConversationByPhone(phone)
 				if err != nil {
-					slog.Warn("conversation_lookup_failed", "phone", phone, "attempt", attempt, "error", err)
+					slog.Warn("conversation_lookup_failed", "phone", utils.MaskPhone(phone), "attempt", attempt, "error", err)
 				} else if lookedUp != "" {
 					conversationID = lookedUp
 				}
@@ -1361,7 +1436,7 @@ func (c *Client) EscalateToAgent(conversationID, phone, teamID, teamName, patien
 			// Verify the ID is still active via cache (populated by processMessage lookup)
 			if cached := c.GetCachedConversationID(phone); cached != "" && cached != conversationID {
 				slog.Info("escalation_conversation_id_refreshed",
-					"phone", phone,
+					"phone", utils.MaskPhone(phone),
 					"old", conversationID,
 					"new", cached,
 				)
@@ -1487,7 +1562,7 @@ func (c *Client) UpdateFeedItem(conversationID, messageID string, closed bool, t
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		slog.Warn("feed item update failed", "status", resp.StatusCode, "body", string(respBody))
 	}
 
@@ -1527,7 +1602,7 @@ func (c *Client) TagConversation(conversationID, tag string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		slog.Warn("tag conversation failed", "status", resp.StatusCode, "body", string(respBody))
 	}
 
@@ -1554,7 +1629,7 @@ func (c *Client) sendMessage(url string, payload interface{}, phone ...string) (
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("bird api error: status %d, body: %s", resp.StatusCode, string(respBody))
@@ -1607,6 +1682,20 @@ func (c *Client) sendWithRetry(req *http.Request, maxRetries int) (*http.Respons
 			continue
 		}
 
+		// Handle rate limiting (429) with Retry-After header
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if attempt == maxRetries {
+				return resp, nil
+			}
+			resp.Body.Close()
+			delay := parseRetryAfter(resp.Header.Get("Retry-After"))
+			slog.Warn("bird api rate limited", "attempt", attempt+1, "retry_after", delay)
+			if err := sleepWithContext(ctx, delay); err != nil {
+				return nil, fmt.Errorf("bird api retry cancelled: %w", err)
+			}
+			continue
+		}
+
 		if resp.StatusCode < 500 {
 			return resp, nil
 		}
@@ -1635,4 +1724,16 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// parseRetryAfter parses the Retry-After header (integer seconds format).
+// Returns 2s default if missing, unparseable, or out of range [1, 120].
+func parseRetryAfter(value string) time.Duration {
+	if value == "" {
+		return 2 * time.Second
+	}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 && seconds <= 120 {
+		return time.Duration(seconds) * time.Second
+	}
+	return 2 * time.Second
 }

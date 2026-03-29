@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSendText_PayloadAndResponse(t *testing.T) {
@@ -733,5 +734,72 @@ func TestPickLeastLoadedAgent(t *testing.T) {
 	best = pickLeastLoadedAgent(agents, "team-c")
 	if best != nil {
 		t.Errorf("expected nil for unknown team, got %v", best)
+	}
+}
+
+func TestSendMessage_429Retries(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(429)
+			return
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"id":"msg-after-429"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClientForTest(srv.URL)
+	msgID, err := c.SendText("+573001234567", "", "test")
+	if err != nil {
+		t.Fatalf("expected success after 429 retry, got %v", err)
+	}
+	if msgID != "msg-after-429" {
+		t.Errorf("expected msg-after-429, got %s", msgID)
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts (2x429 + 1x200), got %d", attempts)
+	}
+}
+
+func TestSendMessage_429ExhaustedRetries(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(429)
+	}))
+	defer srv.Close()
+
+	c := NewClientForTest(srv.URL)
+	_, err := c.SendText("+573001234567", "", "test")
+	if err == nil {
+		t.Error("expected error after exhausting retries on 429")
+	}
+	// sendMessage uses maxRetries=2 → 3 attempts total
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected time.Duration
+	}{
+		{"", 2 * time.Second},
+		{"5", 5 * time.Second},
+		{"0", 2 * time.Second},
+		{"-1", 2 * time.Second},
+		{"999", 2 * time.Second},
+		{"120", 120 * time.Second},
+		{"abc", 2 * time.Second},
+	}
+	for _, tt := range tests {
+		got := parseRetryAfter(tt.input)
+		if got != tt.expected {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", tt.input, got, tt.expected)
+		}
 	}
 }

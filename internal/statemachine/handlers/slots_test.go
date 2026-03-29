@@ -73,7 +73,7 @@ func TestSearchSlots_Found(t *testing.T) {
 	)
 
 	m := sm.NewMachine()
-	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil, nil)
+	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil, nil, nil)
 
 	sess := testSess(sm.StateSearchSlots)
 	sess.Context["cups_code"] = "890271"
@@ -103,7 +103,7 @@ func TestSearchSlots_NotFound(t *testing.T) {
 	)
 
 	m := sm.NewMachine()
-	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil, nil)
+	RegisterSlotHandlers(m, slotSvc, nil, nil, nil, nil, nil, nil, nil)
 
 	sess := testSess(sm.StateSearchSlots)
 	sess.Context["cups_code"] = "890271"
@@ -328,7 +328,7 @@ func TestCreateAppointment_Success(t *testing.T) {
 	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil, nil))
 
 	// Build procedures_json for a single group
 	groups := []services.CUPSGroup{
@@ -370,7 +370,7 @@ func TestCreateAppointment_SlotNotFound(t *testing.T) {
 	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil, nil))
 
 	sess := testSess(sm.StateCreateAppointment)
 	// No available_slots_json or selected_slot_id -> slot not found
@@ -399,7 +399,7 @@ func TestCreateAppointment_SlotTakenError(t *testing.T) {
 	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil, nil))
 
 	// Build procedures_json for a single group
 	groups := []services.CUPSGroup{
@@ -446,7 +446,7 @@ func TestCreateAppointment_GenericError(t *testing.T) {
 	apptSvc := services.NewAppointmentService(repo, nil)
 
 	m := sm.NewMachine()
-	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil))
+	m.Register(sm.StateCreateAppointment, createAppointmentHandler(apptSvc, nil, nil, nil, nil))
 
 	// Build procedures_json for a single group
 	groups := []services.CUPSGroup{
@@ -577,15 +577,15 @@ func TestBuildObservations_ContrastedOnly(t *testing.T) {
 
 func TestBuildObservations_SedatedOnly(t *testing.T) {
 	got := buildObservations(false, true)
-	if got != "Bajo Sedacion" {
-		t.Errorf("expected %q, got %q", "Bajo Sedacion", got)
+	if got != "Bajo Sedación" {
+		t.Errorf("expected %q, got %q", "Bajo Sedación", got)
 	}
 }
 
 func TestBuildObservations_Both(t *testing.T) {
 	got := buildObservations(true, true)
-	if got != "Contrastada, Bajo Sedacion" {
-		t.Errorf("expected %q, got %q", "Contrastada, Bajo Sedacion", got)
+	if got != "Contrastada, Bajo Sedación" {
+		t.Errorf("expected %q, got %q", "Contrastada, Bajo Sedación", got)
 	}
 }
 
@@ -743,8 +743,8 @@ func TestNoSlots_AutoAddToWL_CreateError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.NextState != sm.StateTerminated {
-		t.Errorf("expected TERMINATED on error, got %s", result.NextState)
+	if result.NextState != sm.StateMainMenu {
+		t.Errorf("expected MAIN_MENU on error (patient can retry), got %s", result.NextState)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/neuro-bot/neuro-bot/internal/session"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 // handleWaitingList processes responses to the waiting list availability template.
@@ -96,7 +97,7 @@ func (m *NotificationManager) handleWaitingList(phone, action string, pending *P
 		}
 
 		slog.Info("waiting list session created",
-			"phone", phone,
+			"phone", utils.MaskPhone(phone),
 			"entry_id", entry.ID,
 			"cups_code", entry.CupsCode)
 
@@ -104,7 +105,7 @@ func (m *NotificationManager) handleWaitingList(phone, action string, pending *P
 		m.waitingListRepo.UpdateStatus(ctx, pending.WaitingListID, "declined")
 
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"Entendido. Si cambias de opinion, puedes escribirnos para agendar tu cita.")
+			"Entendido. Si cambias de opinión, puedes escribirnos para agendar tu cita.")
 
 		if pending.ConversationID != "" {
 			m.birdClient.CloseFeedItems(pending.ConversationID)
@@ -116,7 +117,7 @@ func (m *NotificationManager) handleWaitingList(phone, action string, pending *P
 			})
 		}
 
-		slog.Info("waiting list declined", "phone", phone, "entry_id", pending.WaitingListID)
+		slog.Info("waiting list declined", "phone", utils.MaskPhone(phone), "entry_id", pending.WaitingListID)
 	}
 }
 
@@ -126,7 +127,7 @@ func (m *NotificationManager) handleWaitingListTimeout(pending *PendingNotificat
 	ctx := context.Background()
 	m.waitingListRepo.UpdateStatus(ctx, pending.WaitingListID, "expired")
 	// Already removed from sync.Map by handleTimeout via LoadAndDelete
-	slog.Info("waiting list notification expired", "phone", pending.Phone, "entry_id", pending.WaitingListID)
+	slog.Info("waiting list notification expired", "phone", utils.MaskPhone(pending.Phone), "entry_id", pending.WaitingListID)
 }
 
 func boolToStr(b bool) string {

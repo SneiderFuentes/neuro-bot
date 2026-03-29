@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -103,7 +104,9 @@ func (h *AlertHandler) Handle(ctx context.Context, r slog.Record) error {
 	select {
 	case h.ch <- msg:
 	default:
-		// Channel full, drop alert (don't block the application)
+		// Channel full, drop alert (don't block the application).
+		// Use log.Println instead of slog to avoid infinite recursion (this IS the slog handler).
+		log.Println("WARN: telegram alert channel full, dropping alert")
 	}
 
 	return err

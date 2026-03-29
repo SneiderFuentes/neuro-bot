@@ -42,6 +42,9 @@ func (m *mockApptRepoNotif) Create(ctx context.Context, input domain.CreateAppoi
 func (m *mockApptRepoNotif) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
 	return nil
 }
+func (m *mockApptRepoNotif) CreatePxCitaBatch(ctx context.Context, inputs []domain.CreatePxCitaInput) error {
+	return nil
+}
 func (m *mockApptRepoNotif) Confirm(ctx context.Context, id string, channel, channelID string) error {
 	if m.confirmFn != nil {
 		return m.confirmFn(ctx, id, channel, channelID)

@@ -100,15 +100,15 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 				if m.addrMapper != nil {
 					msg += "\n" + m.addrMapper.FormatAddress(address)
 				} else {
-					msg += fmt.Sprintf("\n*Direccion:* %s", address)
+					msg += fmt.Sprintf("\n*Dirección:* %s", address)
 				}
 			}
 			if prepText != "" {
-				msg += "\n\n*Preparacion:*" + prepText
+				msg += "\n\n*Preparación:*" + prepText
 			}
 		}
 
-		msg += "\n\nRecuerda presentarte 15 minutos antes. Te esperamos!"
+		msg += "\n\nRecuerda presentarte 30 minutos antes para realizar el proceso de facturación. Te esperamos!"
 
 		m.birdClient.SendText(phone, pending.ConversationID, msg)
 
@@ -119,7 +119,7 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 		// Close any active session so inactivity reminders don't fire
 		if m.sessionRepo != nil {
 			if err := m.sessionRepo.CompleteActiveByPhone(ctx, phone); err != nil {
-				slog.Error("confirm: close active session", "phone", phone, "error", err)
+				slog.Error("confirm: close active session", "phone", utils.MaskPhone(phone), "error", err)
 			}
 		}
 
@@ -136,7 +136,7 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 		}
 
 		slog.Info("proactive confirmation success",
-			"phone", phone,
+			"phone", utils.MaskPhone(phone),
 			"appointment_id", pending.AppointmentID,
 			"total_confirmed", len(allAppts))
 
@@ -160,9 +160,11 @@ func (m *NotificationManager) handleConfirmationTimeout(pending *PendingNotifica
 	switch pending.RetryCount {
 	case 0:
 		// Step 1: Follow-up #1 — friendly text, NO agent assignment
-		m.birdClient.SendText(pending.Phone, pending.ConversationID,
-			"Hola! Aun no recibimos tu respuesta sobre tu cita de manana. "+
-				"Por favor confirma, cancela o reprograma para que podamos gestionar tu espacio.")
+		if _, err := m.birdClient.SendText(pending.Phone, pending.ConversationID,
+			"¡Hola! Aún no recibimos tu respuesta sobre tu cita de mañana. "+
+				"Por favor confirma, cancela o reprograma para que podamos gestionar tu espacio."); err != nil {
+			slog.Error("followup1_send_failed", "phone", utils.MaskPhone(pending.Phone), "error", err)
+		}
 
 		pending.RetryCount = 1
 		duration := time.Duration(safeHours(m.cfg.ConfirmFollowup2Hours, 3)) * time.Hour
@@ -174,17 +176,19 @@ func (m *NotificationManager) handleConfirmationTimeout(pending *PendingNotifica
 			if err := m.persister.Upsert(context.Background(), pending.Phone, pending.Type,
 				pending.AppointmentID, pending.WaitingListID, pending.BirdMessageID, pending.ConversationID,
 				pending.RetryCount, expiresAt); err != nil {
-				slog.Error("persist followup1", "phone", pending.Phone, "error", err)
+				slog.Error("persist followup1", "phone", utils.MaskPhone(pending.Phone), "error", err)
 			}
 		}
 
-		slog.Info("confirmation followup 1 sent", "phone", pending.Phone)
+		slog.Info("confirmation followup 1 sent", "phone", utils.MaskPhone(pending.Phone))
 
 	case 1:
 		// Step 2: Follow-up #2 — direct text, NO agent assignment
-		m.birdClient.SendText(pending.Phone, pending.ConversationID,
-			"Recordatorio: Tu cita de manana aun no ha sido confirmada. "+
-				"Si no recibimos respuesta, te llamaremos para confirmar.")
+		if _, err := m.birdClient.SendText(pending.Phone, pending.ConversationID,
+			"Recordatorio: Tu cita de mañana aún no ha sido confirmada. "+
+				"Si no recibimos respuesta, te llamaremos para confirmar."); err != nil {
+			slog.Error("followup2_send_failed", "phone", utils.MaskPhone(pending.Phone), "error", err)
+		}
 
 		pending.RetryCount = 2
 		// Safety-net timer: 2h (wait for 15:00 IVR task) + PostIVR minutes + 30min buffer
@@ -197,11 +201,11 @@ func (m *NotificationManager) handleConfirmationTimeout(pending *PendingNotifica
 			if err := m.persister.Upsert(context.Background(), pending.Phone, pending.Type,
 				pending.AppointmentID, pending.WaitingListID, pending.BirdMessageID, pending.ConversationID,
 				pending.RetryCount, expiresAt); err != nil {
-				slog.Error("persist followup2", "phone", pending.Phone, "error", err)
+				slog.Error("persist followup2", "phone", utils.MaskPhone(pending.Phone), "error", err)
 			}
 		}
 
-		slog.Info("confirmation followup 2 sent", "phone", pending.Phone)
+		slog.Info("confirmation followup 2 sent", "phone", utils.MaskPhone(pending.Phone))
 
 	case 2, 3:
 		// Step 3/4: Escalate to agent (step 2 = IVR didn't run, step 3 = post-IVR)
@@ -244,7 +248,7 @@ func (m *NotificationManager) escalateToAgent(pending *PendingNotification) {
 
 	// 3. Message to patient
 	m.birdClient.SendText(pending.Phone, pending.ConversationID,
-		"Un asistente del centro se comunicara contigo para confirmar tu cita de manana.")
+		"Un asistente del centro se comunicará contigo para confirmar tu cita de mañana.")
 
 	// 4. Assign to best available agent
 	if pending.ConversationID != "" {
@@ -264,7 +268,7 @@ func (m *NotificationManager) escalateToAgent(pending *PendingNotification) {
 	}
 
 	slog.Info("confirmation escalated to agent",
-		"phone", pending.Phone,
+		"phone", utils.MaskPhone(pending.Phone),
 		"appointment_id", pending.AppointmentID,
 		"retry_count", pending.RetryCount)
 }
@@ -278,14 +282,14 @@ func (m *NotificationManager) startConfirmRescheduleSession(phone string, pendin
 	if err != nil || appt == nil {
 		slog.Error("startConfirmRescheduleSession: find appointment", "error", err, "appointment_id", pending.AppointmentID)
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"No pudimos encontrar tu cita. Por favor contacta a la clinica.")
+			"No pudimos encontrar tu cita. Por favor contacta a la clínica.")
 		return
 	}
 
 	if m.sessionRepo == nil || m.workerPool == nil {
 		slog.Error("startConfirmRescheduleSession: missing session/worker dependencies")
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"Servicio temporalmente no disponible. Por favor intenta mas tarde.")
+			"Servicio temporalmente no disponible. Por favor intenta más tarde.")
 		return
 	}
 
@@ -301,7 +305,7 @@ func (m *NotificationManager) startConfirmRescheduleSession(phone string, pendin
 		isContrasted = "1"
 	}
 	isSedated := "0"
-	if strings.Contains(appt.Observations, "Sedacion") {
+	if strings.Contains(appt.Observations, "Sedaci") {
 		isSedated = "1"
 	}
 
@@ -326,7 +330,7 @@ func (m *NotificationManager) startConfirmRescheduleSession(phone string, pendin
 
 	// Close any pre-existing session to avoid orphan inactivity timers
 	if err := m.sessionRepo.CompleteActiveByPhone(ctx, phone); err != nil {
-		slog.Error("startConfirmRescheduleSession: close old session", "phone", phone, "error", err)
+		slog.Error("startConfirmRescheduleSession: close old session", "phone", utils.MaskPhone(phone), "error", err)
 	}
 
 	sess := &session.Session{
@@ -373,18 +377,18 @@ func (m *NotificationManager) startConfirmRescheduleSession(phone string, pendin
 
 	if err := m.sessionRepo.Create(ctx, sess); err != nil {
 		slog.Error("startConfirmRescheduleSession: create session", "error", err)
-		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
+		m.birdClient.SendText(phone, pending.ConversationID, "Lo sentimos, ocurrió un problema. Por favor intenta más tarde.")
 		return
 	}
 	if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessCtx); err != nil {
 		slog.Error("startConfirmRescheduleSession: set context", "error", err)
 		m.sessionRepo.UpdateStatus(ctx, sess.ID, session.StatusCompleted) // cleanup orphan
-		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
+		m.birdClient.SendText(phone, pending.ConversationID, "Lo sentimos, ocurrió un problema. Por favor intenta más tarde.")
 		return
 	}
 
 	m.workerPool.EnqueueVirtual(phone)
-	slog.Info("confirm_reschedule_session created", "phone", phone, "appointment_id", pending.AppointmentID)
+	slog.Info("confirm_reschedule_session created", "phone", utils.MaskPhone(phone), "appointment_id", pending.AppointmentID)
 }
 
 // startConfirmCancelSession creates a new session at CONFIRM_CANCEL_NOTIF
@@ -396,14 +400,14 @@ func (m *NotificationManager) startConfirmCancelSession(phone string, pending *P
 	if err != nil || appt == nil {
 		slog.Error("startConfirmCancelSession: find appointment", "error", err, "appointment_id", pending.AppointmentID)
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"No pudimos encontrar tu cita. Por favor contacta a la clinica.")
+			"No pudimos encontrar tu cita. Por favor contacta a la clínica.")
 		return
 	}
 
 	if m.sessionRepo == nil || m.workerPool == nil {
 		slog.Error("startConfirmCancelSession: missing session/worker dependencies")
 		m.birdClient.SendText(phone, pending.ConversationID,
-			"Servicio temporalmente no disponible. Por favor intenta mas tarde.")
+			"Servicio temporalmente no disponible. Por favor intenta más tarde.")
 		return
 	}
 
@@ -441,7 +445,7 @@ func (m *NotificationManager) startConfirmCancelSession(phone string, pending *P
 
 	// Close any pre-existing session to avoid orphan inactivity timers
 	if err := m.sessionRepo.CompleteActiveByPhone(ctx, phone); err != nil {
-		slog.Error("startConfirmCancelSession: close old session", "phone", phone, "error", err)
+		slog.Error("startConfirmCancelSession: close old session", "phone", utils.MaskPhone(phone), "error", err)
 	}
 
 	sess := &session.Session{
@@ -467,16 +471,16 @@ func (m *NotificationManager) startConfirmCancelSession(phone string, pending *P
 
 	if err := m.sessionRepo.Create(ctx, sess); err != nil {
 		slog.Error("startConfirmCancelSession: create session", "error", err)
-		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
+		m.birdClient.SendText(phone, pending.ConversationID, "Lo sentimos, ocurrió un problema. Por favor intenta más tarde.")
 		return
 	}
 	if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessCtx); err != nil {
 		slog.Error("startConfirmCancelSession: set context", "error", err)
 		m.sessionRepo.UpdateStatus(ctx, sess.ID, session.StatusCompleted) // cleanup orphan
-		m.birdClient.SendText(phone, pending.ConversationID, "Error interno. Por favor intenta mas tarde.")
+		m.birdClient.SendText(phone, pending.ConversationID, "Lo sentimos, ocurrió un problema. Por favor intenta más tarde.")
 		return
 	}
 
 	m.workerPool.EnqueueVirtual(phone)
-	slog.Info("confirm_cancel_session created", "phone", phone, "appointment_id", pending.AppointmentID)
+	slog.Info("confirm_cancel_session created", "phone", utils.MaskPhone(phone), "appointment_id", pending.AppointmentID)
 }

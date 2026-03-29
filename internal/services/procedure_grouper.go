@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"strings"
 
 	"github.com/neuro-bot/neuro-bot/internal/repository"
 )
@@ -93,10 +94,118 @@ var emgDependentCodes = map[string]bool{
 	"891503": true, // REFLEJO NEUROLOGICO TRIGEMINO FACIAL
 }
 
+// ── Radiografía (870-873xxx) rules ──────────────────────────────────────────
+// All Rx grouped into 1 appointment. Spaces = sum of individual (1 default, exceptions 2-3).
+// Source: config/ai.php from legacy Laravel system.
+var radiografiaExceptions = map[string]int{
+	"871060": 3, // Columna vertebral total
+	"873302": 3, // Medición miembros inferiores / pie plano
+	"871030": 2, // Columna dorsolumbar
+	"871040": 2, // Columna lumbosacra
+	"871050": 2, // Sacro-cóccix
+	"870005": 2, // Mastoides comparativas
+	"873123": 2, // Extremidades superiores comparativas
+	"873202": 2, // Articulaciones acromioclaviculares comparativas
+	"873303": 2, // Pies con apoyo comparativos
+	"873412": 2, // Pelvis (cadera) comparativa
+	"873422": 2, // Rodillas de pie comparativas
+	"873443": 2, // Extremidades inferiores comparativas
+	"873444": 2, // Proyecciones adicionales extremidades
+}
+
+// ── Tomografía (879xxx) rules ───────────────────────────────────────────────
+// Simple=1, Contrasted=2. Fixed codes override. 879910 (3D) always = 3 total.
+var tomografiaFixedCodes = map[string]int{
+	"879112": 2, // Cráneo con contraste
+	"879113": 2, // Cráneo simple y contrastado
+}
+
+const tomografia3DCode = "879910" // Reconstrucción 3D → siempre 3 espacios
+
+// ── Ecografía (881-882xxx) rules ────────────────────────────────────────────
+// Obstetric = 2 spaces, Doppler = qty-based, rest = 1. All in 1 appointment.
+var ecografiaObstetric = map[string]bool{
+	"881436": true, // Obstétrica translucencia nucal → 2 espacios
+	"881437": true, // Obstétrica detalle anatómico → 2 espacios
+}
+var ecografiaDoppler = map[string]bool{
+	"882308": true, // Doppler arterial MMII
+	"882309": true, // Doppler venoso MMSS
+	"882316": true, // Doppler venoso MS
+	"882317": true, // Doppler venoso MMII
+	"882318": true, // Doppler venoso MI
+}
+
+// ── Neurología rules ────────────────────────────────────────────────────────
+// 890274/890374 never together. 053105 always separate with 1 fixed space.
+const neurologiaProcedureCode = "053105" // Bloqueo - siempre 1 espacio fijo
+
+// ── Bilateral rules ─────────────────────────────────────────────────────────
+// If "bilateral" appears in procedure observations, multiply spaces ×2.
+// Only applies to specific services/codes. Source: config/ai.php from legacy Laravel.
+
+// resonanciaBilateralCodes are RM codes for extremities/joints where bilateral ×2 applies.
+var resonanciaBilateralCodes = map[string]bool{
+	"883511": true, // miembro superior (sin articulaciones)
+	"883512": true, // articulaciones miembro superior
+	"883521": true, // miembro inferior (sin articulaciones)
+	"883522": true, // articulaciones miembro inferior
+	"883560": true, // plexo braquial
+	"883590": true, // sistema músculo-esquelético
+}
+
+// radiografiaComparativeCodes already include both sides; bilateral does NOT apply.
+var radiografiaComparativeCodes = map[string]bool{
+	"873123": true, // Extremidades superiores comparativas
+	"873202": true, // Articulaciones acromioclaviculares comparativas
+	"873303": true, // Pies con apoyo comparativos
+	"873412": true, // Pelvis (cadera) comparativa
+	"873422": true, // Rodillas de pie comparativas
+	"873443": true, // Extremidades inferiores comparativas
+}
+
+// isBilateral checks if observations contain "bilateral" (case-insensitive).
+func isBilateral(obs string) bool {
+	return strings.Contains(strings.ToLower(obs), "bilateral")
+}
+
 type enrichedCup struct {
 	CUPSEntry
 	ServiceName    string
 	RequiredSpaces int
+}
+
+// forceServiceByCode returns a service name for CUPS codes that belong to a known
+// service, regardless of what the DB says. Returns "" to use DB value.
+func forceServiceByCode(code string) string {
+	// Fisiatria EMG/NC
+	if emgCodes[code] || ncCodes[code] || emgDependentCodes[code] {
+		return "Fisiatria"
+	}
+	// Resonancia
+	if _, ok := resonanciaCodes[code]; ok {
+		return "Resonancia"
+	}
+	if code == sedacionResonanciaCode {
+		return "Resonancia"
+	}
+	// Neurología (exact codes)
+	if code == neurologiaProcedureCode || code == "890274" || code == "890374" {
+		return "Neurologia"
+	}
+	// Tomografía (879xxx)
+	if strings.HasPrefix(code, "879") {
+		return "Tomografia"
+	}
+	// Ecografía (881xxx, 882xxx)
+	if strings.HasPrefix(code, "881") || strings.HasPrefix(code, "882") {
+		return "Ecografia"
+	}
+	// Radiografía (870-873xxx)
+	if strings.HasPrefix(code, "870") || strings.HasPrefix(code, "871") || strings.HasPrefix(code, "872") || strings.HasPrefix(code, "873") {
+		return "Radiografia"
+	}
+	return ""
 }
 
 // GroupByServiceFromDB groups CUPS entries by service using DB data (deterministic, no AI).
@@ -118,27 +227,19 @@ func GroupByServiceFromDB(ctx context.Context, cups []CUPSEntry, procRepo reposi
 				continue
 			}
 			ec.Name = proc.Name
-			// Force EMG/NC codes to Fisiatria only if active in DB
-			if emgCodes[c.Code] || ncCodes[c.Code] || emgDependentCodes[c.Code] {
-				ec.ServiceName = "Fisiatria"
-			} else if proc.ServiceName != "" {
+			// Use DB service name first
+			if proc.ServiceName != "" {
 				ec.ServiceName = proc.ServiceName
+			}
+			// Force-mapping overrides DB when code belongs to a known service
+			if forced := forceServiceByCode(c.Code); forced != "" {
+				ec.ServiceName = forced
 			}
 			if proc.RequiredSpaces >= 1 {
 				ec.RequiredSpaces = proc.RequiredSpaces
 			}
 		}
 		enriched = append(enriched, ec)
-	}
-
-	// Override: force all resonancia codes to "Resonancia" service
-	for i, ec := range enriched {
-		if _, isRM := resonanciaCodes[ec.Code]; isRM {
-			enriched[i].ServiceName = "Resonancia"
-		}
-		if ec.Code == sedacionResonanciaCode {
-			enriched[i].ServiceName = "Resonancia"
-		}
 	}
 
 	// Group by service name (maintain insertion order)
@@ -171,21 +272,29 @@ func GroupByServiceFromDB(ctx context.Context, cups []CUPSEntry, procRepo reposi
 		})
 	}
 
-	// Apply Fisiatría special rules
-	for i, g := range groups {
-		if g.ServiceType == "Fisiatria" {
-			groups[i] = applyFisiatriaRules(g)
+	// Apply service-specific rules
+	var finalGroups []CUPSGroup
+	for _, g := range groups {
+		svc := strings.ToLower(g.ServiceType)
+		switch {
+		case svc == "fisiatria" || svc == "fisiatría":
+			finalGroups = append(finalGroups, applyFisiatriaRules(g))
+		case svc == "resonancia":
+			finalGroups = append(finalGroups, applyResonanciaRules(g))
+		case svc == "radiografia" || svc == "radiografía":
+			finalGroups = append(finalGroups, applyRadiografiaRules(g))
+		case svc == "tomografia" || svc == "tomografía":
+			finalGroups = append(finalGroups, applyTomografiaRules(g))
+		case svc == "ecografia" || svc == "ecografía":
+			finalGroups = append(finalGroups, applyEcografiaRules(g))
+		case svc == "neurologia" || svc == "neurología":
+			finalGroups = append(finalGroups, applyNeurologiaRules(g)...)
+		default:
+			finalGroups = append(finalGroups, g)
 		}
 	}
 
-	// Apply Resonancia special rules
-	for i, g := range groups {
-		if g.ServiceType == "Resonancia" {
-			groups[i] = applyResonanciaRules(g)
-		}
-	}
-
-	return groups, nil
+	return finalGroups, nil
 }
 
 // applyResonanciaRules calculates the correct number of consecutive slots for an
@@ -253,15 +362,21 @@ func applyResonanciaRules(g CUPSGroup) CUPSGroup {
 				}
 			}
 			if !inCombo {
+				spaces := 0
 				if slots, ok := resonanciaCodes[c.Code]; ok {
 					if isContrasted {
-						totalSpaces += slots.Contrasted * c.Quantity
+						spaces = slots.Contrasted
 					} else {
-						totalSpaces += slots.Simple * c.Quantity
+						spaces = slots.Simple
 					}
 				} else {
-					totalSpaces += c.Quantity
+					spaces = 1
 				}
+				// Bilateral ×2 for eligible extremity/joint codes
+				if isBilateral(c.Observations) && resonanciaBilateralCodes[c.Code] {
+					spaces *= 2
+				}
+				totalSpaces += spaces * c.Quantity
 			}
 		}
 	} else {
@@ -270,15 +385,21 @@ func applyResonanciaRules(g CUPSGroup) CUPSGroup {
 			if c.Code == sedacionResonanciaCode {
 				continue
 			}
+			spaces := 0
 			if slots, ok := resonanciaCodes[c.Code]; ok {
 				if isContrasted {
-					totalSpaces += slots.Contrasted * c.Quantity
+					spaces = slots.Contrasted
 				} else {
-					totalSpaces += slots.Simple * c.Quantity
+					spaces = slots.Simple
 				}
 			} else {
-				totalSpaces += c.Quantity
+				spaces = 1
 			}
+			// Bilateral ×2 for eligible extremity/joint codes
+			if isBilateral(c.Observations) && resonanciaBilateralCodes[c.Code] {
+				spaces *= 2
+			}
+			totalSpaces += spaces * c.Quantity
 		}
 	}
 
@@ -381,4 +502,151 @@ func applyFisiatriaRules(g CUPSGroup) CUPSGroup {
 	}
 
 	return g
+}
+
+// applyRadiografiaRules: all Rx in 1 appointment. Spaces = sum of individual
+// (1 default, exceptions with 2-3 spaces). Source: legacy Laravel ai.php.
+func applyRadiografiaRules(g CUPSGroup) CUPSGroup {
+	totalSpaces := 0
+	for _, c := range g.Cups {
+		qty := c.Quantity
+		if qty < 1 {
+			qty = 1
+		}
+		spaces := 1 // default Rx = 1 space
+		if exc, ok := radiografiaExceptions[c.Code]; ok {
+			spaces = exc
+		}
+		// Bilateral ×2: only if NOT a comparative code (those already include both sides)
+		if isBilateral(c.Observations) && !radiografiaComparativeCodes[c.Code] {
+			spaces *= 2
+		}
+		totalSpaces += spaces * qty
+	}
+	if totalSpaces < 1 {
+		totalSpaces = 1
+	}
+	g.Espacios = totalSpaces
+	return g
+}
+
+// applyTomografiaRules: 879910 (3D) → always 3. Otherwise simple=1, contrasted=2.
+// Fixed codes override. Source: legacy Laravel ai.php.
+func applyTomografiaRules(g CUPSGroup) CUPSGroup {
+	// Override: 879910 (3D) → entire appointment = 3 spaces
+	for _, c := range g.Cups {
+		if c.Code == tomografia3DCode {
+			g.Espacios = 3
+			return g
+		}
+	}
+	totalSpaces := 0
+	for _, c := range g.Cups {
+		qty := c.Quantity
+		if qty < 1 {
+			qty = 1
+		}
+		spaces := 1
+		if fixed, ok := tomografiaFixedCodes[c.Code]; ok {
+			spaces = fixed
+		} else if c.IsContrasted {
+			spaces = 2
+		}
+		// Bilateral ×2 for extremities/joints
+		if isBilateral(c.Observations) {
+			spaces *= 2
+		}
+		totalSpaces += spaces * qty
+	}
+	if totalSpaces < 1 {
+		totalSpaces = 1
+	}
+	g.Espacios = totalSpaces
+	return g
+}
+
+// applyEcografiaRules: obstetric=2, doppler=qty-based, rest=1. All in 1 appointment.
+// Source: legacy Laravel ai.php.
+func applyEcografiaRules(g CUPSGroup) CUPSGroup {
+	totalSpaces := 0
+	for _, c := range g.Cups {
+		qty := c.Quantity
+		if qty < 1 {
+			qty = 1
+		}
+		if ecografiaObstetric[c.Code] {
+			totalSpaces += 2 * qty
+		} else if ecografiaDoppler[c.Code] {
+			totalSpaces += qty // 1 space per unit
+		} else {
+			totalSpaces += 1 * qty
+		}
+	}
+	if totalSpaces < 1 {
+		totalSpaces = 1
+	}
+	g.Espacios = totalSpaces
+	return g
+}
+
+// applyNeurologiaRules: 890274 and 890374 NEVER together. 053105 ALWAYS separate
+// with 1 fixed space. Returns multiple groups. Source: legacy Laravel ai.php.
+func applyNeurologiaRules(g CUPSGroup) []CUPSGroup {
+	var firstVisit, control, procedure, other []CUPSEntry
+
+	for _, c := range g.Cups {
+		switch c.Code {
+		case "890274":
+			firstVisit = append(firstVisit, c)
+		case "890374":
+			control = append(control, c)
+		case neurologiaProcedureCode:
+			procedure = append(procedure, c)
+		default:
+			other = append(other, c)
+		}
+	}
+
+	var groups []CUPSGroup
+
+	if len(firstVisit) > 0 {
+		spaces := 0
+		for _, c := range firstVisit {
+			q := c.Quantity
+			if q < 1 {
+				q = 1
+			}
+			spaces += q
+		}
+		groups = append(groups, CUPSGroup{ServiceType: "Neurologia", Cups: firstVisit, Espacios: spaces})
+	}
+	if len(control) > 0 {
+		spaces := 0
+		for _, c := range control {
+			q := c.Quantity
+			if q < 1 {
+				q = 1
+			}
+			spaces += q
+		}
+		groups = append(groups, CUPSGroup{ServiceType: "Neurologia", Cups: control, Espacios: spaces})
+	}
+	if len(procedure) > 0 {
+		// 053105 ALWAYS 1 fixed space, regardless of quantity
+		groups = append(groups, CUPSGroup{ServiceType: "Neurologia", Cups: procedure, Espacios: 1})
+	}
+	if len(other) > 0 {
+		for _, c := range other {
+			q := c.Quantity
+			if q < 1 {
+				q = 1
+			}
+			groups = append(groups, CUPSGroup{ServiceType: "Neurologia", Cups: []CUPSEntry{c}, Espacios: q})
+		}
+	}
+
+	if len(groups) == 0 {
+		return []CUPSGroup{{ServiceType: "Neurologia", Cups: g.Cups, Espacios: 1}}
+	}
+	return groups
 }

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -57,25 +58,25 @@ func uploadMedicalOrderHandler(ocrSvc *services.OCRService, birdClient *bird.Cli
 			}
 			if mediaURL == "" {
 				return sm.NewResult(sess.CurrentState).
-					WithText("No pude obtener el archivo. Por favor envía otra foto o PDF."), nil
+					WithText("No pudimos obtener el archivo. Por favor envía otra foto o PDF."), nil
 			}
 
 			ocrResult, err := ocrSvc.AnalyzeDocument(ctx, mediaURL)
 			if err != nil {
+				msg := "No pudimos procesar la imagen. ¿Qué deseas hacer?"
+				eventType := "ocr_error"
+				if errors.Is(err, context.DeadlineExceeded) {
+					msg = "El análisis de la imagen tardó demasiado. ¿Qué deseas hacer?"
+					eventType = "ocr_timeout"
+				}
 				return sm.NewResult(sess.CurrentState).
-					WithButtons("Error al procesar la imagen. ¿Qué deseas hacer?",
-						ocrRetryButtons(birdClient)...,
-					).
-					WithEvent("ocr_error", map[string]interface{}{"error": err.Error()}), nil
+					WithButtons(msg, ocrRetryButtons(birdClient)...).
+					WithEvent(eventType, map[string]interface{}{"error": err.Error()}), nil
 			}
 
 			if !ocrResult.Success || len(ocrResult.Cups) == 0 {
-				errorMsg := "No pude leer procedimientos en esta imagen."
-				if ocrResult.Error != "" {
-					errorMsg += "\n\nDetalle: " + ocrResult.Error
-				}
 				return sm.NewResult(sess.CurrentState).
-					WithButtons(errorMsg+"\n\n¿Qué deseas hacer?",
+					WithButtons("No pudimos leer procedimientos en esta imagen.\n\n¿Qué deseas hacer?",
 						ocrRetryButtons(birdClient)...,
 					).
 					WithEvent("ocr_failed", map[string]interface{}{"error": ocrResult.Error}), nil
@@ -128,7 +129,7 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 		var cups []services.CUPSEntry
 		if err := json.Unmarshal([]byte(sess.GetContext("ocr_cups_json")), &cups); err != nil {
 			return sm.NewResult(sm.StateEscalateToAgent).
-				WithText("Error al procesar los datos de tu orden. Te voy a comunicar con un agente para que pueda ayudarte.").
+				WithText("No pudimos procesar los datos de tu orden. Te voy a comunicar con un agente para que pueda ayudarte.").
 				WithEvent("ocr_parse_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
@@ -150,7 +151,7 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 
 		if len(cups) == 0 {
 			return sm.NewResult(sm.StateEscalateToAgent).
-				WithText("No encontré procedimientos válidos en tu orden. Te voy a comunicar con un agente para que pueda ayudarte.").
+				WithText("No pudimos procesar los procedimientos de tu orden médica. Te voy a comunicar con un agente para que pueda ayudarte.").
 				WithEvent("ocr_no_valid_cups", map[string]interface{}{"skipped": skipped}), nil
 		}
 
@@ -158,30 +159,21 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 		cupsJSON, _ := json.Marshal(cups)
 
 		// Construir resumen
-		summary := "Detecté los siguientes procedimientos en tu orden:\n\n"
+		summary := "Detectamos los siguientes procedimientos en tu orden:\n\n"
 		for i, cup := range cups {
-			if cup.Code != "" {
-				summary += fmt.Sprintf("%d. *%s* (CUPS: %s)", i+1, cup.Name, cup.Code)
-			} else {
-				summary += fmt.Sprintf("%d. *%s*", i+1, cup.Name)
-			}
+			summary += fmt.Sprintf("%d. *%s*", i+1, cup.Name)
 			qty := cup.Quantity
 			if qty < 1 {
 				qty = 1
 			}
-			summary += fmt.Sprintf(" — Cantidad: *%d*", qty)
+			if qty > 1 {
+				summary += fmt.Sprintf(" — Cantidad: *%d*", qty)
+			}
 			summary += "\n"
 		}
 
 		if len(skipped) > 0 {
-			summary += fmt.Sprintf("\n⚠️ Los siguientes códigos no están disponibles y fueron omitidos: %s\n", strings.Join(skipped, ", "))
-		}
-
-		// Verificar documento: comparar con el del paciente identificado
-		ocrDoc := sess.GetContext("ocr_document")
-		patientDoc := sess.GetContext("patient_document")
-		if ocrDoc != "" && patientDoc != "" && ocrDoc != patientDoc {
-			summary += fmt.Sprintf("\n⚠️ *Atención:* El documento en la orden (%s) no coincide con el que ingresaste (%s). Verifica que la orden sea tuya.\n", ocrDoc, patientDoc)
+			summary += fmt.Sprintf("\n⚠️ %d procedimiento(s) de tu orden no están disponibles y fueron omitidos.\n", len(skipped))
 		}
 
 		summary += "\n¿Es correcto?"
@@ -215,7 +207,7 @@ func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository, birdC
 			var cups []services.CUPSEntry
 			if err := json.Unmarshal([]byte(sess.GetContext("ocr_cups_json")), &cups); err != nil {
 				return sm.NewResult(sm.StateEscalateToAgent).
-					WithText("Error al procesar tu orden. Te voy a comunicar con un agente para que pueda ayudarte.").
+					WithText("No pudimos procesar tu orden. Te voy a comunicar con un agente para que pueda ayudarte.").
 					WithEvent("ocr_parse_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 
@@ -238,11 +230,19 @@ func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository, birdC
 			// Excepciones (se mantienen juntos en una sola cita):
 			//   - Fisiatría: EMG + NC van en la misma agenda
 			//   - Resonancia: combinaciones (ej. abdomen+pelvis) van en la misma cita
+			//   - Radiografía: todas las Rx van en una sola cita
+			//   - Tomografía: todos los TAC van en una sola cita
+			//   - Ecografía: todas las ecografías van en una sola cita
+			//   - Neurología: ya separado por applyNeurologiaRules
 			var splitGroups []services.CUPSGroup
 			for _, g := range groups {
 				isFisiatria := strings.EqualFold(g.ServiceType, "Fisiatria") || strings.EqualFold(g.ServiceType, "Fisiatría")
 				isResonancia := strings.EqualFold(g.ServiceType, "Resonancia")
-				if isFisiatria || isResonancia || len(g.Cups) <= 1 {
+				isRadiografia := strings.EqualFold(g.ServiceType, "Radiografia") || strings.EqualFold(g.ServiceType, "Radiografía")
+				isTomografia := strings.EqualFold(g.ServiceType, "Tomografia") || strings.EqualFold(g.ServiceType, "Tomografía")
+				isEcografia := strings.EqualFold(g.ServiceType, "Ecografia") || strings.EqualFold(g.ServiceType, "Ecografía")
+				isNeurologia := strings.EqualFold(g.ServiceType, "Neurologia") || strings.EqualFold(g.ServiceType, "Neurología")
+				if isFisiatria || isResonancia || isRadiografia || isTomografia || isEcografia || isNeurologia || len(g.Cups) <= 1 {
 					splitGroups = append(splitGroups, g)
 					continue
 				}
@@ -276,7 +276,7 @@ func confirmOCRResultHandler(procedureRepo repository.ProcedureRepository, birdC
 				WithContext("current_procedure_idx", "0")
 
 			if len(groups) > 1 {
-				summaryText := fmt.Sprintf("Tu orden tiene *%d grupo(s) de procedimientos*:\n\n", len(groups))
+				summaryText := fmt.Sprintf("Tu orden tiene *%d grupos de procedimientos*:\n\n", len(groups))
 				for i, g := range groups {
 					cupNames := make([]string, len(g.Cups))
 					for j, c := range g.Cups {
@@ -371,13 +371,13 @@ func askManualCupsHandler(procedureRepo repository.ProcedureRepository) sm.State
 		procs, err := procedureRepo.SearchByName(ctx, input)
 		if err != nil {
 			return sm.NewResult(sess.CurrentState).
-				WithText("Error al buscar procedimientos. Intenta de nuevo.").
+				WithText("No pudimos buscar procedimientos en este momento. Por favor intenta de nuevo.").
 				WithEvent("procedure_search_error", map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		if len(procs) == 0 {
 			return sm.NewResult(sess.CurrentState).
-				WithText("No encontré procedimientos con ese nombre. Intenta con otro término.\n\nEjemplo: \"Electromiografía\", \"Resonancia\", \"Potenciales evocados\"").
+				WithText("No encontramos procedimientos con ese nombre. Intenta con otro término.\n\nEjemplo: \"Electromiografía\", \"Resonancia\", \"Potenciales evocados\"").
 				WithEvent("procedure_not_found", map[string]interface{}{"query": input}), nil
 		}
 
@@ -405,7 +405,7 @@ func askManualCupsHandler(procedureRepo repository.ProcedureRepository) sm.State
 				WithContext("current_procedure_idx", "0").
 				WithContext("procedures_json", string(groupsJSON)).
 				WithClearCtx("ocr_cups_json").
-				WithText(fmt.Sprintf("Procedimiento seleccionado: *%s* (CUPS: %s)", proc.Name, proc.Code)).
+				WithText(fmt.Sprintf("Procedimiento seleccionado: *%s*", proc.Name)).
 				WithEvent("manual_cups_selected", map[string]interface{}{
 					"code": proc.Code,
 					"name": proc.Name,
@@ -431,7 +431,7 @@ func askManualCupsHandler(procedureRepo repository.ProcedureRepository) sm.State
 		return sm.NewResult(sm.StateSelectProcedure).
 			WithContext("search_procedures_json", string(procsJSON)).
 			WithList(
-				fmt.Sprintf("Encontré *%d procedimientos*.\nSelecciona el correcto:", len(procs)),
+				fmt.Sprintf("Encontramos *%d procedimientos*.\nSelecciona el correcto:", len(procs)),
 				"Ver procedimientos",
 				sm.ListSection{Title: "Procedimientos", Rows: rows},
 			).
@@ -463,7 +463,7 @@ func selectProcedureHandler() sm.StateHandler {
 		}
 		if err := json.Unmarshal([]byte(sess.GetContext("search_procedures_json")), &procs); err != nil {
 			return sm.NewResult(sm.StateAskManualCups).
-				WithText("Error al cargar procedimientos. Escribe el nombre de nuevo.").
+				WithText("No pudimos cargar los procedimientos. Por favor escribe el nombre de nuevo.").
 				WithClearCtx("search_procedures_json"), nil
 		}
 
@@ -512,7 +512,7 @@ func selectProcedureHandler() sm.StateHandler {
 			WithContext("current_procedure_idx", "0").
 			WithContext("procedures_json", string(groupsJSON)).
 			WithClearCtx("search_procedures_json", "ocr_cups_json").
-			WithText(fmt.Sprintf("Procedimiento seleccionado: *%s* (CUPS: %s)", selected.Name, selected.Code)).
+			WithText(fmt.Sprintf("Procedimiento seleccionado: *%s*", selected.Name)).
 			WithEvent("manual_cups_selected", map[string]interface{}{
 				"code": selected.Code,
 				"name": selected.Name,

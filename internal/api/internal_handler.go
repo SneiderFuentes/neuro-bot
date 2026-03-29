@@ -176,7 +176,7 @@ func (h *InternalHandler) HandleTestVoiceCall(w http.ResponseWriter, r *http.Req
 		req.ClinicAddress = h.cfg.CenterName
 	}
 
-	slog.Info("test voice call requested", "phone", req.Phone, "patient", req.PatientName)
+	slog.Info("test voice call requested", "phone", utils.MaskPhone(req.Phone), "patient", req.PatientName)
 
 	callID, err := h.birdClient.PlaceCall(req.Phone, map[string]string{
 		"patient_name":     req.PatientName,
@@ -186,7 +186,7 @@ func (h *InternalHandler) HandleTestVoiceCall(w http.ResponseWriter, r *http.Req
 		"clinic_address":   req.ClinicAddress,
 	})
 	if err != nil {
-		slog.Error("test voice call failed", "phone", req.Phone, "error", err)
+		slog.Error("test voice call failed", "phone", utils.MaskPhone(req.Phone), "error", err)
 		http.Error(w, "call failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -196,7 +196,7 @@ func (h *InternalHandler) HandleTestVoiceCall(w http.ResponseWriter, r *http.Req
 		h.notifyManager.RegisterCallID(callID, req.Phone)
 	}
 
-	slog.Info("test voice call placed", "phone", req.Phone, "callId", callID)
+	slog.Info("test voice call placed", "phone", utils.MaskPhone(req.Phone), "callId", callID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
@@ -306,7 +306,7 @@ func (h *InternalHandler) HandleCancelAgenda(w http.ResponseWriter, r *http.Requ
 
 				msgID, err := h.birdClient.SendTemplate(phone, tmpl)
 				if err != nil {
-					slog.Error("send cancellation notification", "phone", phone, "error", err)
+					slog.Error("send cancellation notification", "phone", utils.MaskPhone(phone), "error", err)
 					continue
 				}
 
@@ -596,7 +596,7 @@ func (h *InternalHandler) sendRescheduleNotifications(appointments []domain.Appo
 
 			msgID, err := h.birdClient.SendTemplate(phone, tmpl)
 			if err != nil {
-				slog.Error("send reschedule notification", "phone", phone, "error", err)
+				slog.Error("send reschedule notification", "phone", utils.MaskPhone(phone), "error", err)
 				continue
 			}
 
@@ -792,6 +792,7 @@ func (h *InternalHandler) HandleWeeklyKPIs(w http.ResponseWriter, r *http.Reques
 
 	// Aggregate 7 days
 	aggregate := &localrepo.DailyKPIs{Date: weekStr}
+	daysWithData := 0
 	for i := 0; i < 7; i++ {
 		day := monday.AddDate(0, 0, i)
 		daily, err := h.eventRepo.GetDailyKPIs(ctx, day)
@@ -832,14 +833,7 @@ func (h *InternalHandler) HandleWeeklyKPIs(w http.ResponseWriter, r *http.Reques
 		aggregate.TotalMessagesSent += daily.TotalMessagesSent
 		aggregate.NoSlotsFound += daily.NoSlotsFound
 		aggregate.AvgSessionDuration += daily.AvgSessionDuration
-	}
-
-	// Average the session duration across days that had data
-	daysWithData := 0
-	for i := 0; i < 7; i++ {
-		day := monday.AddDate(0, 0, i)
-		daily, err := h.eventRepo.GetDailyKPIs(ctx, day)
-		if err == nil && daily.TotalSessions > 0 {
+		if daily.TotalSessions > 0 {
 			daysWithData++
 		}
 	}
@@ -1035,7 +1029,7 @@ func (h *InternalHandler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 
 	events, err := h.eventRepo.FindByPhone(r.Context(), phone, from, to, eventType, limit)
 	if err != nil {
-		slog.Error("find events by phone", "phone", phone, "error", err)
+		slog.Error("find events by phone", "phone", utils.MaskPhone(phone), "error", err)
 		http.Error(w, "error querying events", http.StatusInternalServerError)
 		return
 	}

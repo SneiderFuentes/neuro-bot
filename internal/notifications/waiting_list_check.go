@@ -6,6 +6,7 @@ import (
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/services"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 // CheckWaitingListForCups checks if there are waiting list entries for a given CUPS code
@@ -104,7 +105,7 @@ func (m *NotificationManager) CheckWaitingListForCups(ctx context.Context, cupsC
 
 	msgID, err := m.birdClient.SendTemplate(entry.PhoneNumber, tmpl)
 	if err != nil {
-		slog.Error("wl_check: send template", "phone", entry.PhoneNumber, "error", err)
+		slog.Error("wl_check: send template", "phone", utils.MaskPhone(entry.PhoneNumber), "error", err)
 		return 0
 	}
 
@@ -143,7 +144,7 @@ func (m *NotificationManager) CheckWaitingListForCups(ctx context.Context, cupsC
 	}
 
 	slog.Info("wl_check: notification sent",
-		"phone", entry.PhoneNumber,
+		"phone", utils.MaskPhone(entry.PhoneNumber),
 		"entry_id", entry.ID,
 		"cups_code", cupsCode,
 		"trigger", "realtime")

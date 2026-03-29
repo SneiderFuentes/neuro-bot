@@ -290,6 +290,27 @@ func TestAnalyzeText_NoResults(t *testing.T) {
 	}
 }
 
+func TestAnalyzeImage_WithObservations(t *testing.T) {
+	jsonResp := `{"cups": [{"cups_code": "883512", "cups_name": "RM Articulacion MS", "quantity": 1, "is_sedated": false, "is_contrasted": false, "observations": "bilateral AMB"}], "entity": "Sura", "notes": ""}`
+	srv := httptest.NewServer(openAIHandler(jsonResp))
+	defer srv.Close()
+
+	svc := NewOCRServiceForTest(srv.URL)
+	result, err := svc.AnalyzeImage(context.Background(), "https://example.com/image.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Success {
+		t.Error("expected success")
+	}
+	if len(result.Cups) != 1 {
+		t.Fatalf("expected 1 CUP, got %d", len(result.Cups))
+	}
+	if result.Cups[0].Observations != "bilateral AMB" {
+		t.Errorf("expected observations 'bilateral AMB', got %q", result.Cups[0].Observations)
+	}
+}
+
 // --- GroupByService tests ---
 
 func TestGroupByService_SingleCup(t *testing.T) {

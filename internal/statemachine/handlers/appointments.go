@@ -3,7 +3,9 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -48,7 +50,7 @@ func RegisterAppointmentHandlers(m *sm.Machine, apptSvc *services.AppointmentSer
 	m.RegisterWithConfig(sm.StateConfirmRescheduleNotif, sm.HandlerConfig{
 		InputType:   sm.InputButton,
 		Options:     []string{"reschedule_yes", "reschedule_no"},
-		ErrorMsg:    "Por favor responde 1 o 2.",
+		ErrorMsg:    "Por favor selecciona una de las opciones.",
 		RetryPrompt: confirmReschedulePrompt,
 		Handler:     confirmRescheduleNotifHandler(),
 	})
@@ -71,7 +73,7 @@ func RegisterAppointmentHandlers(m *sm.Machine, apptSvc *services.AppointmentSer
 	m.RegisterWithConfig(sm.StateConfirmCancelNotif, sm.HandlerConfig{
 		InputType:   sm.InputButton,
 		Options:     []string{"cancel_yes", "cancel_no"},
-		ErrorMsg:    "Por favor responde 1 o 2.",
+		ErrorMsg:    "Por favor selecciona una de las opciones.",
 		RetryPrompt: confirmCancelPrompt,
 		Handler:     confirmCancelNotifHandler(apptSvc, onCancel),
 	})
@@ -117,8 +119,14 @@ func fetchAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHand
 
 		appointments, err := apptSvc.GetUpcomingAppointments(ctx, patientID)
 		if err != nil {
-			return buildAutoCloseResult("Error al consultar tus citas. Intenta más tarde.").
-				WithEvent("fetch_appointments_error", map[string]interface{}{"error": err.Error()}), nil
+			msg := "No pudimos consultar tus citas en este momento. Intenta más tarde."
+			eventType := "fetch_appointments_error"
+			if errors.Is(err, context.DeadlineExceeded) {
+				msg = "Tardó demasiado consultar tus citas. Por favor intenta de nuevo."
+				eventType = "fetch_appointments_timeout"
+			}
+			return buildAutoCloseResult(msg).
+				WithEvent(eventType, map[string]interface{}{"error": err.Error()}), nil
 		}
 
 		if len(appointments) == 0 {
@@ -127,7 +135,12 @@ func fetchAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHand
 		}
 
 		// Serializar citas en contexto para los siguientes estados
-		apptJSON, _ := json.Marshal(appointments)
+		apptJSON, err := json.Marshal(appointments)
+		if err != nil {
+			slog.Error("appointments_marshal_failed", "error", err)
+			return buildAutoCloseResult("Error interno al procesar tus citas. Por favor intenta de nuevo.").
+				WithEvent("appointments_marshal_error", map[string]interface{}{"error": err.Error()}), nil
+		}
 
 		// Generar la lista aquí (LIST_APPOINTMENTS es interactivo, no auto-chain)
 		listMsg := buildAppointmentList(apptSvc, appointments)
@@ -145,20 +158,23 @@ func listAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandl
 		// Si es postback con ID de cita seleccionada
 		if msg.IsPostback {
 			var appts []domain.Appointment
-			if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appts); err == nil {
-				for _, a := range appts {
-					if a.ID == msg.PostbackPayload {
-						sess.RetryCount = 0
+			if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appts); err != nil {
+				slog.Error("appointments_unmarshal_failed", "error", err, "location", "listAppointments_postback")
+				return buildAutoCloseResult("No pudimos cargar tus citas. Por favor intenta de nuevo.").
+					WithEvent("appointments_unmarshal_error", map[string]interface{}{"error": err.Error()}), nil
+			}
+			for _, a := range appts {
+				if a.ID == msg.PostbackPayload {
+					sess.RetryCount = 0
 
-						// Mostrar detalle + lista de acciones en un solo mensaje
-						detail := buildAppointmentDetail(apptSvc, appts, a.ID)
-						return sm.NewResult(sm.StateAppointmentAction).
-							WithContext("selected_appointment_id", msg.PostbackPayload).
-							WithList(detail+"\n\n¿Qué deseas hacer con esta cita?", "Ver opciones",
-								sm.ListSection{Title: "Acciones", Rows: appointmentActionRows()},
-							).
-							WithEvent("appointment_selected", map[string]interface{}{"id": msg.PostbackPayload}), nil
-					}
+					// Mostrar detalle + lista de acciones en un solo mensaje
+					detail := buildAppointmentDetail(apptSvc, appts, a.ID)
+					return sm.NewResult(sm.StateAppointmentAction).
+						WithContext("selected_appointment_id", msg.PostbackPayload).
+						WithList(detail+"\n\n¿Qué deseas hacer con esta cita?", "Ver opciones",
+							sm.ListSection{Title: "Acciones", Rows: appointmentActionRows()},
+						).
+						WithEvent("appointment_selected", map[string]interface{}{"id": msg.PostbackPayload}), nil
 				}
 			}
 			// Invalid postback ID — fall through to retry + re-show list
@@ -167,7 +183,12 @@ func listAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandl
 		// Selección numérica por agente: /bot resume LIST_APPOINTMENTS 1
 		if n, err := strconv.Atoi(strings.TrimSpace(msg.Text)); err == nil && n >= 1 {
 			var appts []domain.Appointment
-			if jsonErr := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appts); jsonErr == nil && n <= len(appts) {
+			if jsonErr := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appts); jsonErr != nil {
+				slog.Error("appointments_unmarshal_failed", "error", jsonErr, "location", "listAppointments_numeric")
+				return buildAutoCloseResult("No pudimos cargar tus citas. Por favor intenta de nuevo.").
+					WithEvent("appointments_unmarshal_error", map[string]interface{}{"error": jsonErr.Error()}), nil
+			}
+			if n <= len(appts) {
 				selected := appts[n-1]
 				sess.RetryCount = 0
 				detail := buildAppointmentDetail(apptSvc, appts, selected.ID)
@@ -189,7 +210,7 @@ func listAppointmentsHandler(apptSvc *services.AppointmentService) sm.StateHandl
 		// Cargar citas del contexto y re-mostrar lista
 		var appointments []domain.Appointment
 		if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
-			return buildAutoCloseResult("Error al cargar las citas. Intenta de nuevo."), nil
+			return buildAutoCloseResult("No pudimos cargar tus citas. Por favor intenta de nuevo."), nil
 		}
 
 		listMsg := buildAppointmentList(apptSvc, appointments)
@@ -214,7 +235,7 @@ func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo rep
 			// Re-mostrar detalle + acciones
 			var appointments []domain.Appointment
 			if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
-				return buildAutoCloseResult("Error al cargar las citas."), nil
+				return buildAutoCloseResult("No pudimos cargar tus citas en este momento."), nil
 			}
 
 			detail := buildAppointmentDetail(apptSvc, appointments, selectedID)
@@ -252,7 +273,11 @@ func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo rep
 			// La cita vieja NO se cancela — solo se cancela cuando se crea la nueva
 			// (via reschedule_appt_id en createAppointmentHandler).
 			var appointments []domain.Appointment
-			json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments)
+			if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
+				slog.Error("appointments_unmarshal_failed", "error", err, "location", "appointmentAction_reschedule")
+				return buildAutoCloseResult("No pudimos cargar tus citas para reprogramar. Por favor intenta de nuevo.").
+					WithEvent("appointments_unmarshal_error", map[string]interface{}{"error": err.Error()}), nil
+			}
 
 			var selectedAppt *domain.Appointment
 			for i, a := range appointments {
@@ -280,7 +305,7 @@ func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo rep
 				isContrasted = "1"
 			}
 			isSedated := "0"
-			if strings.Contains(selectedAppt.Observations, "Sedacion") {
+			if strings.Contains(selectedAppt.Observations, "Sedaci") {
 				isSedated = "1"
 			}
 
@@ -327,7 +352,11 @@ func appointmentActionHandler(apptSvc *services.AppointmentService, procRepo rep
 
 		case "appt_back":
 			var appointments []domain.Appointment
-			json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments)
+			if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
+				slog.Error("appointments_unmarshal_failed", "error", err, "location", "appointmentAction_back")
+				return buildAutoCloseResult("No pudimos cargar tus citas. Por favor intenta de nuevo.").
+					WithEvent("appointments_unmarshal_error", map[string]interface{}{"error": err.Error()}), nil
+			}
 			listMsg := buildAppointmentList(apptSvc, appointments)
 
 			return sm.NewResult(sm.StateListAppointments).
@@ -493,7 +522,7 @@ func confirmCancelNotifHandler(apptSvc *services.AppointmentService, onCancel Ca
 			}
 
 			if err := apptSvc.CancelByIDs(ctx, allIDs, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
-				return buildAutoCloseResult("Error al cancelar la cita. Por favor contacta a la clínica.").
+				return buildAutoCloseResult("No pudimos cancelar tu cita en este momento. Por favor intenta de nuevo.").
 					WithEvent("notification_cancel_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 
@@ -509,7 +538,7 @@ func confirmCancelNotifHandler(apptSvc *services.AppointmentService, onCancel Ca
 				}
 			}
 
-			return buildAutoCloseResult("Tu cita ha sido cancelada.\n\nSi deseas reagendar, puedes escribirnos cuando lo necesites.").
+			return buildAutoCloseResult("Tu cita ha sido cancelada.\n\nSi deseas reprogramar, puedes escribirnos cuando lo necesites.").
 				WithEvent("notification_cancel_confirmed", map[string]interface{}{
 					"appointment_ids": allIDs,
 					"total_cancelled": len(allIDs),
@@ -547,14 +576,16 @@ func notifPendingHandler(apptSvc *services.AppointmentService, procRepo reposito
 		case "confirm":
 			appt, _, err := apptSvc.FindBlockByAppointmentID(ctx, apptID)
 			if err != nil || appt == nil {
-				return buildAutoCloseResult("No pudimos encontrar tu cita. Por favor contacta a la clinica."), nil
+				return buildAutoCloseResult("No pudimos encontrar tu cita. Por favor contacta a la clínica."), nil
 			}
 			allAppts, _ := apptSvc.GetPatientAppointmentsForDate(ctx, appt.PatientID, appt.Date)
 			if len(allAppts) == 0 {
 				allAppts = []domain.Appointment{*appt}
 			}
 			if err := apptSvc.ConfirmBlock(ctx, allAppts, "whatsapp_bot", sess.ConversationID); err != nil {
-				return buildAutoCloseResult("Error al confirmar la cita. Intenta mas tarde."), nil
+				return sm.NewResult(sm.StateNotifPending).
+					WithText("No pudimos confirmar tu cita en este momento. Por favor intenta de nuevo.").
+					WithEvent("notif_confirm_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 			confirmMsg := buildNotifConfirmDetail(allAppts, appt, procRepo, addrMapper, ctx)
 			return buildAutoCloseResult(confirmMsg).
@@ -575,7 +606,7 @@ func notifPendingHandler(apptSvc *services.AppointmentService, procRepo reposito
 						sess.GetContext("notif_appt_time"),
 						sess.GetContext("notif_cups_name"),
 					),
-					sm.Button{Text: "Si, cancelar", Payload: "cancel_yes"},
+					sm.Button{Text: "Sí, cancelar", Payload: "cancel_yes"},
 					sm.Button{Text: "No, mantener", Payload: "cancel_no"},
 				), nil
 		}
@@ -602,7 +633,9 @@ func notifRescheduleFallbackHandler(apptSvc *services.AppointmentService, procRe
 				allAppts = []domain.Appointment{*appt}
 			}
 			if err := apptSvc.ConfirmBlock(ctx, allAppts, "whatsapp_bot", sess.ConversationID); err != nil {
-				return buildAutoCloseResult("Error al confirmar la cita. Intenta más tarde."), nil
+				return sm.NewResult(sm.StateNotifRescheduleFallback).
+					WithText("No pudimos confirmar tu cita en este momento. Por favor intenta de nuevo.").
+					WithEvent("notif_reschedule_confirm_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 
 			// Build confirmation detail (same structure as handleConfirmation confirm)
@@ -624,7 +657,9 @@ func notifRescheduleFallbackHandler(apptSvc *services.AppointmentService, procRe
 				allIDs[i] = a.ID
 			}
 			if err := apptSvc.CancelByIDs(ctx, allIDs, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
-				return buildAutoCloseResult("Error al cancelar la cita. Intenta más tarde."), nil
+				return sm.NewResult(sm.StateNotifRescheduleFallback).
+					WithText("No pudimos cancelar tu cita en este momento. Por favor intenta de nuevo.").
+					WithEvent("notif_reschedule_cancel_error", map[string]interface{}{"error": err.Error()}), nil
 			}
 
 			// Notify waiting list for freed CUPS codes
@@ -640,7 +675,7 @@ func notifRescheduleFallbackHandler(apptSvc *services.AppointmentService, procRe
 				}
 			}
 
-			return buildAutoCloseResult("Tu cita ha sido cancelada.\n\nSi deseas reagendar, puedes escribirnos cuando lo necesites.").
+			return buildAutoCloseResult("Tu cita ha sido cancelada.\n\nSi deseas reprogramar, puedes escribirnos cuando lo necesites.").
 				WithEvent("notif_reschedule_fallback_cancelled", map[string]interface{}{
 					"appointment_id": apptID,
 					"total_cancelled": len(allIDs),
@@ -666,7 +701,7 @@ func buildNotifConfirmDetail(allAppts []domain.Appointment, appt *domain.Appoint
 		proceduresText = "Procedimiento"
 	}
 
-	msg := fmt.Sprintf("Tu cita ha sido confirmada!\n\n"+
+	msg := fmt.Sprintf("✅ ¡Tu cita ha sido confirmada!\n\n"+
 		"*Fecha:* %s\n"+
 		"*Hora:* %s\n"+
 		"*Procedimiento:* %s",
@@ -715,7 +750,7 @@ func buildNotifConfirmDetail(allAppts []domain.Appointment, appt *domain.Appoint
 		}
 	}
 
-	msg += "\n\nRecuerda presentarte 15 minutos antes. ¡Te esperamos!"
+	msg += "\n\nRecuerda presentarte 30 minutos antes para realizar el proceso de facturación. ¡Te esperamos!"
 	return msg
 }
 
@@ -728,22 +763,27 @@ func executeConfirmAppointment(ctx context.Context, sess *session.Session, apptS
 
 	var appointments []domain.Appointment
 	if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
-		return buildAutoCloseResult("Error al procesar la cita."), nil
+		return buildAutoCloseResult("No pudimos procesar tu cita en este momento."), nil
 	}
 
 	block := apptSvc.FindConsecutiveBlock(appointments, selectedID)
 	if len(block) == 0 {
 		return sm.NewResult(sm.StateListAppointments).
-			WithText("Cita no encontrada.").
+			WithText("No encontramos esa cita. Por favor selecciona otra de la lista.").
 			WithClearCtx("selected_appointment_id"), nil
 	}
 
 	if err := apptSvc.ConfirmBlock(ctx, block, "whatsapp", sess.ConversationID); err != nil {
-		return buildAutoCloseResult("Error al confirmar la cita. Intenta más tarde.").
+		return sm.NewResult(sm.StateAppointmentAction).
+			WithText("No pudimos confirmar tu cita en este momento. Por favor intenta de nuevo.").
 			WithEvent("appointment_confirm_error", map[string]interface{}{"error": err.Error()}), nil
 	}
 
-	msg := fmt.Sprintf("*Cita confirmada exitosamente!*\n\n%d cita(s) confirmada(s).", len(block))
+	confirmText := "Tu cita ha sido confirmada."
+	if len(block) > 1 {
+		confirmText = fmt.Sprintf("Tus %d citas han sido confirmadas.", len(block))
+	}
+	msg := fmt.Sprintf("✅ *¡Cita confirmada!*\n\n%s", confirmText)
 
 	// Buscar preparaciones, video/audio y dirección del procedimiento
 	if procRepo != nil {
@@ -784,7 +824,7 @@ func executeConfirmAppointment(ctx context.Context, sess *session.Session, apptS
 		}
 	}
 
-	msg += "\n\nRecuerda presentarte 15 minutos antes con tu documento."
+	msg += "\n\nRecuerda presentarte 30 minutos antes para realizar el proceso de facturación, con tu documento y orden médica."
 
 	return buildAutoCloseResult(msg).
 		WithClearCtx("selected_appointment_id", "appointments_json").
@@ -800,18 +840,19 @@ func executeCancelAppointment(ctx context.Context, sess *session.Session, apptSv
 
 	var appointments []domain.Appointment
 	if err := json.Unmarshal([]byte(sess.GetContext("appointments_json")), &appointments); err != nil {
-		return buildAutoCloseResult("Error al procesar la cita."), nil
+		return buildAutoCloseResult("No pudimos procesar tu cita en este momento."), nil
 	}
 
 	block := apptSvc.FindConsecutiveBlock(appointments, selectedID)
 	if len(block) == 0 {
 		return sm.NewResult(sm.StateListAppointments).
-			WithText("Cita no encontrada.").
+			WithText("No encontramos esa cita. Por favor selecciona otra de la lista.").
 			WithClearCtx("selected_appointment_id"), nil
 	}
 
 	if err := apptSvc.CancelBlock(ctx, block, "Cancelada por paciente via WhatsApp", "whatsapp", sess.ConversationID); err != nil {
-		return buildAutoCloseResult("Error al cancelar la cita. Intenta más tarde.").
+		return sm.NewResult(sm.StateAppointmentAction).
+			WithText("No pudimos cancelar tu cita en este momento. Por favor intenta de nuevo.").
 			WithEvent("appointment_cancel_error", map[string]interface{}{"error": err.Error()}), nil
 	}
 
@@ -828,7 +869,11 @@ func executeCancelAppointment(ctx context.Context, sess *session.Session, apptSv
 		}
 	}
 
-	msg := fmt.Sprintf("*Cita cancelada.*\n\n%d cita(s) cancelada(s).", len(block))
+	cancelText := "Tu cita ha sido cancelada."
+	if len(block) > 1 {
+		cancelText = fmt.Sprintf("Tus %d citas han sido canceladas.", len(block))
+	}
+	msg := cancelText
 
 	return buildAutoCloseResult(msg).
 		WithClearCtx("selected_appointment_id", "appointments_json").
@@ -1012,7 +1057,10 @@ func buildAppointmentList(apptSvc *services.AppointmentService, appointments []d
 		}
 	}
 
-	body := fmt.Sprintf("Tienes *%d cita(s)* programadas.", len(appointments))
+	body := "Tienes *1 cita* programada."
+	if len(appointments) > 1 {
+		body = fmt.Sprintf("Tienes *%d citas* programadas.", len(appointments))
+	}
 	if len(appointments) > maxShow {
 		body += fmt.Sprintf("\nMostrando las primeras %d:", maxShow)
 	} else {

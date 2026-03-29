@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
@@ -73,6 +74,7 @@ func patientLookupHandler(patientSvc *services.PatientService) sm.StateHandler {
 
 		patient, err := patientSvc.LookupByDocument(ctx, doc)
 		if err != nil {
+			slog.Error("patient_lookup_failed", "doc_len", len(doc), "error", err)
 			return buildAutoCloseResult("Lo siento, hubo un problema al buscar tu información. Intenta más tarde.").
 				WithEvent("patient_lookup_error", map[string]interface{}{"error": err.Error()}), nil
 		}

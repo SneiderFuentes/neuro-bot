@@ -52,9 +52,14 @@ func (pm *PhoneMutex) Lock(ctx context.Context, phone string) error {
 		pl.refCount.Add(-1)
 		// The goroutine above will eventually acquire the lock.
 		// We must release it to avoid a permanent deadlock for this phone.
+		// Timeout the cleanup goroutine to prevent zombie accumulation.
 		go func() {
-			<-done       // wait for the goroutine to acquire
-			pl.mu.Unlock() // immediately release since we timed out
+			select {
+			case <-done:
+				pl.mu.Unlock() // immediately release since we timed out
+			case <-time.After(60 * time.Second):
+				slog.Warn("phone lock cleanup goroutine timeout, abandoning", "phone", phone)
+			}
 		}()
 		return fmt.Errorf("phone lock timeout for %s: %w", phone, ctx.Err())
 	}

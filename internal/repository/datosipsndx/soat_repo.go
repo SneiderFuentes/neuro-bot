@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 
 	"github.com/neuro-bot/neuro-bot/internal/repository"
 )
+
+var validTarifaCol = regexp.MustCompile(`^Tarifa\d{2}$`)
 
 var _ repository.SoatRepository = (*SoatRepo)(nil)
 
@@ -18,10 +21,12 @@ func NewSoatRepo(db *sql.DB) *SoatRepo {
 	return &SoatRepo{db: db}
 }
 
-// FindPrice retrieves the price for a CUPS code based on the tariff type (e.g., "tariff_01")
-func (r *SoatRepo) FindPrice(ctx context.Context, cupCode, tariffType string) (float64, error) {
+// FindPrice retrieves the price for a CUPS code based on the tariff type (e.g., "tariff_01").
+// Returns nil when the CUPS code is not found or tariffType is empty.
+// Returns *0.0 when the tariff is legitimately zero in the database.
+func (r *SoatRepo) FindPrice(ctx context.Context, cupCode, tariffType string) (*float64, error) {
 	if tariffType == "" {
-		return 0, nil
+		return nil, nil
 	}
 	// Normalize tariff type: "01" -> "Tarifa01", "1" -> "Tarifa01"
 	var columnName string
@@ -36,16 +41,20 @@ func (r *SoatRepo) FindPrice(ctx context.Context, cupCode, tariffType string) (f
 		columnName = tariffType // Use as-is if already formatted
 	}
 
+	if !validTarifaCol.MatchString(columnName) {
+		return nil, fmt.Errorf("invalid tariff column: %s", columnName)
+	}
+
 	query := fmt.Sprintf("SELECT COALESCE(%s, 0) FROM codigossoat WHERE CodigoCUPS = ?", columnName)
-	
+
 	var price float64
 	err := r.db.QueryRowContext(ctx, query, cupCode).Scan(&price)
 	if err == sql.ErrNoRows {
-		return 0, nil // No price found, return 0
+		return nil, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("find soat price: %w", err)
+		return nil, fmt.Errorf("find soat price: %w", err)
 	}
-	
-	return price, nil
+
+	return &price, nil
 }

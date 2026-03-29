@@ -33,6 +33,7 @@ import (
 	"github.com/neuro-bot/neuro-bot/internal/statemachine/handlers"
 	tg "github.com/neuro-bot/neuro-bot/internal/telegram"
 	"github.com/neuro-bot/neuro-bot/internal/tracking"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 	"github.com/neuro-bot/neuro-bot/internal/worker"
 )
 
@@ -50,6 +51,7 @@ func main() {
 	})
 
 	cfg := config.Load()
+	utils.SetMaskPhones(cfg.LogMaskPhones)
 
 	// Configurar logger
 	initLogger(cfg.LogLevel, cfg.LogDir)
@@ -121,6 +123,7 @@ func main() {
 
 	// Bird client
 	birdClient := bird.NewClient(cfg)
+	safeGo("bird-cache-cleanup", func() { birdClient.StartCacheCleanup(ctx) })
 
 	// Services (dependen de repos)
 	var patientSvc *services.PatientService
@@ -205,7 +208,7 @@ func main() {
 	var slotSvc *services.SlotService
 	if repos != nil && appointmentSvc != nil {
 		slotSvc = services.NewSlotService(repos.Doctor, repos.Schedule)
-		handlers.RegisterSlotHandlers(machine, slotSvc, appointmentSvc, repos.Procedure, repos.Soat, repos.Entity, waitingListRepo, addrMapper)
+		handlers.RegisterSlotHandlers(machine, slotSvc, appointmentSvc, repos.Procedure, repos.Soat, repos.Entity, waitingListRepo, addrMapper, birdClient)
 	}
 	// Fase 11: Post-Acción y Escalación
 	handlers.RegisterPostActionHandlers(machine, birdClient)
@@ -347,6 +350,7 @@ func main() {
 	// Webhook handler (con NotificationManager para postbacks proactivos + WAL inbox)
 	webhookHandler := api.NewWebhookHandler(birdClient, workerPool, notifyManager, cfg)
 	webhookHandler.SetInboxRepo(inboxRepo)
+	safeGo("gather-cleanup", func() { webhookHandler.StartGatherCleanup(ctx) })
 
 	// Fase 13+14: Internal API endpoints (protegidos con API key)
 	startTime := time.Now()
@@ -366,7 +370,7 @@ func main() {
 	// HTTP Server
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler(localDB, externalDB))
-	mux.HandleFunc("GET /health/debug", debugHandler(localDB, externalDB))
+	mux.Handle("GET /health/debug", api.InternalAuth(cfg.InternalAPIKey)(http.HandlerFunc(debugHandler(localDB, externalDB))))
 	mux.HandleFunc("POST /api/webhooks/whatsapp", webhookHandler.HandleWhatsApp)
 	mux.HandleFunc("POST /api/webhooks/whatsapp/outbound", webhookHandler.HandleWhatsAppOutbound)
 	mux.HandleFunc("POST /api/webhooks/conversations", webhookHandler.HandleConversation)
@@ -402,7 +406,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
-		Handler:      api.RequestLogger(mux),
+		Handler:      api.SecurityHeaders(api.RequestLogger(mux)),
 		ReadTimeout:  time.Duration(cfg.HTTPReadTimeout) * time.Second,
 		WriteTimeout: time.Duration(cfg.HTTPWriteTimeout) * time.Second,
 		IdleTimeout:  time.Duration(cfg.HTTPIdleTimeout) * time.Second,
@@ -432,9 +436,18 @@ func main() {
 	}
 
 	// 2. Wait for worker pool goroutines to finish (before DB close via defers)
-	workerPool.Stop()
+	stopDone := make(chan struct{})
+	go func() {
+		workerPool.Stop()
+		close(stopDone)
+	}()
 
-	slog.Info("shutdown complete")
+	select {
+	case <-stopDone:
+		slog.Info("shutdown complete")
+	case <-time.After(20 * time.Second):
+		slog.Error("shutdown timeout: worker pool did not stop within 20s")
+	}
 }
 
 func initLogger(level, logDir string) {
@@ -472,8 +485,8 @@ func initRepositories(driver string, externalDB *sql.DB) *repository.Repositorie
 			Appointment:  datosipsndx.NewAppointmentRepo(externalDB),
 			Doctor:       datosipsndx.NewDoctorRepo(externalDB),
 			Schedule:     datosipsndx.NewScheduleRepo(externalDB),
-			Procedure:    datosipsndx.NewProcedureRepo(externalDB),
-			Entity:       datosipsndx.NewEntityRepo(externalDB),
+			Procedure:    repository.NewCachedProcedureRepo(datosipsndx.NewProcedureRepo(externalDB), 60*time.Minute),
+			Entity:       repository.NewCachedEntityRepo(datosipsndx.NewEntityRepo(externalDB), 30*time.Minute),
 			Municipality: datosipsndx.NewMunicipalityRepo(externalDB),
 			Soat:         datosipsndx.NewSoatRepo(externalDB),
 		}
@@ -490,7 +503,7 @@ func healthHandler(localDB, externalDB *sql.DB) http.HandlerFunc {
 
 		// Local DB is critical — if down, bot cannot function
 		if err := localDB.Ping(); err != nil {
-			health["local_db"] = "error: " + err.Error()
+			health["local_db"] = "error"
 			health["status"] = "critical"
 			critical = true
 		} else {
@@ -504,7 +517,7 @@ func healthHandler(localDB, externalDB *sql.DB) http.HandlerFunc {
 				health["status"] = "degraded"
 			}
 		} else if err := externalDB.Ping(); err != nil {
-			health["external_db"] = "error: " + err.Error()
+			health["external_db"] = "error"
 			if health["status"] == "ok" {
 				health["status"] = "degraded"
 			}

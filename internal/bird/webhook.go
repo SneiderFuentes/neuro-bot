@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 	"strconv"
 	"time"
 )
@@ -114,7 +116,7 @@ func ParseInboundMessage(event WebhookEvent) InboundMessage {
 
 	slog.Debug("webhook_parsed",
 		"message_id", msg.ID,
-		"phone", msg.Phone,
+		"phone", utils.MaskPhone(msg.Phone),
 		"conversation_id", msg.ConversationID,
 		"direction", payload.Direction,
 		"body_type", payload.Body.Type,

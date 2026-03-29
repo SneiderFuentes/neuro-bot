@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -416,9 +417,12 @@ func TestProcessMessage_SessionError_Returns(t *testing.T) {
 	// Should not panic
 	pool.processMessage(context.Background(), msg)
 
-	// No messages should be sent
-	if len(sender.sent) != 0 {
-		t.Errorf("expected 0 sent messages on session error, got %d", len(sender.sent))
+	// Error message should be sent to patient (E1 fix: no silent failures)
+	if len(sender.sent) != 1 {
+		t.Errorf("expected 1 error message on session error, got %d", len(sender.sent))
+	}
+	if len(sender.sent) > 0 && !strings.Contains(sender.sent[0].text, "dificultades técnicas") {
+		t.Errorf("expected technical error message, got: %s", sender.sent[0].text)
 	}
 }
 
@@ -680,13 +684,16 @@ func TestProcessMessage_TrackerCalls(t *testing.T) {
 
 	pool.processMessage(context.Background(), msg)
 
-	// Verify LogMessageSent called for each message (2 messages)
+	// Verify events: 1 session_started + 2 message_sent = 3 total
 	eventStore.mu.Lock()
 	defer eventStore.mu.Unlock()
-	if len(eventStore.insertedEvents) != 2 {
-		t.Errorf("expected 2 LogMessageSent events, got %d", len(eventStore.insertedEvents))
+	if len(eventStore.insertedEvents) != 3 {
+		t.Errorf("expected 3 events (1 session_started + 2 message_sent), got %d", len(eventStore.insertedEvents))
 	}
-	for _, ev := range eventStore.insertedEvents {
+	if eventStore.insertedEvents[0].EventType != "session_started" {
+		t.Errorf("expected session_started as first event, got %s", eventStore.insertedEvents[0].EventType)
+	}
+	for _, ev := range eventStore.insertedEvents[1:] {
 		if ev.EventType != "message_sent" {
 			t.Errorf("expected message_sent event type, got %s", ev.EventType)
 		}
@@ -733,9 +740,9 @@ func TestProcessMessage_TrackerNoEvents(t *testing.T) {
 
 	eventStore.mu.Lock()
 	defer eventStore.mu.Unlock()
-	// Should have 1 message_sent but 0 batch events
-	if len(eventStore.insertedEvents) != 1 {
-		t.Errorf("expected 1 LogMessageSent, got %d", len(eventStore.insertedEvents))
+	// Should have 1 session_started + 1 message_sent but 0 batch events
+	if len(eventStore.insertedEvents) != 2 {
+		t.Errorf("expected 2 events (1 session_started + 1 message_sent), got %d", len(eventStore.insertedEvents))
 	}
 	if len(eventStore.batchEvents) != 0 {
 		t.Errorf("expected 0 batch events, got %d", len(eventStore.batchEvents))
@@ -1264,8 +1271,8 @@ func TestProcessMessage_StaleConvID_ClearedWhenNoActiveConv(t *testing.T) {
 	if !sender.lookupConvCalled {
 		t.Error("expected LookupConversationByPhone when cache is empty")
 	}
-	if savedConvID != "" {
-		t.Errorf("expected stale conversationID cleared to empty, got %q", savedConvID)
+	if savedConvID != "conv-very-old" {
+		t.Errorf("expected stale conversationID kept for downstream self-heal, got %q", savedConvID)
 	}
 }
 

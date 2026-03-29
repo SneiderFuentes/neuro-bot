@@ -60,6 +60,9 @@ func (m *mockApptRepo) RescheduleDate(ctx context.Context, agendaID int, doctorD
 func (m *mockApptRepo) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
 	return nil
 }
+func (m *mockApptRepo) CreatePxCitaBatch(ctx context.Context, inputs []domain.CreatePxCitaInput) error {
+	return nil
+}
 
 // ==================== AskContrasted ====================
 

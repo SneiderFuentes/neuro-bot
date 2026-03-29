@@ -1,4 +1,4 @@
-.PHONY: build run stop dev test logs db-shell migrate-up migrate-down
+.PHONY: build run stop dev test test-cover test-race docker-test docker-test-cover docker-test-race logs db-shell migrate-up migrate-down
 
 build:
 	docker compose build bot
@@ -14,6 +14,21 @@ dev:
 
 test:
 	go test ./...
+
+test-cover:
+	go test -cover ./internal/...
+
+test-race:
+	go test -race ./...
+
+docker-test:
+	MSYS_NO_PATHCONV=1 docker run --rm -v "$$(pwd):/app" -w "/app" golang:1.23-alpine sh -c "go test ./... && echo OK"
+
+docker-test-cover:
+	MSYS_NO_PATHCONV=1 docker run --rm -v "$$(pwd):/app" -w "/app" golang:1.23-alpine sh -c "go test -cover ./internal/... && echo OK"
+
+docker-test-race:
+	MSYS_NO_PATHCONV=1 docker run --rm -v "$$(pwd):/app" -w "/app" golang:1.23 sh -c "go test -race ./... && echo OK"
 
 migrate-up:
 	docker compose exec bot ./neuro-bot migrate up

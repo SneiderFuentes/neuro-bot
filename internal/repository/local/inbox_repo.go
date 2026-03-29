@@ -3,7 +3,6 @@ package local
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"time"
 )
 
@@ -83,6 +82,6 @@ func (r *InboxRepo) DeleteOlderThan(ctx context.Context, hours int) (int64, erro
 func (r *InboxRepo) Count(ctx context.Context, status string) (int64, error) {
 	var count int64
 	err := r.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT COUNT(1) FROM message_inbox WHERE status = '%s'`, status)).Scan(&count)
+		`SELECT COUNT(1) FROM message_inbox WHERE status = ?`, status).Scan(&count)
 	return count, err
 }

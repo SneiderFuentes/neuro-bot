@@ -41,7 +41,7 @@ func RegisterRegistrationHandlers(
 		Options:   []string{"CC", "TI", "CE", "PA", "RC", "MS", "AS"},
 		RetryPrompt: func(sess *session.Session, result *sm.StateResult) {
 			result.Messages = append(result.Messages, &sm.ListMessage{
-				Body: "Tipo de documento", Title: "Seleccionar",
+				Body: "Selecciona tu tipo de documento:", Title: "Seleccionar",
 				Sections: []sm.ListSection{{
 					Title: "Tipos de documento",
 					Rows: []sm.ListRow{
@@ -60,9 +60,9 @@ func RegisterRegistrationHandlers(
 	})
 	m.Register(sm.StateRegDocumentIssuePlace, regDocumentIssuePlaceHandler())
 	m.Register(sm.StateRegFirstSurname, withCorrectionRedirect(regFieldHandler("reg_first_surname", "Por favor escribe tu primer apellido (solo letras, sin números, ni símbolos ni espacios).", validateName, sm.StateRegSecondSurname, "Si tienes *segundo apellido*, escríbelo. Si no, responde *NA*:")))
-	m.Register(sm.StateRegSecondSurname, regOptionalFieldHandler("reg_second_surname", "Si tienes segundo apellido, escríbelo. Si no, responde \"NA\".", sm.StateRegFirstName, "Por favor escribe tu *primer nombre* (solo letras, sin números ni símbolos):"))
+	m.Register(sm.StateRegSecondSurname, regOptionalFieldHandler("reg_second_surname", "Si tienes segundo apellido, escríbelo. Si no, responde *NA*:", sm.StateRegFirstName, "Por favor escribe tu *primer nombre* (solo letras, sin números ni símbolos):"))
 	m.Register(sm.StateRegFirstName, withCorrectionRedirect(regFieldHandler("reg_first_name", "Por favor escribe tu primer nombre (solo letras, sin números, ni símbolos ni espacios).", validateName, sm.StateRegSecondName, "Si tienes *segundo nombre*, escríbelo. Si no, responde *NA*:")))
-	m.Register(sm.StateRegSecondName, regOptionalFieldHandler("reg_second_name", "Si tienes segundo nombre, escríbelo. Si no, responde \"NA\".", sm.StateRegBirthDate, "Ingresa tu *fecha de nacimiento* en formato *AAAA-MM-DD* (ejemplo: 1992-04-17):"))
+	m.Register(sm.StateRegSecondName, regOptionalFieldHandler("reg_second_name", "Si tienes segundo nombre, escríbelo. Si no, responde *NA*:", sm.StateRegBirthDate, "Ingresa tu *fecha de nacimiento* en formato *AAAA-MM-DD* (ejemplo: 1992-04-17):"))
 	m.Register(sm.StateRegBirthDate, withCorrectionRedirect(regBirthDateHandler()))
 	m.Register(sm.StateRegBirthPlace, regBirthPlaceHandler())
 	m.RegisterWithConfig(sm.StateRegGender, sm.HandlerConfig{
@@ -81,7 +81,7 @@ func RegisterRegistrationHandlers(
 		Options:   []string{"1", "2", "3", "4", "5", "6"},
 		RetryPrompt: func(sess *session.Session, result *sm.StateResult) {
 			result.Messages = append(result.Messages, &sm.ListMessage{
-				Body: "Estado civil", Title: "Seleccionar",
+				Body: "Selecciona tu estado civil:", Title: "Seleccionar",
 				Sections: []sm.ListSection{{Title: "Estado civil", Rows: maritalStatusListRows()}},
 			})
 		},
@@ -424,7 +424,7 @@ func regPhoneHandler() sm.StateHandler {
 		return sm.NewResult(sm.StateRegPhone2).
 			WithContext("reg_phone", parsed).
 			WithContext("patient_phone", parsed).
-			WithText("Ingresa un número de celular secundario (ej: 3001234567) o responde \"NA\":"), nil
+			WithText("Ingresa un número de celular secundario (ej: 3001234567) o responde *NA*:"), nil
 	}
 }
 
@@ -436,7 +436,7 @@ func regOptionalPhoneHandler() sm.StateHandler {
 		if noResponses[strings.ToLower(input)] {
 			return sm.NewResult(sm.StateRegEmail).
 				WithContext("reg_phone2", "").
-				WithText("Indica tu correo electrónico (sin espacios y en minúscula) o responde \"NA\":"), nil
+				WithText("Indica tu correo electrónico o responde *NA*:"), nil
 		}
 
 		parsed := utils.ParseColombianPhone(input)
@@ -444,12 +444,12 @@ func regOptionalPhoneHandler() sm.StateHandler {
 			// No es un teléfono válido, pero es campo opcional, guardar vacío
 			return sm.NewResult(sm.StateRegEmail).
 				WithContext("reg_phone2", "").
-				WithText("Indica tu correo electrónico (sin espacios y en minúscula) o responde \"NA\":"), nil
+				WithText("Indica tu correo electrónico o responde *NA*:"), nil
 		}
 
 		return sm.NewResult(sm.StateRegEmail).
 			WithContext("reg_phone2", parsed).
-			WithText("Indica tu correo electrónico (sin espacios y en minúscula) o responde \"NA\":"), nil
+			WithText("Indica tu correo electrónico o responde *NA*:"), nil
 	}
 }
 
@@ -467,7 +467,7 @@ func regEmailHandler() sm.StateHandler {
 
 		if !validators.Email(lower) {
 			retryResult := sm.ValidateWithRetry(sess, "", func(string) bool { return false },
-				"Email no válido. Indica tu correo electrónico (sin espacios y en minúscula) o responde \"NA\".")
+				"Email no válido. Indica tu correo electrónico o responde *NA*:")
 			return retryResult, nil
 		}
 
@@ -503,7 +503,7 @@ func regMunicipalityHandler(municipalityRepo repository.MunicipalityRepository) 
 		results, err := municipalityRepo.Search(ctx, input)
 		if err != nil {
 			return sm.NewResult(sess.CurrentState).
-				WithText("Error al buscar municipios. Intenta de nuevo escribiendo el nombre de tu municipio:"), nil
+				WithText("No pudimos buscar el municipio en este momento. Intenta de nuevo escribiendo el nombre de tu municipio:"), nil
 		}
 
 		outcome, errResult := sm.ValidateSearchCount(sess, len(results), 5,
@@ -707,20 +707,20 @@ func buildRegistrationSummary(sess *session.Session) string {
 
 	return fmt.Sprintf("*Resumen de tu registro:*\n\n"+
 		"Documento: %s %s\n"+
-		"Lugar de expedicion: %s\n"+
+		"Lugar de expedición: %s\n"+
 		"Nombre: %s %s %s %s\n"+
 		"Nacimiento: %s (Edad: %s)\n"+
 		"Lugar de nacimiento: %s\n"+
-		"Genero: %s\n"+
+		"Género: %s\n"+
 		"Estado civil: %s\n"+
-		"Direccion: %s\n"+
-		"Telefono: %s\n"+
+		"Dirección: %s\n"+
+		"Teléfono: %s\n"+
 		"Email: %s\n"+
-		"Ocupacion: %s\n"+
+		"Ocupación: %s\n"+
 		"Municipio: %s\n"+
 		"Entidad: %s\n"+
 		"Tipo usuario: %s\n"+
-		"Afiliacion: %s\n\n"+
+		"Afiliación: %s\n\n"+
 		"¿Los datos son correctos?",
 		sess.GetContext("reg_document_type"), sess.GetContext("patient_doc"),
 		formatOptional(sess.GetContext("reg_document_issue_place")),
@@ -905,7 +905,7 @@ func correctionFields() []correctionField {
 			}},
 		{ID: "corr_email", Title: "Email", State: sm.StateRegEmail,
 			Prompt: func() sm.OutboundMessage {
-				return &sm.TextMessage{Text: "Indica tu correo electrónico (sin espacios y en minúscula) o responde \"NA\":"}
+				return &sm.TextMessage{Text: "Indica tu correo electrónico o responde *NA*:"}
 			}},
 		{ID: "corr_document_type", Title: "Tipo de documento", State: sm.StateRegDocumentType,
 			Prompt: func() sm.OutboundMessage {

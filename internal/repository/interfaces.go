@@ -25,6 +25,7 @@ type AppointmentRepository interface {
 	FindByAgendaAndDate(ctx context.Context, agendaID int, date string) ([]domain.Appointment, error)
 	Create(ctx context.Context, input domain.CreateAppointmentInput) (*domain.Appointment, error)
 	CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error
+	CreatePxCitaBatch(ctx context.Context, inputs []domain.CreatePxCitaInput) error
 	Confirm(ctx context.Context, id string, channel, channelID string) error
 	Cancel(ctx context.Context, id string, reason, channel, channelID string) error
 	ConfirmBatch(ctx context.Context, ids []string, channel, channelID string) error
@@ -58,8 +59,10 @@ type ScheduleRepository interface {
 
 // SoatRepository — búsqueda de precios por CUPS según tarifa.
 // Implementación actual: datosipsndx (tabla: codigossoat)
+// FindPrice returns nil when the CUPS code is not found in the SOAT table,
+// and *0.0 when the tariff is legitimately zero.
 type SoatRepository interface {
-	FindPrice(ctx context.Context, cupCode, tariffType string) (float64, error)
+	FindPrice(ctx context.Context, cupCode, tariffType string) (*float64, error)
 }
 
 // ProcedureRepository — catálogo de procedimientos CUPS.

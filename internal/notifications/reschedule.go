@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 // handleReschedule processes responses to the reschedule notification template.
@@ -36,7 +38,7 @@ func (m *NotificationManager) handleCancellation(phone, action string, pending *
 			})
 		}
 
-		slog.Info("cancellation acknowledged", "phone", phone, "appointment_id", pending.AppointmentID)
+		slog.Info("cancellation acknowledged", "phone", utils.MaskPhone(phone), "appointment_id", pending.AppointmentID)
 
 	case "reschedule": // postback: "reprogramar" or "reschedule"
 		m.startSelfReschedule(phone, pending, true) // skipCancel=true: already cancelled by admin

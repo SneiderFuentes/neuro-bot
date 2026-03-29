@@ -8,6 +8,7 @@ import (
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/config"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 	"github.com/neuro-bot/neuro-bot/internal/session"
 	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
 )
@@ -35,7 +36,7 @@ func escalateHandler(birdClient *bird.Client, cfg *config.Config) sm.StateHandle
 
 		slog.Debug("escalation_start",
 			"session_id", sess.ID,
-			"phone", msg.Phone,
+			"phone", utils.MaskPhone(msg.Phone),
 			"cups_code", cupsCode,
 			"team_id", teamID,
 			"state", preState,
@@ -63,7 +64,7 @@ func escalateHandler(birdClient *bird.Client, cfg *config.Config) sm.StateHandle
 		if conversationID == "" {
 			slog.Warn("escalation_no_conversation_id",
 				"session_id", sess.ID,
-				"phone", msg.Phone,
+				"phone", utils.MaskPhone(msg.Phone),
 				"msg_conv_id", msg.ConversationID,
 				"sess_conv_id", sess.ConversationID,
 			)
@@ -71,7 +72,7 @@ func escalateHandler(birdClient *bird.Client, cfg *config.Config) sm.StateHandle
 			patientNotified = true
 			if sendErr != nil {
 				slog.Error("escalation_pre_send_failed",
-					"phone", msg.Phone,
+					"phone", utils.MaskPhone(msg.Phone),
 					"session_id", sess.ID,
 					"error", sendErr,
 				)
@@ -93,14 +94,14 @@ func escalateHandler(birdClient *bird.Client, cfg *config.Config) sm.StateHandle
 		if err := birdClient.EscalateToAgent(conversationID, msg.Phone, teamID, teamName, sess.PatientName, cfg.BirdTeamFallback); err != nil {
 			slog.Error("escalation failed",
 				"error", err,
-				"phone", msg.Phone,
+				"phone", utils.MaskPhone(msg.Phone),
 				"team_id", teamID,
 				"conversation_id", conversationID,
 				"session_id", sess.ID,
 			)
-			// Agent unavailable → silent fallback to restart/end menu (no "connecting" message shown)
+			// Agent unavailable → fallback to restart/end menu
 			return sm.NewResult(sm.StateFallbackMenu).
-				WithButtons("¿Qué deseas hacer?",
+				WithButtons("No pudimos conectarte con un agente en este momento. ¿Qué deseas hacer?",
 					sm.Button{Text: "Volver al inicio", Payload: "action:restart"},
 					sm.Button{Text: "Terminar chat", Payload: "action:end"},
 				).

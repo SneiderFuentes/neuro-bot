@@ -203,14 +203,16 @@ func (m *NotificationManager) RegisterPending(notif PendingNotification) {
 
 	// Persist to DB (survives restarts)
 	if m.persister != nil {
-		if err := m.persister.Upsert(context.Background(), notif.Phone, notif.Type,
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := m.persister.Upsert(ctx, notif.Phone, notif.Type,
 			notif.AppointmentID, notif.WaitingListID, notif.BirdMessageID, notif.ConversationID,
 			notif.RetryCount, expiresAt); err != nil {
-			slog.Error("persist pending notification", "phone", notif.Phone, "error", err)
+			slog.Error("persist pending notification", "phone", utils.MaskPhone(notif.Phone), "error", err)
 		}
 	}
 
-	slog.Info("pending notification registered", "phone", notif.Phone, "type", notif.Type)
+	slog.Info("pending notification registered", "phone", utils.MaskPhone(notif.Phone), "type", notif.Type)
 }
 
 // HandleResponse processes a patient's response to a proactive template.
@@ -218,12 +220,16 @@ func (m *NotificationManager) RegisterPending(notif PendingNotification) {
 func (m *NotificationManager) HandleResponse(phone, payload, conversationID string) {
 	val, ok := m.pending.LoadAndDelete(phone)
 	if !ok {
-		slog.Warn("no pending notification for phone", "phone", phone, "payload", payload)
+		slog.Warn("no pending notification for phone", "phone", utils.MaskPhone(phone), "payload", payload)
 		return
 	}
 
 	pending := val.(*PendingNotification)
 	pending.Timer.Stop()
+	// Cleanup callIDMap
+	if pending.CallID != "" {
+		m.callIDMap.Delete(pending.CallID)
+	}
 	// Only overwrite if the webhook provides a non-empty conversationID.
 	// Template responses often arrive without conversationId; don't lose the
 	// stored value from the original template send or outbound webhook.
@@ -241,7 +247,9 @@ func (m *NotificationManager) HandleResponse(phone, payload, conversationID stri
 
 	// Remove from DB
 	if m.persister != nil {
-		m.persister.Delete(context.Background(), phone)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		m.persister.Delete(ctx, phone)
 	}
 
 	normalized := normalizePostback(payload)
@@ -265,7 +273,7 @@ func (m *NotificationManager) HandleResponse(phone, payload, conversationID stri
 // so the appointment data is reconstructed from the session context.
 func (m *NotificationManager) HandleNotifPendingCommand(phone, action, convID, appointmentID, notifType string) {
 	slog.Info("agent handling notif_pending command",
-		"phone", phone,
+		"phone", utils.MaskPhone(phone),
 		"action", action,
 		"appointment_id", appointmentID,
 		"notif_type", notifType,
@@ -290,7 +298,7 @@ func (m *NotificationManager) HandleNotifPendingCommand(phone, action, convID, a
 	default:
 		// Unknown type — treat as confirmation (safest fallback)
 		slog.Warn("HandleNotifPendingCommand: unknown notif type, treating as confirmation",
-			"phone", phone, "notif_type", notifType)
+			"phone", utils.MaskPhone(phone), "notif_type", notifType)
 		m.handleConfirmation(phone, normalized, pending)
 	}
 }
@@ -305,7 +313,7 @@ func (m *NotificationManager) HasPending(phone string) bool {
 // Resends the confirmation prompt (up to 3 times) instead of starting a new bot session.
 // Returns true if the message was consumed (caller should not route to state machine).
 func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) bool {
-	val, ok := m.pending.Load(phone)
+	val, ok := m.pending.LoadAndDelete(phone) // atomic claim
 	if !ok {
 		return false
 	}
@@ -316,6 +324,7 @@ func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) b
 	case "confirmation", "reschedule", "cancellation", "waiting_list":
 		// These types have interactive buttons — intercept free text
 	default:
+		m.pending.Store(phone, p) // re-store: not our type
 		return false
 	}
 
@@ -323,12 +332,16 @@ func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) b
 
 	if p.InvalidInputs > 3 {
 		// Demasiados intentos inválidos — escalar al agente para que gestione
-		m.pending.LoadAndDelete(phone)
 		if p.Timer != nil {
 			p.Timer.Stop()
 		}
+		if p.CallID != "" {
+			m.callIDMap.Delete(p.CallID)
+		}
 		if m.persister != nil {
-			m.persister.Delete(context.Background(), phone)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			m.persister.Delete(ctx, phone)
 		}
 		// Actualizar caché con el convID del mensaje entrante (puede diferir del template)
 		if conversationID != "" {
@@ -361,7 +374,7 @@ func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) b
 	switch p.Type {
 	case "confirmation", "reschedule":
 		m.birdClient.SendButtons(phone, convID,
-			"Por favor selecciona una opcion para gestionar tu cita de manana:",
+			"Por favor selecciona una opción para gestionar tu cita de mañana:",
 			[]bird.Button{
 				{Text: "Confirmar", Payload: "confirm"},
 				{Text: "Reprogramar", Payload: "reprogramar"},
@@ -369,14 +382,14 @@ func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) b
 			})
 	case "cancellation":
 		m.birdClient.SendButtons(phone, convID,
-			"Por favor selecciona una opcion:",
+			"Por favor selecciona una opción para continuar con tu cita:",
 			[]bird.Button{
 				{Text: "Entendido", Payload: "understood"},
 				{Text: "Reprogramar", Payload: "reschedule"},
 			})
 	case "waiting_list":
 		m.birdClient.SendButtons(phone, convID,
-			"Se libero un espacio para tu procedimiento. ¿Deseas agendar la cita?",
+			"Se liberó un espacio para tu procedimiento. ¿Deseas agendar la cita?",
 			[]bird.Button{
 				{Text: "Agendar", Payload: "wl_schedule"},
 				{Text: "No, gracias", Payload: "wl_decline"},
@@ -384,7 +397,7 @@ func (m *NotificationManager) HandleInvalidInput(phone, conversationID string) b
 	}
 
 	slog.Info("notification invalid input — resent prompt",
-		"phone", phone,
+		"phone", utils.MaskPhone(phone),
 		"type", p.Type,
 		"invalid_inputs", p.InvalidInputs,
 	)
@@ -425,14 +438,16 @@ func (m *NotificationManager) MarkIVRSent(phone string) {
 
 	if m.persister != nil {
 		expiresAt := time.Now().Add(duration)
-		if err := m.persister.Upsert(context.Background(), p.Phone, p.Type,
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := m.persister.Upsert(ctx, p.Phone, p.Type,
 			p.AppointmentID, p.WaitingListID, p.BirdMessageID, p.ConversationID,
 			p.RetryCount, expiresAt); err != nil {
-			slog.Error("persist IVR sent notification", "phone", phone, "error", err)
+			slog.Error("persist IVR sent notification", "phone", utils.MaskPhone(phone), "error", err)
 		}
 	}
 
-	slog.Info("IVR sent, post-IVR timer started", "phone", phone, "retry", p.RetryCount, "minutes", safeMinutes(m.cfg.ConfirmPostIVRMinutes, 30))
+	slog.Info("IVR sent, post-IVR timer started", "phone", utils.MaskPhone(phone), "retry", p.RetryCount, "minutes", safeMinutes(m.cfg.ConfirmPostIVRMinutes, 30))
 }
 
 // RegisterCallID stores the mapping callId → phone so that when Bird sends the
@@ -441,7 +456,8 @@ func (m *NotificationManager) MarkIVRSent(phone string) {
 func (m *NotificationManager) RegisterCallID(callID, phone string) {
 	m.callIDMap.Store(callID, phone)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// Store callID in the in-memory pending so MarkIVRSent can carry it forward
 	apptID := ""
@@ -455,14 +471,14 @@ func (m *NotificationManager) RegisterCallID(callID, phone string) {
 	// Persist callId to notification_pending for restart recovery
 	if m.persister != nil {
 		if err := m.persister.UpdateCallID(ctx, phone, callID); err != nil {
-			slog.Error("persist call_id to notification_pending", "phone", phone, "callId", callID, "error", err)
+			slog.Error("persist call_id to notification_pending", "phone", utils.MaskPhone(phone), "callId", callID, "error", err)
 		}
 	}
 
 	// KPI: insert call record into communication_calls
 	if m.callTracker != nil {
 		if err := m.callTracker.InsertCall(ctx, callID, phone, apptID); err != nil {
-			slog.Error("insert ivr call record", "callId", callID, "phone", phone, "error", err)
+			slog.Error("insert ivr call record", "callId", callID, "phone", utils.MaskPhone(phone), "error", err)
 		}
 	}
 }
@@ -479,17 +495,18 @@ func (m *NotificationManager) RegisterCallID(callID, phone string) {
 func (m *NotificationManager) HandleVoiceGatherResult(callID, keys string) {
 	val, ok := m.callIDMap.LoadAndDelete(callID)
 	if !ok {
-		slog.Warn("voice gather result: unknown callId", "callId", callID)
+		slog.Error("voice gather result: unknown or already processed callId", "callId", callID)
 		return
 	}
 	phone := val.(string)
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	switch {
 	case keys == "1":
 		// ── CONFIRM ──────────────────────────────────────────────────────────
-		slog.Info("IVR: patient confirmed", "phone", phone, "callId", callID)
+		slog.Info("IVR: patient confirmed", "phone", utils.MaskPhone(phone), "callId", callID)
 
 		pendVal, ok := m.pending.LoadAndDelete(phone)
 		if !ok {
@@ -527,7 +544,7 @@ func (m *NotificationManager) HandleVoiceGatherResult(callID, keys string) {
 
 	case keys != "":
 		// ── CANCEL (pressed any key other than 1) ────────────────────────────
-		slog.Info("IVR: patient cancelled", "phone", phone, "keys", keys, "callId", callID)
+		slog.Info("IVR: patient cancelled", "phone", utils.MaskPhone(phone), "keys", keys, "callId", callID)
 
 		pendVal, ok := m.pending.LoadAndDelete(phone)
 		if !ok {
@@ -566,7 +583,7 @@ func (m *NotificationManager) HandleVoiceGatherResult(callID, keys string) {
 	default:
 		// ── NO KEY PRESSED (gather timed out after 50 s) ─────────────────────
 		// Appointment stays unconfirmed; post-IVR timer continues.
-		slog.Info("IVR: no DTMF received (timeout)", "phone", phone, "callId", callID)
+		slog.Info("IVR: no DTMF received (timeout)", "phone", utils.MaskPhone(phone), "callId", callID)
 
 		convID := ""
 		if pendVal, ok := m.pending.Load(phone); ok {
@@ -591,7 +608,7 @@ func (m *NotificationManager) HandleVoiceCallCompleted(callID string) {
 		return // Already handled by gather result
 	}
 	phone := val.(string)
-	slog.Info("IVR: call completed without gather (no answer / voicemail)", "phone", phone, "callId", callID)
+	slog.Info("IVR: call completed without gather (no answer / voicemail)", "phone", utils.MaskPhone(phone), "callId", callID)
 
 	convID := ""
 	if pendVal, ok := m.pending.Load(phone); ok {
@@ -602,7 +619,9 @@ func (m *NotificationManager) HandleVoiceCallCompleted(callID string) {
 			"La grabacion queda disponible en Bird. La cita sigue pendiente de confirmacion.")
 
 	if m.callTracker != nil {
-		m.callTracker.UpdateCallResult(context.Background(), callID, "completed", "no_answer")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		m.callTracker.UpdateCallResult(ctx, callID, "completed", "no_answer")
 	}
 }
 
@@ -672,9 +691,9 @@ func (m *NotificationManager) RestorePending(ctx context.Context) {
 		}
 
 		if now.After(row.ExpiresAt) {
-			// Already expired — process timeout immediately
+			// Already expired — process timeout immediately (sync at startup)
 			m.pending.Store(row.Phone, notif)
-			go m.handleTimeout(row.Phone)
+			m.handleTimeout(row.Phone)
 			expired++
 			continue
 		}
@@ -738,7 +757,7 @@ func (m *NotificationManager) handleTimeout(phone string) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("PANIC in handleTimeout",
-				"phone", phone,
+				"phone", utils.MaskPhone(phone),
 				"error", fmt.Sprintf("%v", r),
 				"stack", string(debug.Stack()),
 			)
@@ -752,9 +771,16 @@ func (m *NotificationManager) handleTimeout(phone string) {
 
 	pending := val.(*PendingNotification)
 
+	// Cleanup callIDMap
+	if pending.CallID != "" {
+		m.callIDMap.Delete(pending.CallID)
+	}
+
 	// Remove from DB (will be re-inserted if retry)
 	if m.persister != nil {
-		m.persister.Delete(context.Background(), phone)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		m.persister.Delete(ctx, phone)
 	}
 
 	// Resolve conversationID if still empty (template sends don't always return it).
@@ -769,7 +795,9 @@ func (m *NotificationManager) handleTimeout(phone string) {
 
 	// Log timeout event
 	if m.tracker != nil {
-		m.tracker.LogEvent(context.Background(), "", phone, "notification_timeout",
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		m.tracker.LogEvent(ctx, "", phone, "notification_timeout",
 			map[string]interface{}{
 				"type":            pending.Type,
 				"appointment_id":  pending.AppointmentID,
@@ -828,7 +856,8 @@ func (m *NotificationManager) escalateNotifToAgent(p *PendingNotification, incom
 		convID = m.birdClient.GetCachedConversationID(p.Phone)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	// Obtener datos de la cita para el mensaje al agente
 	apptDate := ""
@@ -866,9 +895,9 @@ func (m *NotificationManager) escalateNotifToAgent(p *PendingNotification, incom
 			"pre_escalation_state": sm.StateNotifPending,
 		}
 		if err := m.sessionRepo.Create(ctx, sess); err != nil {
-			slog.Error("escalateNotifToAgent: create session", "error", err, "phone", p.Phone)
+			slog.Error("escalateNotifToAgent: create session", "error", err, "phone", utils.MaskPhone(p.Phone))
 		} else if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, sessCtx); err != nil {
-			slog.Error("escalateNotifToAgent: set context", "error", err, "phone", p.Phone)
+			slog.Error("escalateNotifToAgent: set context", "error", err, "phone", utils.MaskPhone(p.Phone))
 		}
 	}
 
@@ -879,7 +908,7 @@ func (m *NotificationManager) escalateNotifToAgent(p *PendingNotification, incom
 		p.AppointmentID, apptDate, apptTime, cupsName)
 
 	slog.Info("escalateNotifToAgent",
-		"phone", p.Phone,
+		"phone", utils.MaskPhone(p.Phone),
 		"conv_id", convID,
 		"appointment_id", p.AppointmentID,
 		"team_fallback", m.cfg.BirdTeamFallback,
@@ -901,7 +930,7 @@ func (m *NotificationManager) escalateNotifToAgent(p *PendingNotification, incom
 		convID = m.birdClient.GetCachedConversationID(p.Phone)
 	}
 	if convID == "" {
-		slog.Error("escalateNotifToAgent: no conversation ID — cannot assign agent", "phone", p.Phone)
+		slog.Error("escalateNotifToAgent: no conversation ID — cannot assign agent", "phone", utils.MaskPhone(p.Phone))
 		return
 	}
 
@@ -913,7 +942,7 @@ func (m *NotificationManager) escalateNotifToAgent(p *PendingNotification, incom
 		m.cfg.BirdTeamFallback, "Call Center",
 		patientName, m.cfg.BirdTeamFallback); err != nil {
 		slog.Error("escalateNotifToAgent: EscalateToAgent failed",
-			"phone", p.Phone,
+			"phone", utils.MaskPhone(p.Phone),
 			"conv_id", convID,
 			"team", m.cfg.BirdTeamFallback,
 			"error", err,
@@ -921,7 +950,7 @@ func (m *NotificationManager) escalateNotifToAgent(p *PendingNotification, incom
 		return
 	}
 
-	slog.Info("notif escalated to agent (invalid inputs)", "phone", p.Phone, "appointment_id", p.AppointmentID)
+	slog.Info("notif escalated to agent (invalid inputs)", "phone", utils.MaskPhone(p.Phone), "appointment_id", p.AppointmentID)
 }
 
 // safeHours returns v if > 0, otherwise fallback. Guards against zero-value configs in tests.

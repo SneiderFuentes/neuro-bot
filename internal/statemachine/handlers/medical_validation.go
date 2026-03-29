@@ -103,7 +103,7 @@ func askContrastedHandler() sm.StateHandler {
 		if sess.GetContext("_prompted_contrast") == "" {
 			return sm.NewResult(sess.CurrentState).
 				WithContext("_prompted_contrast", "1").
-				WithButtons("Tu examen requiere *medio de contraste*?\n\n(Esto debe indicarlo tu orden médica)",
+				WithButtons("¿Tu examen requiere *medio de contraste*?\n\n(Esto debe indicarlo tu orden médica)",
 					sm.Button{Text: "Sí, con contraste", Payload: "contrast_yes"},
 					sm.Button{Text: "No, sin contraste", Payload: "contrast_no"},
 				), nil
@@ -112,7 +112,7 @@ func askContrastedHandler() sm.StateHandler {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "contrast_yes", "contrast_no")
 		if result != nil {
 			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
-				Text: "Tu examen requiere *medio de contraste*?\n\n(Esto debe indicarlo tu orden médica)",
+				Text: "¿Tu examen requiere *medio de contraste*?\n\n(Esto debe indicarlo tu orden médica)",
 				Buttons: []sm.Button{
 					{Text: "Sí, con contraste", Payload: "contrast_yes"},
 					{Text: "No, sin contraste", Payload: "contrast_no"},
@@ -279,7 +279,7 @@ func gfrCreatinineHandler() sm.StateHandler {
 		case age <= 14:
 			// Schwartz necesita altura
 			r.NextState = sm.StateGfrHeight
-			r.WithText("Escribe la altura del paciente en centímetros. (Ejemplo: si mide 1.70cm, escribir 170)")
+			r.WithText("Escribe la altura del paciente en centímetros. (Ejemplo: si mide 1.70 m, escribir 170)")
 		case age < 40:
 			// 15-39: preguntar enfermedad
 			r.NextState = sm.StateGfrDisease
@@ -338,7 +338,7 @@ func gfrHeightHandler() sm.StateHandler {
 		value, err := strconv.ParseFloat(strings.Replace(input, ",", ".", 1), 64)
 		if err != nil || value < 30 || value > 250 {
 			retryResult := sm.ValidateWithRetry(sess, "", func(string) bool { return false },
-				"Estatura no válida. Escribe la altura del paciente en centímetros. (Ejemplo: si mide 1.70cm, escribir 170)")
+				"Estatura no válida. Escribe la altura del paciente en centímetros. (Ejemplo: si mide 1.70 m, escribir 170)")
 			return retryResult, nil
 		}
 
@@ -439,7 +439,7 @@ func askSedationHandler() sm.StateHandler {
 		if sess.GetContext("_prompted_sedation") == "" {
 			return sm.NewResult(sess.CurrentState).
 				WithContext("_prompted_sedation", "1").
-				WithButtons("Tu examen requiere *sedación*?\n\n(Esto lo indica tu médico, generalmente para niños o pacientes con claustrofobia)",
+				WithButtons("¿Tu examen requiere *sedación*?\n\n(Esto lo indica tu médico, generalmente para niños o pacientes con claustrofobia)",
 					sm.Button{Text: "Sí, con sedación", Payload: "sedated_yes"},
 					sm.Button{Text: "No, sin sedación", Payload: "sedated_no"},
 				), nil
@@ -448,7 +448,7 @@ func askSedationHandler() sm.StateHandler {
 		result, selected := sm.ValidateButtonResponse(sess, msg, "sedated_yes", "sedated_no")
 		if result != nil {
 			result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
-				Text: "Tu examen requiere *sedación*?\n\n(Esto lo indica tu médico, generalmente para niños o pacientes con claustrofobia)",
+				Text: "¿Tu examen requiere *sedación*?\n\n(Esto lo indica tu médico, generalmente para niños o pacientes con claustrofobia)",
 				Buttons: []sm.Button{
 					{Text: "Sí, con sedación", Payload: "sedated_yes"},
 					{Text: "No, sin sedación", Payload: "sedated_no"},

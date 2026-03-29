@@ -26,7 +26,7 @@ func RegisterGreetingHandlers(m *sm.Machine, cfg *config.Config, locationRepo Lo
 		Options:   []string{"agendar", "consultar", "resultados", "ubicacion", "ayuda"},
 		RetryPrompt: func(sess *session.Session, result *sm.StateResult) {
 			list := buildMainMenuList()
-			list.Body = "Por favor selecciona una opcion del menu.\n\n" + list.Body
+			list.Body = "Por favor selecciona una opción del menú.\n\n" + list.Body
 			result.Messages = append(result.Messages, list)
 		},
 		Handler: mainMenuHandler(),
@@ -70,21 +70,21 @@ func checkBusinessHoursHandler(cfg *config.Config) sm.StateHandler {
 // Bird V2: list with Consultar Resultados + Ubicacion + Ayuda (no agendar/consultar citas fuera de horario).
 func outOfHoursHandler(cfg *config.Config) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		welcomeText := fmt.Sprintf("Soy %s, tu asistente virtual de *%s*.\n\n"+
+		welcomeText := fmt.Sprintf("Soy *%s*, tu asistente virtual de *%s*.\n\n"+
 			"Antes de continuar, ten en cuenta que al seguir conversando aceptas "+
-			"el tratamiento de tus datos personales conforme a nuestra Politica de "+
-			"Proteccion de Datos (Ley 1581 de 2012). disponibles en www.neuroelectrodx.com\n"+
-			"Podras ejercer tus derechos de acceso, rectificacion o supresion en cualquier momento.",
+			"el tratamiento de tus datos personales conforme a nuestra Política de "+
+			"Protección de Datos (Ley 1581 de 2012), disponibles en www.neuroelectrodx.com\n\n"+
+			"Podrás ejercer tus derechos de acceso, rectificación o supresión en cualquier momento.",
 			cfg.BotName, cfg.CenterName)
 
 		return sm.NewResult(sm.StateOutOfHoursMenu).
-			WithList(welcomeText+"\n\nEn que puedo ayudarte hoy?", "Ver opciones",
+			WithList(welcomeText+"\n\n¿En qué puedo ayudarte hoy?", "Ver opciones",
 				sm.ListSection{
 					Title: "Opciones disponibles",
 					Rows: []sm.ListRow{
 						{ID: "ooh_resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
-						{ID: "ooh_ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
-						{ID: "ooh_ayuda", Title: "Como usar el bot", Description: "Guia rapida de como interactuar conmigo"},
+						{ID: "ooh_ubicacion", Title: "Ubicación", Description: "Conoce nuestras sedes"},
+						{ID: "ooh_ayuda", Title: "Cómo usar el bot", Description: "Guía rápida de cómo interactuar conmigo"},
 					},
 				}).
 			WithEvent("out_of_hours_menu_shown", nil), nil
@@ -103,14 +103,14 @@ func outOfHoursMenuHandler(cfg *config.Config, locationRepo LocationReader) sm.S
 			// Clear default error text — combine into list body (1 message)
 			result.Messages = nil
 			result.Messages = append(result.Messages, &sm.ListMessage{
-				Body:  "Por favor selecciona una opcion.\n\nEn que puedo ayudarte hoy?",
+				Body:  "Por favor selecciona una opción.\n\n¿En qué puedo ayudarte hoy?",
 				Title: "Ver opciones",
 				Sections: []sm.ListSection{{
 					Title: "Opciones disponibles",
 					Rows: []sm.ListRow{
 						{ID: "ooh_resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
-						{ID: "ooh_ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
-						{ID: "ooh_ayuda", Title: "Como usar el bot", Description: "Guia rapida de como interactuar conmigo"},
+						{ID: "ooh_ubicacion", Title: "Ubicación", Description: "Conoce nuestras sedes"},
+						{ID: "ooh_ayuda", Title: "Cómo usar el bot", Description: "Guía rápida de cómo interactuar conmigo"},
 					},
 				}},
 			})
@@ -119,12 +119,12 @@ func outOfHoursMenuHandler(cfg *config.Config, locationRepo LocationReader) sm.S
 
 		switch selected {
 		case "ooh_resultados":
-			text := "Ingresa a nuestra pagina: https://neuroelectrodx.com/\n\n" +
-				"En el siguiente video encontraras el paso a paso para descargar tus resultados.\n" +
+			text := "Ingresa a nuestra página: https://neuroelectrodx.com/\n\n" +
+				"En el siguiente video encontrarás el paso a paso para descargar tus resultados.\n" +
 				"https://www.youtube.com/watch?v=kEx51t6OlyQ"
 			if cfg.ResultsURL != "" {
-				text = fmt.Sprintf("Ingresa a nuestra pagina: %s\n\n"+
-					"En el siguiente video encontraras el paso a paso para descargar tus resultados.\n"+
+				text = fmt.Sprintf("Ingresa a nuestra página: %s\n\n"+
+					"En el siguiente video encontrarás el paso a paso para descargar tus resultados.\n"+
 					"https://www.youtube.com/watch?v=kEx51t6OlyQ", cfg.ResultsURL)
 			}
 			return sm.NewResult(sm.StateTerminated).
@@ -168,7 +168,7 @@ func buildLocationsText(ctx context.Context, locationRepo LocationReader) string
 			return text
 		}
 	}
-	return "Actualmente no tenemos sedes configuradas. Comunicate con un agente para mas informacion."
+	return "Actualmente no tenemos sedes configuradas. Comunícate con un agente para más información."
 }
 
 // GREETING (automático) — envía bienvenida + lista del menú (5 opciones Bird V2)
@@ -176,9 +176,9 @@ func greetingHandler(cfg *config.Config) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		welcomeText := fmt.Sprintf("Soy *%s*, tu asistente virtual de *%s*.\n\n"+
 			"Antes de continuar, ten en cuenta que al seguir conversando aceptas "+
-			"el tratamiento de tus datos personales conforme a nuestra Politica de "+
-			"Proteccion de Datos (Ley 1581 de 2012). disponibles en www.neuroelectrodx.com\n"+
-			"Podras ejercer tus derechos de acceso, rectificacion o supresion en cualquier momento.",
+			"el tratamiento de tus datos personales conforme a nuestra Política de "+
+			"Protección de Datos (Ley 1581 de 2012), disponibles en www.neuroelectrodx.com\n\n"+
+			"Podrás ejercer tus derechos de acceso, rectificación o supresión en cualquier momento.",
 			cfg.BotName, cfg.CenterName)
 
 		r := sm.NewResult(sm.StateMainMenu).
@@ -229,16 +229,16 @@ func mainMenuHandler() sm.StateHandler {
 // buildMainMenuList creates the main menu list message with 5 options.
 func buildMainMenuList() *sm.ListMessage {
 	return &sm.ListMessage{
-		Body:  "En que puedo ayudarte hoy?",
+		Body:  "¿En qué puedo ayudarte hoy?",
 		Title: "Ver opciones",
 		Sections: []sm.ListSection{{
-			Title: "Menu principal",
+			Title: "Menú principal",
 			Rows: []sm.ListRow{
 				{ID: "agendar", Title: "Agendar cita", Description: "Si buscas una cita como particular o cuentas con una orden de tu IPS"},
-				{ID: "consultar", Title: "Citas Programadas", Description: "Si tienes citas programadas"},
+				{ID: "consultar", Title: "Citas Programadas", Description: "Consulta, confirma o cancela tus citas"},
 				{ID: "resultados", Title: "Consultar Resultados", Description: "Si quieres descargar resultados de tus consultas"},
-				{ID: "ubicacion", Title: "Ubicacion", Description: "Conoce nuestras sedes"},
-				{ID: "ayuda", Title: "Como usar el bot", Description: "Guia rapida de como interactuar conmigo"},
+				{ID: "ubicacion", Title: "Ubicación", Description: "Conoce nuestras sedes"},
+				{ID: "ayuda", Title: "Cómo usar el bot", Description: "Guía rápida de cómo interactuar conmigo"},
 			},
 		}},
 	}
@@ -262,31 +262,31 @@ func buildEntityTypeRows() []sm.ListRow {
 // Si viene del menú principal, vuelve a MAIN_MENU.
 func showHelpHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		msg1 := "📋 *GUIA RAPIDA DEL BOT*\n\n" +
-			"Soy tu asistente virtual para gestionar citas medicas por WhatsApp. " +
+		msg1 := "📋 *GUÍA RÁPIDA DEL BOT*\n\n" +
+			"Soy tu asistente virtual para gestionar citas médicas por WhatsApp. " +
 			"Esto es lo que puedo hacer:\n\n" +
 			"*1. Agendar cita*\n" +
 			"Seleccionas tu tipo de entidad (EPS, particular, etc.), " +
-			"ingresas tu documento, y envias una foto de tu orden medica. " +
-			"Yo la leo automaticamente y te muestro los horarios disponibles.\n\n" +
+			"ingresas tu documento, y envías una foto de tu orden médica. " +
+			"Yo la leo automáticamente y te muestro los horarios disponibles.\n\n" +
 			"*2. Consultar citas*\n" +
 			"Ingresas tu documento y te muestro tus citas programadas. " +
 			"Puedes confirmarlas o cancelarlas.\n\n" +
 			"*3. Consultar resultados*\n" +
-			"Te comparto el enlace para descargar tus resultados medicos.\n\n" +
-			"*4. Ubicacion*\n" +
+			"Te comparto el enlace para descargar tus resultados médicos.\n\n" +
+			"*4. Ubicación*\n" +
 			"Te muestro las direcciones de nuestras sedes con enlace a Google Maps."
 
-		msg2 := "💡 *TIPS PARA USAR EL BOT*\n\n" +
-			"• *Documento:* Ingresa solo numeros, sin puntos ni espacios\n" +
-			"• *Orden medica:* Envia una foto clara donde se lean bien los procedimientos\n" +
-			"• *Seleccionar opciones:* Cuando te muestre una lista, toca el boton para ver las opciones\n" +
-			"• *Horarios:* Te mostrare los horarios disponibles mas cercanos. Si no hay, puedes quedar en lista de espera\n" +
-			"• *Volver al menu:* Escribe *menu* o *0* en cualquier momento para volver al inicio\n\n" +
-			"Si en algun momento necesitas ayuda humana, el bot te conectara con un agente.\n\n" +
-			"*Horario de atencion:*\n" +
+		msg2 := "💡 *CONSEJOS PARA USAR EL BOT*\n\n" +
+			"• *Documento:* Ingresa solo números, sin puntos ni espacios\n" +
+			"• *Orden médica:* Envía una foto clara donde se lean bien los procedimientos\n" +
+			"• *Seleccionar opciones:* Cuando te muestre una lista, toca el botón para ver las opciones\n" +
+			"• *Horarios:* Te mostraré los horarios disponibles más cercanos. Si no hay, puedes quedar en lista de espera\n" +
+			"• *Volver al menú:* Escribe *menú* o *0* en cualquier momento para volver al inicio\n\n" +
+			"Si en algún momento necesitas ayuda humana, el bot te conectará con un agente.\n\n" +
+			"*Horario de atención:*\n" +
 			"Lunes a viernes: 7:00 AM - 6:00 PM\n" +
-			"Sabados: 7:00 AM - 12:00 PM"
+			"Sábados: 7:00 AM - 12:00 PM"
 
 		// Auto-close: combinar ambos mensajes y cerrar sesion
 		if sess.GetContext("help_source") == "ooh" {

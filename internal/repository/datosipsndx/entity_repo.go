@@ -64,15 +64,19 @@ func (r *EntityRepo) FindActiveByCategory(ctx context.Context, category string) 
 }
 
 func (r *EntityRepo) GetCodeByIndexAndCategory(ctx context.Context, index int, category string) (string, error) {
-	entities, err := r.FindActiveByCategory(ctx, category)
+	query := `SELECT IDEntidad FROM entidades
+	          WHERE contratoactivo = -1 AND CategoriaEntidad = ?
+	          ORDER BY NoRegistro ASC
+	          LIMIT 1 OFFSET ?`
+	var code string
+	err := r.db.QueryRowContext(ctx, query, category, index-1).Scan(&code)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("entity index %d out of range", index)
+	}
 	if err != nil {
 		return "", err
 	}
-	arrayIndex := index - 1
-	if arrayIndex < 0 || arrayIndex >= len(entities) {
-		return "", fmt.Errorf("entity index %d out of range (max %d)", index, len(entities))
-	}
-	return entities[arrayIndex].Code, nil
+	return code, nil
 }
 
 func (r *EntityRepo) FindByCode(ctx context.Context, code string) (*domain.Entity, error) {

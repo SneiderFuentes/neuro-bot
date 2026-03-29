@@ -15,6 +15,7 @@ import (
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/config"
 	"github.com/neuro-bot/neuro-bot/internal/notifications"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 	"github.com/neuro-bot/neuro-bot/internal/worker"
 )
 
@@ -40,9 +41,34 @@ type WebhookHandler struct {
 	notifyManager *notifications.NotificationManager
 	cfg           *config.Config
 	inboxRepo     InboxPersister // WAL for crash recovery (optional)
-	// voiceGatherCmds maps callId → gatherCommandId so we can query the DTMF result
+	// voiceGatherCmds maps callId → gatherEntry so we can query the DTMF result
 	// from GET /calls/{callId}/commands/{commandId} when the call completes.
 	voiceGatherCmds sync.Map
+}
+
+type gatherEntry struct {
+	commandID string
+	storedAt  time.Time
+}
+
+// StartGatherCleanup periodically evicts stale entries from voiceGatherCmds.
+func (h *WebhookHandler) StartGatherCleanup(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-10 * time.Minute)
+			h.voiceGatherCmds.Range(func(key, val any) bool {
+				if e, ok := val.(gatherEntry); ok && e.storedAt.Before(cutoff) {
+					h.voiceGatherCmds.Delete(key)
+				}
+				return true
+			})
+		}
+	}
 }
 
 func NewWebhookHandler(birdClient *bird.Client, workerPool *worker.MessageWorkerPool, notifyManager *notifications.NotificationManager, cfg *config.Config) *WebhookHandler {
@@ -78,7 +104,7 @@ func (h *WebhookHandler) HandleWhatsApp(w http.ResponseWriter, r *http.Request) 
 
 	// Testing whitelist: ignorar teléfonos no autorizados
 	if !h.cfg.IsPhoneWhitelisted(msg.Phone) {
-		slog.Debug("phone not whitelisted, ignoring", "phone", msg.Phone)
+		slog.Debug("phone not whitelisted, ignoring", "phone", utils.MaskPhone(msg.Phone))
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -107,7 +133,7 @@ func (h *WebhookHandler) HandleWhatsApp(w http.ResponseWriter, r *http.Request) 
 	if h.notifyManager != nil && h.notifyManager.HasPending(msg.Phone) {
 		if msg.IsPostback && IsNotificationPostback(msg.PostbackPayload) {
 			slog.Info("notification postback received",
-				"phone", msg.Phone,
+				"phone", utils.MaskPhone(msg.Phone),
 				"payload", msg.PostbackPayload,
 			)
 			go func() {
@@ -221,7 +247,7 @@ func (h *WebhookHandler) handleOutbound(event bird.WebhookEvent) {
 	}
 
 	slog.Debug("outbound_event_received",
-		"phone", phone,
+		"phone", utils.MaskPhone(phone),
 		"conversation_id", event.Payload.ConversationID,
 		"direction", event.Payload.Direction,
 		"status", event.Payload.Status,
@@ -234,7 +260,7 @@ func (h *WebhookHandler) handleOutbound(event bird.WebhookEvent) {
 		h.birdClient.CacheConversationID(phone, event.Payload.ConversationID)
 		h.workerPool.UpdateConversationID(phone, event.Payload.ConversationID)
 		slog.Debug("outbound_conversation_cached",
-			"phone", phone,
+			"phone", utils.MaskPhone(phone),
 			"conversation_id", event.Payload.ConversationID,
 		)
 	}
@@ -262,7 +288,7 @@ func (h *WebhookHandler) handleOutbound(event bird.WebhookEvent) {
 	cmd.Phone = phone
 
 	slog.Info("agent command received",
-		"phone", phone,
+		"phone", utils.MaskPhone(phone),
 		"action", cmd.Action,
 		"state", cmd.State,
 		"data", cmd.Data,
@@ -271,8 +297,22 @@ func (h *WebhookHandler) handleOutbound(event bird.WebhookEvent) {
 	h.workerPool.EnqueueAgentCommand(cmd)
 }
 
+// extractConversationPhone extracts the phone from conversation participants.
+func extractConversationPhone(participants []bird.Participant) string {
+	for _, p := range participants {
+		if p.IdentifierValue != "" {
+			return p.IdentifierValue
+		}
+		if p.Contact.IdentifierValue != "" {
+			return p.Contact.IdentifierValue
+		}
+	}
+	return ""
+}
+
 // HandleConversation procesa webhooks del servicio Conversations de Bird.
-// Cachea phone → conversationId cuando se crea una conversación.
+// Handles conversation.created (cache), conversation.updated (invalidate if closed),
+// and conversation.deleted (invalidate).
 func (h *WebhookHandler) HandleConversation(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 	body, err := io.ReadAll(r.Body)
@@ -306,7 +346,34 @@ func (h *WebhookHandler) HandleConversation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if event.Event != "conversation.created" {
+	switch event.Event {
+	case "conversation.created":
+		// Fall through to cache the new conversation ID
+	case "conversation.updated":
+		if event.Payload.Status != "" && event.Payload.Status != "active" {
+			phone := extractConversationPhone(event.Payload.FeaturedParticipants)
+			if phone != "" {
+				h.birdClient.InvalidateCachedConversationID(phone)
+				slog.Info("conversation_closed_cache_invalidated",
+					"phone", utils.MaskPhone(phone),
+					"conversation_id", event.Payload.ID,
+					"status", event.Payload.Status,
+				)
+			}
+			return
+		}
+		// Status == "active" → fall through to update cache
+	case "conversation.deleted":
+		phone := extractConversationPhone(event.Payload.FeaturedParticipants)
+		if phone != "" {
+			h.birdClient.InvalidateCachedConversationID(phone)
+			slog.Info("conversation_deleted_cache_invalidated",
+				"phone", utils.MaskPhone(phone),
+				"conversation_id", event.Payload.ID,
+			)
+		}
+		return
+	default:
 		return
 	}
 
@@ -315,30 +382,20 @@ func (h *WebhookHandler) HandleConversation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Extract phone (Bird may use identifierValue directly or nested in contact)
-	phone := ""
-	for _, p := range event.Payload.FeaturedParticipants {
-		if p.IdentifierValue != "" {
-			phone = p.IdentifierValue
-			break
-		}
-		if p.Contact.IdentifierValue != "" {
-			phone = p.Contact.IdentifierValue
-			break
-		}
-	}
-
+	phone := extractConversationPhone(event.Payload.FeaturedParticipants)
 	if phone != "" {
 		h.birdClient.CacheConversationID(phone, convID)
 		h.workerPool.UpdateConversationID(phone, convID)
-		slog.Info("conversation_created_cached",
-			"phone", phone,
+		slog.Info("conversation_cached",
+			"phone", utils.MaskPhone(phone),
 			"conversation_id", convID,
+			"event", event.Event,
 			"channel_id", event.Payload.ChannelID,
 		)
 	} else {
-		slog.Debug("conversation_created_no_phone",
+		slog.Debug("conversation_event_no_phone",
 			"conversation_id", convID,
+			"event", event.Event,
 			"raw", string(body),
 		)
 	}
@@ -402,14 +459,12 @@ func (h *WebhookHandler) HandleVoiceWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Log ALL voice events at INFO so we can observe Bird's exact event format
 	slog.Info("voice webhook event received",
 		"event", event.Event,
 		"type", event.Type,
 		"callId_new", event.Payload.ID,
 		"callId_legacy", event.LegacyCallID,
 		"status", event.Payload.Status,
-		"raw", string(body),
 	)
 
 	if h.notifyManager != nil {
@@ -428,7 +483,7 @@ func (h *WebhookHandler) HandleVoiceWebhook(w http.ResponseWriter, r *http.Reque
 						return
 					}
 					if commandID != "" {
-						h.voiceGatherCmds.Store(callID, commandID)
+						h.voiceGatherCmds.Store(callID, gatherEntry{commandID: commandID, storedAt: time.Now()})
 					}
 				}()
 			case "completed":
@@ -441,7 +496,7 @@ func (h *WebhookHandler) HandleVoiceWebhook(w http.ResponseWriter, r *http.Reque
 						h.notifyManager.HandleVoiceCallCompleted(callID)
 						return
 					}
-					commandID := val.(string)
+					commandID := val.(gatherEntry).commandID
 					keys, err := h.birdClient.GetGatherResult(callID, commandID)
 					if err != nil {
 						slog.Error("get gather result failed", "callId", callID, "commandId", commandID, "error", err)
@@ -507,7 +562,6 @@ func (h *WebhookHandler) HandleVoiceDTMF(w http.ResponseWriter, r *http.Request)
 	slog.Info("voice dtmf fetchCallFlow received",
 		"callId", ctx.CallID,
 		"keys", ctx.Keys,
-		"raw", string(body),
 	)
 
 	// Determine response TTS based on key pressed

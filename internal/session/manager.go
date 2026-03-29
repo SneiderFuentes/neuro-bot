@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 // SessionRepo define la interfaz que necesita el manager (implementada por local.SessionRepo)
@@ -207,7 +209,16 @@ func (m *SessionManager) UpdateConversationID(ctx context.Context, phone, conver
 		return nil
 	}
 	s.ConversationID = conversationID
-	return m.repo.Save(ctx, s)
+	if err := m.repo.Save(ctx, s); err != nil {
+		slog.Error("update_conversation_id_failed",
+			"phone", utils.MaskPhone(phone),
+			"conversation_id", conversationID,
+			"session_id", s.ID,
+			"error", err,
+		)
+		return err
+	}
+	return nil
 }
 
 // PhoneMutex retorna el mutex para uso del worker pool
@@ -222,13 +233,20 @@ func (m *SessionManager) StartInactivityChecker(ctx context.Context, deps Inacti
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
+	var checking atomic.Bool // prevents concurrent checks if a tick takes > 1 min
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if !checking.CompareAndSwap(false, true) {
+				slog.Debug("inactivity check skipped, previous still running")
+				continue
+			}
 			m.checkInactiveSessions(ctx, deps)
 			m.checkExpiredEscalations(ctx, deps)
+			checking.Store(false)
 		}
 	}
 }
@@ -248,7 +266,9 @@ func (m *SessionManager) checkInactiveSessions(ctx context.Context, deps Inactiv
 		elapsedMin := int(elapsed.Minutes())
 
 		if elapsedMin >= deps.CloseMin && s.Reminders >= 1 {
-			// Silent close: no message, just mark completed and close feed item
+			// Send closure message before marking completed
+			deps.BirdClient.SendText(s.PhoneNumber, s.ConversationID,
+				"Se ha cerrado tu sesión por inactividad. Para continuar, envía un nuevo mensaje.")
 			if err := m.repo.UpdateStatus(ctx, s.ID, StatusCompleted); err != nil {
 				slog.Error("inactivity close failed", "session_id", s.ID, "error", err)
 				continue
@@ -262,17 +282,17 @@ func (m *SessionManager) checkInactiveSessions(ctx context.Context, deps Inactiv
 				})
 			}
 			slog.Info("session closed by inactivity",
-				"session_id", s.ID, "phone", s.PhoneNumber, "idle_min", elapsedMin)
+				"session_id", s.ID, "phone", utils.MaskPhone(s.PhoneNumber), "idle_min", elapsedMin)
 
 		} else if elapsedMin >= deps.ReminderMin && s.Reminders == 0 {
 			// Single reminder with close warning
 			closeIn := deps.CloseMin - deps.ReminderMin
 			deps.BirdClient.SendText(s.PhoneNumber, s.ConversationID,
-				fmt.Sprintf("¿Sigues ahí? Si no responde en %d minutos se cerrará la sesión.\n\nPuedes volver al menú principal enviando *0* o *menu*.", closeIn))
+				fmt.Sprintf("¿Sigues ahí? Si no respondes en %d minutos se cerrará la sesión.\n\nPuedes volver al menú principal enviando *0* o *menú*.", closeIn))
 			if err := m.repo.SetContext(ctx, s.ID, "inactivity_reminders", "1"); err != nil {
 				slog.Error("set reminder failed", "session_id", s.ID, "error", err)
 			}
-			slog.Debug("inactivity reminder sent", "session_id", s.ID, "phone", s.PhoneNumber)
+			slog.Debug("inactivity reminder sent", "session_id", s.ID, "phone", utils.MaskPhone(s.PhoneNumber))
 		}
 	}
 }
@@ -297,7 +317,7 @@ func (m *SessionManager) checkExpiredEscalations(ctx context.Context, deps Inact
 			deps.Tracker.LogEvent(ctx, s.ID, s.PhoneNumber, "escalation_expired", nil)
 		}
 		slog.Info("escalated session expired",
-			"session_id", s.ID, "phone", s.PhoneNumber,
+			"session_id", s.ID, "phone", utils.MaskPhone(s.PhoneNumber),
 			"conversation_id", fmt.Sprintf("%.8s", s.ConversationID))
 	}
 }

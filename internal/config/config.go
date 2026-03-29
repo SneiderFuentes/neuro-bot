@@ -92,6 +92,7 @@ type Config struct {
 
 	// Security
 	InternalAPIKey string
+	LogMaskPhones  bool // Mask phone numbers in logs (default true; set LOG_MASK_PHONES=false to disable)
 
 	// Ngrok
 	NgrokHostname string
@@ -131,12 +132,7 @@ type Config struct {
 }
 
 func Load() *Config {
-	// APP_ENV=testing carga .env.testing primero (override), luego .env como fallback
-	if os.Getenv("APP_ENV") == "testing" {
-		godotenv.Load(".env.testing", ".env")
-	} else {
-		godotenv.Load() // default: .env
-	}
+	godotenv.Load() // loads .env
 
 	cfg := &Config{
 		// App
@@ -222,6 +218,7 @@ func Load() *Config {
 
 		// Security
 		InternalAPIKey: os.Getenv("INTERNAL_API_KEY"),
+		LogMaskPhones:  getEnv("LOG_MASK_PHONES", "true") == "true",
 
 		// Ngrok
 		NgrokHostname: os.Getenv("NGROK_HOSTNAME"),

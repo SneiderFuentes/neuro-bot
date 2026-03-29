@@ -131,7 +131,7 @@ func (t *Tasks) sendWhatsAppReminders(ctx context.Context) error {
 			skipped++
 			slog.Warn("skipping reminder - invalid phone",
 				"patient_id", firstAppt.PatientID,
-				"phone", firstAppt.PatientPhone)
+				"phone", utils.MaskPhone(firstAppt.PatientPhone))
 			continue
 		}
 
@@ -167,10 +167,10 @@ func (t *Tasks) sendWhatsAppReminders(ctx context.Context) error {
 
 		msgID, err := t.BirdClient.SendTemplate(phone, tmpl)
 		if err != nil {
-			slog.Error("send reminder failed", "phone", phone, "error", err)
+			slog.Error("send reminder failed", "phone", utils.MaskPhone(phone), "error", err)
 			continue
 		}
-		slog.Info("reminder template sent", "phone", phone, "bird_msg_id", msgID)
+		slog.Info("reminder template sent", "phone", utils.MaskPhone(phone), "bird_msg_id", msgID)
 
 		// Try to get conversationID for Bird Inbox visibility
 		convID := t.BirdClient.GetCachedConversationID(phone)
@@ -271,7 +271,7 @@ func (t *Tasks) sendVoiceReminders(ctx context.Context) error {
 			"clinic_address":   clinicAddress,
 		})
 		if err != nil {
-			slog.Error("voice call failed", "phone", pending.Phone, "error", err)
+			slog.Error("voice call failed", "phone", utils.MaskPhone(pending.Phone), "error", err)
 			continue
 		}
 
@@ -288,7 +288,7 @@ func (t *Tasks) sendVoiceReminders(ctx context.Context) error {
 				map[string]interface{}{"appointment_id": pending.AppointmentID})
 		}
 
-		slog.Info("ivr call initiated", "phone", pending.Phone, "appointment_id", pending.AppointmentID)
+		slog.Info("ivr call initiated", "phone", utils.MaskPhone(pending.Phone), "appointment_id", pending.AppointmentID)
 
 		sent++
 		time.Sleep(3 * time.Second) // Rate limit for calls
@@ -437,7 +437,7 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 
 			msgID, err := t.BirdClient.SendTemplate(entry.PhoneNumber, tmpl)
 			if err != nil {
-				slog.Error("send waiting list notification", "phone", entry.PhoneNumber, "error", err)
+				slog.Error("send waiting list notification", "phone", utils.MaskPhone(entry.PhoneNumber), "error", err)
 				continue
 			}
 
@@ -470,7 +470,7 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 			}
 
 			totalNotified++
-			slog.Info("waiting list notification sent", "phone", entry.PhoneNumber, "entry_id", entry.ID)
+			slog.Info("waiting list notification sent", "phone", utils.MaskPhone(entry.PhoneNumber), "entry_id", entry.ID)
 
 			time.Sleep(2 * time.Second) // Rate limit
 		}

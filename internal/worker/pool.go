@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -17,6 +18,7 @@ import (
 	"github.com/neuro-bot/neuro-bot/internal/session"
 	"github.com/neuro-bot/neuro-bot/internal/statemachine"
 	"github.com/neuro-bot/neuro-bot/internal/tracking"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 const (
@@ -27,6 +29,7 @@ const (
 	dedupCleanup          = 2 * time.Minute
 	phoneLockTimeout      = 30 * time.Second
 	agentCmdQueueSize     = 50
+	maxDedupEntries       = 100000 // safety cap; fail-open if exceeded (allow potential dups)
 )
 
 // SessionManagement abstracts session manager operations for testability.
@@ -82,6 +85,7 @@ type MessageWorkerPool struct {
 	queue          chan bird.InboundMessage
 	agentCmds      chan AgentCommand
 	recentMessages sync.Map // messageID -> time.Time (dedup)
+	dedupCount     atomic.Int64 // approximate count for safety cap
 	workers        int
 	activeOverflow atomic.Int32
 	wg             sync.WaitGroup // tracks all goroutines for graceful shutdown
@@ -199,10 +203,15 @@ func (p *MessageWorkerPool) Stop() {
 
 // Enqueue agrega un mensaje al queue. Retorna false si es duplicado o si se excede backpressure.
 func (p *MessageWorkerPool) Enqueue(msg bird.InboundMessage) bool {
-	// 1. Dedup check
-	if _, exists := p.recentMessages.LoadOrStore(msg.ID, time.Now()); exists {
-		slog.Debug("duplicate message ignored", "id", msg.ID, "phone", msg.Phone)
-		return false
+	// 1. Dedup check (fail-open if map is too large — allow potential dups rather than leak memory)
+	if p.dedupCount.Load() < maxDedupEntries {
+		if _, exists := p.recentMessages.LoadOrStore(msg.ID, time.Now()); exists {
+			slog.Debug("duplicate message ignored", "id", msg.ID, "phone", utils.MaskPhone(msg.Phone))
+			return false
+		}
+		p.dedupCount.Add(1)
+	} else {
+		slog.Warn("dedup map at capacity, skipping dedup check", "id", msg.ID, "cap", maxDedupEntries)
 	}
 
 	// 2. Intentar encolar en el channel (no bloqueante)
@@ -224,7 +233,9 @@ func (p *MessageWorkerPool) Enqueue(msg bird.InboundMessage) bool {
 			defer p.wg.Done()
 			defer p.activeOverflow.Add(-1)
 			slog.Warn("processing in overflow goroutine", "id", msg.ID)
-			p.safeProcess(p.ctx, msg)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			p.safeProcess(ctx, msg)
 		}()
 		return true
 	}
@@ -234,9 +245,9 @@ func (p *MessageWorkerPool) Enqueue(msg bird.InboundMessage) bool {
 func (p *MessageWorkerPool) EnqueueAgentCommand(cmd AgentCommand) {
 	select {
 	case p.agentCmds <- cmd:
-		slog.Info("agent command enqueued", "phone", cmd.Phone, "action", cmd.Action)
+		slog.Info("agent command enqueued", "phone", utils.MaskPhone(cmd.Phone), "action", cmd.Action)
 	default:
-		slog.Warn("agent command queue full, dropping", "phone", cmd.Phone, "action", cmd.Action)
+		slog.Warn("agent command queue full, dropping", "phone", utils.MaskPhone(cmd.Phone), "action", cmd.Action)
 	}
 }
 
@@ -259,7 +270,7 @@ func (p *MessageWorkerPool) safeProcess(ctx context.Context, msg bird.InboundMes
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("PANIC processing message",
-				"phone", msg.Phone,
+				"phone", utils.MaskPhone(msg.Phone),
 				"message_id", msg.ID,
 				"error", fmt.Sprintf("%v", r),
 				"stack", string(debug.Stack()),
@@ -274,7 +285,7 @@ func (p *MessageWorkerPool) safeProcessCmd(ctx context.Context, cmd AgentCommand
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("PANIC processing agent command",
-				"phone", cmd.Phone,
+				"phone", utils.MaskPhone(cmd.Phone),
 				"action", cmd.Action,
 				"error", fmt.Sprintf("%v", r),
 				"stack", string(debug.Stack()),
@@ -311,7 +322,10 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 
 	// 2. Adquirir lock por teléfono (serializa mensajes del mismo usuario)
 	if err := p.sessionManager.PhoneMutex().Lock(lockCtx, msg.Phone); err != nil {
-		slog.Warn("phone lock timeout", "phone", msg.Phone, "error", err)
+		slog.Warn("phone lock timeout", "phone", utils.MaskPhone(msg.Phone), "error", err)
+		// Notify patient so they know their message was received but delayed
+		p.birdClient.SendText(msg.Phone, "",
+			"Tu mensaje anterior está siendo procesado. Por favor espera un momento antes de enviar otro mensaje.")
 		return
 	}
 	defer p.sessionManager.PhoneMutex().Unlock(msg.Phone)
@@ -319,12 +333,15 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 	// 3. Cargar/crear sesión
 	sess, isNew, err := p.sessionManager.FindOrCreate(parentCtx, msg.Phone)
 	if err != nil {
-		slog.Error("session error", "phone", msg.Phone, "error", err)
+		slog.Error("session error", "phone", utils.MaskPhone(msg.Phone), "error", err)
+		// Send error message via Channels API so patient is not left in silence
+		p.birdClient.SendText(msg.Phone, "",
+			"Lo sentimos, estamos experimentando dificultades técnicas. Por favor intenta nuevamente en unos minutos.")
 		return
 	}
 
 	if isNew {
-		slog.Info("new session created", "session_id", sess.ID, "phone", msg.Phone)
+		slog.Info("new session created", "session_id", sess.ID, "phone", utils.MaskPhone(msg.Phone))
 		if p.tracker != nil {
 			p.tracker.LogEvent(parentCtx, sess.ID, msg.Phone, "session_started", nil)
 		}
@@ -334,7 +351,7 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 	if msg.ConversationID != "" && sess.ConversationID != msg.ConversationID {
 		slog.Debug("conversation_id_updated",
 			"session_id", sess.ID,
-			"phone", msg.Phone,
+			"phone", utils.MaskPhone(msg.Phone),
 			"old", sess.ConversationID,
 			"new", msg.ConversationID,
 		)
@@ -349,7 +366,7 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 		if cached != sess.ConversationID {
 			slog.Debug("conversation_id_updated_from_cache",
 				"session_id", sess.ID,
-				"phone", msg.Phone,
+				"phone", utils.MaskPhone(msg.Phone),
 				"old", sess.ConversationID,
 				"new", cached,
 			)
@@ -362,14 +379,14 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 		if looked, err := p.birdClient.LookupConversationByPhone(msg.Phone); err != nil {
 			slog.Warn("conversation_lookup_failed",
 				"session_id", sess.ID,
-				"phone", msg.Phone,
+				"phone", utils.MaskPhone(msg.Phone),
 				"error", err,
 			)
 		} else if looked != "" {
 			if looked != sess.ConversationID {
 				slog.Info("conversation_id_refreshed",
 					"session_id", sess.ID,
-					"phone", msg.Phone,
+					"phone", utils.MaskPhone(msg.Phone),
 					"old", sess.ConversationID,
 					"new", looked,
 				)
@@ -381,7 +398,7 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 			// trySendToConversation handles 422 (not active) with self-heal.
 			slog.Warn("conversation_id_lookup_miss_kept",
 				"session_id", sess.ID,
-				"phone", msg.Phone,
+				"phone", utils.MaskPhone(msg.Phone),
 				"kept", sess.ConversationID,
 			)
 		}
@@ -391,7 +408,7 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 	if sess.ConversationID == "" && !isNew {
 		slog.Warn("conversation_id_still_empty",
 			"session_id", sess.ID,
-			"phone", msg.Phone,
+			"phone", utils.MaskPhone(msg.Phone),
 			"state", sess.CurrentState,
 			"msg_conv_id", msg.ConversationID,
 		)
@@ -399,7 +416,7 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 
 	slog.Debug("session_state",
 		"session_id", sess.ID,
-		"phone", msg.Phone,
+		"phone", utils.MaskPhone(msg.Phone),
 		"state", sess.CurrentState,
 		"status", sess.Status,
 		"retry_count", sess.RetryCount,
@@ -407,16 +424,12 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 		"is_new", isNew,
 	)
 
-	// 4. Renovar timeout (siempre, incluye escaladas para mantener sesión viva con actividad)
-	if err := p.sessionManager.RenewTimeout(parentCtx, sess); err != nil {
-		slog.Error("renew timeout error", "phone", msg.Phone, "session_id", sess.ID, "conversation_id", sess.ConversationID, "error", err)
-	}
-
-	// 5. If session is escalated, log but DO NOT process through state machine
+	// 4. If session is escalated, log but DO NOT process through state machine
+	// Check BEFORE RenewTimeout to avoid race with agent ResumeFromEscalation
 	if sess.Status == session.StatusEscalated {
 		slog.Info("msg during escalation (ignored by bot)",
 			"session_id", sess.ID,
-			"phone", msg.Phone,
+			"phone", utils.MaskPhone(msg.Phone),
 			"text", msg.Text,
 		)
 		if p.tracker != nil {
@@ -428,7 +441,12 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 		return
 	}
 
-	// 5b. Reset inactivity reminders when patient sends a message
+	// 5b. Renew timeout for active sessions
+	if err := p.sessionManager.RenewTimeout(parentCtx, sess); err != nil {
+		slog.Error("renew timeout error", "phone", utils.MaskPhone(msg.Phone), "session_id", sess.ID, "conversation_id", sess.ConversationID, "error", err)
+	}
+
+	// 5c. Reset inactivity reminders when patient sends a message
 	if r := sess.GetContext("inactivity_reminders"); r != "" && r != "0" {
 		_ = p.sessionManager.SetContext(parentCtx, sess, "inactivity_reminders", "0")
 	}
@@ -436,7 +454,7 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 	// 6. Log mensaje recibido
 	slog.Info("processing message",
 		"session_id", sess.ID,
-		"phone", msg.Phone,
+		"phone", utils.MaskPhone(msg.Phone),
 		"state", sess.CurrentState,
 		"type", msg.MessageType,
 		"text", msg.Text,
@@ -446,20 +464,32 @@ func (p *MessageWorkerPool) processMessage(parentCtx context.Context, msg bird.I
 	prevState := sess.CurrentState
 	result, err := p.machine.Process(parentCtx, sess, msg)
 	if err != nil {
-		slog.Error("state machine error",
-			"phone", msg.Phone,
+		errMsg := "Lo sentimos, ocurrió un error. Por favor intenta de nuevo."
+		eventType := "state_machine_error"
+		if errors.Is(err, context.DeadlineExceeded) {
+			errMsg = "Tardó demasiado procesar tu solicitud. Por favor intenta de nuevo."
+			eventType = "state_machine_timeout"
+		}
+		slog.Error(eventType,
+			"phone", utils.MaskPhone(msg.Phone),
 			"session_id", sess.ID,
 			"conversation_id", sess.ConversationID,
 			"state", sess.CurrentState,
 			"error", err,
 		)
-		p.birdClient.SendText(msg.Phone, sess.ConversationID, "Lo siento, ocurrió un error. Por favor intenta de nuevo.")
+		p.birdClient.SendText(msg.Phone, sess.ConversationID, errMsg)
+		if p.tracker != nil {
+			p.tracker.LogEvent(parentCtx, sess.ID, msg.Phone, eventType, map[string]interface{}{
+				"error": err.Error(),
+				"state": sess.CurrentState,
+			})
+		}
 		return
 	}
 
 	slog.Debug("state_transition",
 		"session_id", sess.ID,
-		"phone", msg.Phone,
+		"phone", utils.MaskPhone(msg.Phone),
 		"from", prevState,
 		"to", result.NextState,
 		"messages_count", len(result.Messages),
@@ -478,7 +508,7 @@ func (p *MessageWorkerPool) processAgentCommand(parentCtx context.Context, cmd A
 	defer lockCancel()
 
 	if err := p.sessionManager.PhoneMutex().Lock(lockCtx, cmd.Phone); err != nil {
-		slog.Warn("phone lock timeout (agent cmd)", "phone", cmd.Phone, "error", err)
+		slog.Warn("phone lock timeout (agent cmd)", "phone", utils.MaskPhone(cmd.Phone), "error", err)
 		return
 	}
 	defer p.sessionManager.PhoneMutex().Unlock(cmd.Phone)
@@ -486,22 +516,22 @@ func (p *MessageWorkerPool) processAgentCommand(parentCtx context.Context, cmd A
 	// 2. Find escalated session
 	sess, _, err := p.sessionManager.FindOrCreate(parentCtx, cmd.Phone)
 	if err != nil {
-		slog.Error("session error (agent cmd)", "phone", cmd.Phone, "error", err)
+		slog.Error("session error (agent cmd)", "phone", utils.MaskPhone(cmd.Phone), "error", err)
 		return
 	}
 	if sess == nil || sess.Status != session.StatusEscalated {
-		slog.Warn("agent command but no escalated session", "phone", cmd.Phone, "action", cmd.Action)
+		slog.Warn("agent command but no escalated session", "phone", utils.MaskPhone(cmd.Phone), "action", cmd.Action)
 		return
 	}
 
 	// 3. Renovar timeout (mantiene sesión escalada viva mientras agente interactúa)
 	if err := p.sessionManager.RenewTimeout(parentCtx, sess); err != nil {
-		slog.Error("renew timeout error (agent cmd)", "phone", cmd.Phone, "session_id", sess.ID, "conversation_id", sess.ConversationID, "error", err)
+		slog.Error("renew timeout error (agent cmd)", "phone", utils.MaskPhone(cmd.Phone), "session_id", sess.ID, "conversation_id", sess.ConversationID, "error", err)
 	}
 
 	slog.Info("processing agent command",
 		"session_id", sess.ID,
-		"phone", cmd.Phone,
+		"phone", utils.MaskPhone(cmd.Phone),
 		"action", cmd.Action,
 		"state", cmd.State,
 		"data", cmd.Data,
@@ -546,7 +576,7 @@ func (p *MessageWorkerPool) handleAgentResume(ctx context.Context, sess *session
 			p.birdClient.UnassignFeedItem(convID, false)
 			p.notifyResponder.HandleNotifPendingCommand(sess.PhoneNumber, action, convID, appointmentID, notifType)
 			slog.Info("agent resolved notif_pending",
-				"phone", cmd.Phone,
+				"phone", utils.MaskPhone(cmd.Phone),
 				"action", action,
 				"session_id", sess.ID,
 				"appointment_id", appointmentID,
@@ -566,7 +596,7 @@ func (p *MessageWorkerPool) handleAgentResume(ctx context.Context, sess *session
 
 	// Resume session in DB
 	if err := p.sessionManager.ResumeFromEscalation(ctx, sess, targetState); err != nil {
-		slog.Error("resume from escalation failed", "error", err, "phone", cmd.Phone, "session_id", sess.ID, "conversation_id", sess.ConversationID)
+		slog.Error("resume from escalation failed", "error", err, "phone", utils.MaskPhone(cmd.Phone), "session_id", sess.ID, "conversation_id", sess.ConversationID)
 		return
 	}
 
@@ -575,7 +605,7 @@ func (p *MessageWorkerPool) handleAgentResume(ctx context.Context, sess *session
 
 	if cmd.Data != "" {
 		// Agent provided corrected data — inject as virtual message
-		p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID, "Hemos retomado tu atencion. Procesando tu informacion...")
+		p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID, "Hemos retomado tu atención. Procesando tu información...")
 
 		virtualMsg := bird.InboundMessage{
 			ID:          fmt.Sprintf("agent-cmd-%s-%d", cmd.Phone, time.Now().UnixNano()),
@@ -587,7 +617,7 @@ func (p *MessageWorkerPool) handleAgentResume(ctx context.Context, sess *session
 
 		result, err := p.machine.Process(ctx, sess, virtualMsg)
 		if err != nil {
-			slog.Error("process virtual message failed", "error", err, "phone", cmd.Phone, "session_id", sess.ID, "conversation_id", sess.ConversationID)
+			slog.Error("process virtual message failed", "error", err, "phone", utils.MaskPhone(cmd.Phone), "session_id", sess.ID, "conversation_id", sess.ConversationID)
 			return
 		}
 		p.sendAndSave(ctx, sess, sess.PhoneNumber, result)
@@ -595,7 +625,7 @@ func (p *MessageWorkerPool) handleAgentResume(ctx context.Context, sess *session
 		// No data — notify patient and trigger the state handler.
 		// For automatic states: executes immediately (e.g., CHECK_ENTITY).
 		// For interactive states: re-displays the prompt/buttons (e.g., MAIN_MENU).
-		p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID, "Hemos retomado tu atencion. Continuamos con tu proceso.")
+		p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID, "Hemos retomado tu atención. Continuamos con tu proceso.")
 
 		virtualMsg := bird.InboundMessage{
 			ID:          fmt.Sprintf("agent-resume-%s-%d", cmd.Phone, time.Now().UnixNano()),
@@ -622,17 +652,17 @@ func (p *MessageWorkerPool) handleAgentResume(ctx context.Context, sess *session
 // handleAgentReset restarts the session from GREETING (like /bot without arguments).
 func (p *MessageWorkerPool) handleAgentReset(ctx context.Context, sess *session.Session, cmd AgentCommand) {
 	if err := p.sessionManager.ResumeFromEscalation(ctx, sess, statemachine.StateGreeting); err != nil {
-		slog.Error("agent reset failed", "error", err, "phone", cmd.Phone, "session_id", sess.ID, "conversation_id", sess.ConversationID)
+		slog.Error("agent reset failed", "error", err, "phone", utils.MaskPhone(cmd.Phone), "session_id", sess.ID, "conversation_id", sess.ConversationID)
 		return
 	}
 	if err := p.sessionManager.ClearAllContext(ctx, sess); err != nil {
-		slog.Error("clear context on reset failed", "error", err, "phone", cmd.Phone, "session_id", sess.ID, "conversation_id", sess.ConversationID)
+		slog.Error("clear context on reset failed", "error", err, "phone", utils.MaskPhone(cmd.Phone), "session_id", sess.ID, "conversation_id", sess.ConversationID)
 	}
 
 	// Unassign agent from Bird Inbox (bot restarts, keep item open)
 	p.birdClient.UnassignFeedItem(sess.ConversationID, false)
 
-	p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID, "Hemos retomado tu atencion. Vamos a comenzar de nuevo.")
+	p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID, "Hemos retomado tu atención. Vamos a comenzar de nuevo.")
 
 	// Trigger GREETING handler
 	virtualMsg := bird.InboundMessage{
@@ -657,7 +687,7 @@ func (p *MessageWorkerPool) handleAgentReset(ctx context.Context, sess *session.
 // handleAgentClose closes the session (status=completed).
 func (p *MessageWorkerPool) handleAgentClose(ctx context.Context, sess *session.Session, cmd AgentCommand) {
 	if err := p.sessionManager.Complete(ctx, sess); err != nil {
-		slog.Error("agent close failed", "error", err, "phone", cmd.Phone, "session_id", sess.ID, "conversation_id", sess.ConversationID)
+		slog.Error("agent close failed", "error", err, "phone", utils.MaskPhone(cmd.Phone), "session_id", sess.ID, "conversation_id", sess.ConversationID)
 		return
 	}
 
@@ -739,7 +769,7 @@ func (p *MessageWorkerPool) handleAgentOrder(ctx context.Context, sess *session.
 
 	// 3. Resume at VALIDATE_OCR (same flow as image OCR success)
 	if err := p.sessionManager.ResumeFromEscalation(ctx, sess, statemachine.StateValidateOCR); err != nil {
-		slog.Error("orden resume failed", "error", err, "phone", cmd.Phone, "session_id", sess.ID, "conversation_id", sess.ConversationID)
+		slog.Error("orden resume failed", "error", err, "phone", utils.MaskPhone(cmd.Phone), "session_id", sess.ID, "conversation_id", sess.ConversationID)
 		p.birdClient.SendInternalText(sess.ConversationID, "Error al retomar sesion: "+err.Error())
 		return
 	}
@@ -756,7 +786,7 @@ func (p *MessageWorkerPool) handleAgentOrder(ctx context.Context, sess *session.
 
 	// 5. Notify patient and trigger VALIDATE_OCR
 	p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID,
-		"Hemos retomado tu atencion. Verificando tu orden medica...")
+		"Hemos retomado tu atención. Verificando tu orden médica...")
 
 	virtualMsg := bird.InboundMessage{
 		ID:          fmt.Sprintf("agent-orden-%s-%d", cmd.Phone, time.Now().UnixNano()),
@@ -821,7 +851,7 @@ func (p *MessageWorkerPool) handleAgentCups(ctx context.Context, sess *session.S
 	sess.SetContext("ocr_cups_json", string(cupsJSON))
 
 	if err := p.sessionManager.ResumeFromEscalation(ctx, sess, statemachine.StateValidateOCR); err != nil {
-		slog.Error("cups inject resume failed", "error", err, "phone", cmd.Phone)
+		slog.Error("cups inject resume failed", "error", err, "phone", utils.MaskPhone(cmd.Phone))
 		p.birdClient.SendInternalText(sess.ConversationID, "Error al retomar sesion: "+err.Error())
 		return
 	}
@@ -838,7 +868,7 @@ func (p *MessageWorkerPool) handleAgentCups(ctx context.Context, sess *session.S
 
 	// Notify patient and trigger VALIDATE_OCR
 	p.birdClient.SendText(sess.PhoneNumber, sess.ConversationID,
-		"Hemos retomado tu atencion. Verificando tu orden medica...")
+		"Hemos retomado tu atención. Verificando tu orden médica...")
 
 	virtualMsg := bird.InboundMessage{
 		ID:          fmt.Sprintf("agent-cups-%s-%d", cmd.Phone, time.Now().UnixNano()),
@@ -876,23 +906,25 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 				sess.ConversationID = cached
 			}
 		}
-		slog.Debug("sending_message", "phone", phone, "type", outMsg.Type(), "conversation_id", convID)
+		slog.Debug("sending_message", "phone", utils.MaskPhone(phone), "type", outMsg.Type(), "conversation_id", convID)
 		birdMsgID, err := p.sendMessage(phone, convID, outMsg)
 		if err != nil {
-			slog.Error("send message error", "phone", phone, "session_id", sess.ID, "conversation_id", convID, "type", outMsg.Type(), "error", err)
+			slog.Error("send message error", "phone", utils.MaskPhone(phone), "session_id", sess.ID, "conversation_id", convID, "type", outMsg.Type(), "error", err)
 			// Clear convID for remaining messages so they route via Channels API
 			// directly, avoiding repeated failures against a stuck conversation
 			if convID != "" {
 				slog.Warn("clearing_conversation_id_for_batch",
-					"phone", phone,
+					"phone", utils.MaskPhone(phone),
 					"conversation_id", convID,
 					"failed_type", outMsg.Type(),
 				)
 				convID = ""
 			}
+			// E6: async retry after 10s via Channels API
+			go p.retrySend(phone, outMsg)
 			continue
 		}
-		slog.Debug("message_sent_ok", "phone", phone, "type", outMsg.Type(), "bird_msg_id", birdMsgID)
+		slog.Debug("message_sent_ok", "phone", utils.MaskPhone(phone), "type", outMsg.Type(), "bird_msg_id", birdMsgID)
 		if p.tracker != nil {
 			p.tracker.LogMessageSent(ctx, sess.ID, phone, outMsg.Type(), birdMsgID)
 		}
@@ -907,7 +939,7 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 			sess.ConversationID = cached
 			slog.Info("conversation_id_captured_post_send",
 				"session_id", sess.ID,
-				"phone", phone,
+				"phone", utils.MaskPhone(phone),
 				"conversation_id", cached,
 			)
 		}
@@ -924,7 +956,7 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 
 	if clearAll {
 		if err := p.sessionManager.ClearAllContext(ctx, sess); err != nil {
-			slog.Error("clear all context error", "phone", phone, "session_id", sess.ID, "conversation_id", convID, "error", err)
+			slog.Error("clear all context error", "phone", utils.MaskPhone(phone), "session_id", sess.ID, "conversation_id", convID, "error", err)
 		}
 		result.ClearCtx = nil
 	}
@@ -935,13 +967,28 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 			ctxKeys = append(ctxKeys, k)
 		}
 		slog.Error("save_state_error",
-			"phone", phone,
+			"phone", utils.MaskPhone(phone),
 			"session_id", sess.ID,
 			"conversation_id", convID,
 			"next_state", result.NextState,
 			"context_keys", ctxKeys,
 			"error", err,
 		)
+		// Force-close the session so the next message creates a fresh one
+		// instead of loading stale state that causes confusing regressions.
+		if completeErr := p.sessionManager.Complete(ctx, sess); completeErr != nil {
+			slog.Error("save_state_fallback_complete_failed",
+				"phone", utils.MaskPhone(phone),
+				"session_id", sess.ID,
+				"error", completeErr,
+			)
+		} else {
+			sess.Status = session.StatusCompleted
+			slog.Warn("session force-completed after save_state failure",
+				"phone", utils.MaskPhone(phone),
+				"session_id", sess.ID,
+			)
+		}
 	}
 
 	// Close feed items in Bird Inbox when session completes (bot-driven termination).
@@ -953,7 +1000,7 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 			defer recoverLog("close-feed-complete")
 			time.Sleep(3 * time.Second)
 			if err := p.birdClient.CloseFeedItems(closingConvID); err != nil {
-				slog.Warn("close feed items on completion failed", "phone", phone, "conversation_id", closingConvID, "error", err)
+				slog.Warn("close feed items on completion failed", "phone", utils.MaskPhone(phone), "conversation_id", closingConvID, "error", err)
 			}
 		}()
 	}
@@ -965,7 +1012,7 @@ func (p *MessageWorkerPool) sendAndSave(ctx context.Context, sess *session.Sessi
 	for _, event := range result.Events {
 		slog.Info("event",
 			"session_id", sess.ID,
-			"phone", phone,
+			"phone", utils.MaskPhone(phone),
 			"type", event.Type,
 			"data", event.Data,
 		)
@@ -999,12 +1046,33 @@ func (p *MessageWorkerPool) sendMessage(phone, conversationID string, msg statem
 	}
 }
 
+// retrySend retries a failed outbound message after a delay.
+// Uses Channels API directly (empty conversationID) to avoid repeating
+// a Conversations API failure. Launched as a goroutine from sendAndSave.
+func (p *MessageWorkerPool) retrySend(phone string, msg statemachine.OutboundMessage) {
+	time.Sleep(10 * time.Second)
+
+	_, err := p.sendMessage(phone, "", msg)
+	if err != nil {
+		slog.Error("send message retry failed",
+			"phone", utils.MaskPhone(phone),
+			"type", msg.Type(),
+			"error", err,
+		)
+		return
+	}
+	slog.Info("send_message_retry_succeeded",
+		"phone", utils.MaskPhone(phone),
+		"type", msg.Type(),
+	)
+}
+
 // UpdateConversationID persists a conversationID to the active session for a phone.
 // Called from webhook handlers when conversation.created or outbound events arrive.
 func (p *MessageWorkerPool) UpdateConversationID(phone, conversationID string) {
 	if err := p.sessionManager.UpdateConversationID(p.ctx, phone, conversationID); err != nil {
 		slog.Warn("update_conversation_id_failed",
-			"phone", phone,
+			"phone", utils.MaskPhone(phone),
 			"conversation_id", conversationID,
 			"error", err,
 		)
@@ -1024,7 +1092,7 @@ func (p *MessageWorkerPool) EnqueueVirtual(phone string) {
 
 	select {
 	case p.queue <- msg:
-		slog.Info("virtual message enqueued", "phone", phone)
+		slog.Info("virtual message enqueued", "phone", utils.MaskPhone(phone))
 	default:
 		// Overflow processing — tracked with WaitGroup
 		p.activeOverflow.Add(1)
@@ -1032,7 +1100,9 @@ func (p *MessageWorkerPool) EnqueueVirtual(phone string) {
 		go func() {
 			defer p.wg.Done()
 			defer p.activeOverflow.Add(-1)
-			p.safeProcess(p.ctx, msg)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			p.safeProcess(ctx, msg)
 		}()
 	}
 }
@@ -1047,12 +1117,17 @@ func (p *MessageWorkerPool) startDedupCleanup(ctx context.Context) {
 			return
 		case <-ticker.C:
 			now := time.Now()
+			var cleaned int64
 			p.recentMessages.Range(func(key, value interface{}) bool {
 				if now.Sub(value.(time.Time)) > dedupTTL {
 					p.recentMessages.Delete(key)
+					cleaned++
 				}
 				return true
 			})
+			if cleaned > 0 {
+				p.dedupCount.Add(-cleaned)
+			}
 		}
 	}
 }

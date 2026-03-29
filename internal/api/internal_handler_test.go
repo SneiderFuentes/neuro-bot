@@ -41,6 +41,9 @@ func (m *mockApptRepoAPI) Create(ctx context.Context, input domain.CreateAppoint
 func (m *mockApptRepoAPI) CreatePxCita(ctx context.Context, input domain.CreatePxCitaInput) error {
 	return nil
 }
+func (m *mockApptRepoAPI) CreatePxCitaBatch(ctx context.Context, inputs []domain.CreatePxCitaInput) error {
+	return nil
+}
 func (m *mockApptRepoAPI) Confirm(ctx context.Context, id, ch, chID string) error { return nil }
 func (m *mockApptRepoAPI) Cancel(ctx context.Context, id, reason, ch, chID string) error {
 	if m.cancelFn != nil {
@@ -106,9 +109,12 @@ func (m *mockNotifCounterAPI) PendingCount() int { return m.count }
 // --- mock EventKPIReader ---
 
 type mockEventKPIReader struct {
-	dailyKPIsFn      func(ctx context.Context, date time.Time) (*localrepo.DailyKPIs, error)
-	funnelFn         func(ctx context.Context, from, to time.Time) (*localrepo.FunnelData, error)
-	healthMetricsFn  func(ctx context.Context) (*localrepo.HealthMetrics, error)
+	dailyKPIsFn             func(ctx context.Context, date time.Time) (*localrepo.DailyKPIs, error)
+	notifBreakdownFn        func(ctx context.Context, date time.Time) (*localrepo.NotificationBreakdown, error)
+	apptBreakdownFn         func(ctx context.Context, date time.Time) (*localrepo.AppointmentBreakdown, error)
+	funnelFn                func(ctx context.Context, from, to time.Time) (*localrepo.FunnelData, error)
+	healthMetricsFn         func(ctx context.Context) (*localrepo.HealthMetrics, error)
+	findByPhoneFn           func(ctx context.Context, phone string, from, to time.Time, eventType string, maxRows int) ([]localrepo.ChatEvent, error)
 }
 
 func (m *mockEventKPIReader) GetDailyKPIs(ctx context.Context, date time.Time) (*localrepo.DailyKPIs, error) {
@@ -116,6 +122,18 @@ func (m *mockEventKPIReader) GetDailyKPIs(ctx context.Context, date time.Time) (
 		return m.dailyKPIsFn(ctx, date)
 	}
 	return &localrepo.DailyKPIs{}, nil
+}
+func (m *mockEventKPIReader) GetNotificationBreakdown(ctx context.Context, date time.Time) (*localrepo.NotificationBreakdown, error) {
+	if m.notifBreakdownFn != nil {
+		return m.notifBreakdownFn(ctx, date)
+	}
+	return &localrepo.NotificationBreakdown{}, nil
+}
+func (m *mockEventKPIReader) GetAppointmentBreakdown(ctx context.Context, date time.Time) (*localrepo.AppointmentBreakdown, error) {
+	if m.apptBreakdownFn != nil {
+		return m.apptBreakdownFn(ctx, date)
+	}
+	return &localrepo.AppointmentBreakdown{}, nil
 }
 func (m *mockEventKPIReader) GetFunnel(ctx context.Context, from, to time.Time) (*localrepo.FunnelData, error) {
 	if m.funnelFn != nil {
@@ -128,6 +146,12 @@ func (m *mockEventKPIReader) GetHealthMetrics(ctx context.Context) (*localrepo.H
 		return m.healthMetricsFn(ctx)
 	}
 	return &localrepo.HealthMetrics{}, nil
+}
+func (m *mockEventKPIReader) FindByPhone(ctx context.Context, phone string, from, to time.Time, eventType string, maxRows int) ([]localrepo.ChatEvent, error) {
+	if m.findByPhoneFn != nil {
+		return m.findByPhoneFn(ctx, phone, from, to, eventType, maxRows)
+	}
+	return nil, nil
 }
 
 // --- mock WaitingListReader ---
@@ -299,13 +323,15 @@ func TestHandleDailyKPIs_Success(t *testing.T) {
 		t.Errorf("expected 200, got %d", rec.Code)
 	}
 
-	var result localrepo.DailyKPIs
-	json.NewDecoder(rec.Body).Decode(&result)
-	if result.TotalSessions != 42 {
-		t.Errorf("expected 42 sessions, got %d", result.TotalSessions)
+	var wrapper struct {
+		KPIs localrepo.DailyKPIs `json:"kpis"`
 	}
-	if result.AppointmentsCreated != 10 {
-		t.Errorf("expected 10 appointments, got %d", result.AppointmentsCreated)
+	json.NewDecoder(rec.Body).Decode(&wrapper)
+	if wrapper.KPIs.TotalSessions != 42 {
+		t.Errorf("expected 42 sessions, got %d", wrapper.KPIs.TotalSessions)
+	}
+	if wrapper.KPIs.AppointmentsCreated != 10 {
+		t.Errorf("expected 10 appointments, got %d", wrapper.KPIs.AppointmentsCreated)
 	}
 }
 
