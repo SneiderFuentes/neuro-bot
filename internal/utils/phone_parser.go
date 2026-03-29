@@ -6,13 +6,14 @@ import (
 )
 
 var (
-	nonDigitPlusRe = regexp.MustCompile(`[^\d+\-/]`)
-	separatorRe    = regexp.MustCompile(`[-/]`)
-	nonDigitRe     = regexp.MustCompile(`[^\d]`)
-	mobileRe       = regexp.MustCompile(`^3\d{9}$`)
+	// phoneRe extracts a Colombian mobile: optional +57/57 prefix, then 3 + 9 digits
+	phoneRe  = regexp.MustCompile(`(?:\+?57)?3\d{9}`)
+	mobileRe = regexp.MustCompile(`^3\d{9}$`)
+	digitRe  = regexp.MustCompile(`\d`)
 )
 
 // ParseColombianPhone parsea y normaliza un número de teléfono colombiano.
+// Maneja múltiples números separados por espacio, coma, guion, punto, slash.
 // Retorna formato "+57XXXXXXXXXX" o "" si no es válido.
 func ParseColombianPhone(phoneString string) string {
 	if phoneString == "" {
@@ -24,31 +25,30 @@ func ParseColombianPhone(phoneString string) string {
 		return ""
 	}
 
-	cleaned := nonDigitPlusRe.ReplaceAllString(phoneString, "")
-	numbers := separatorRe.Split(cleaned, -1)
-
-	for _, number := range numbers {
-		digits := nonDigitRe.ReplaceAllString(number, "")
-
-		// +57XXXXXXXXXX (12+ dígitos con prefijo 57)
-		if strings.Contains(cleaned, "+57") && len(digits) >= 12 {
-			mobile := digits[len(digits)-10:]
-			if mobileRe.MatchString(mobile) {
-				return "+57" + mobile
-			}
+	// 1. Try to find a valid phone pattern directly (handles multi-number strings)
+	if match := phoneRe.FindString(phoneString); match != "" {
+		digits := digitRe.FindAllString(match, -1)
+		all := strings.Join(digits, "")
+		mobile := all[len(all)-10:]
+		if mobileRe.MatchString(mobile) {
+			return "+57" + mobile
 		}
+	}
 
-		// 10 dígitos empezando con 3
-		if len(digits) == 10 && mobileRe.MatchString(digits) {
-			return "+57" + digits
-		}
+	// 2. Fallback: strip ALL non-digits and try as single number
+	//    Handles spaced formatting like "+57 300 123 4567" or "300-123-4567"
+	allDigits := strings.Join(digitRe.FindAllString(phoneString, -1), "")
 
-		// 12 dígitos empezando con 57
-		if len(digits) == 12 && strings.HasPrefix(digits, "57") {
-			mobile := digits[2:]
-			if mobileRe.MatchString(mobile) {
-				return "+57" + mobile
-			}
+	// 10 digits starting with 3
+	if len(allDigits) == 10 && mobileRe.MatchString(allDigits) {
+		return "+57" + allDigits
+	}
+
+	// 12 digits starting with 57
+	if len(allDigits) == 12 && strings.HasPrefix(allDigits, "57") {
+		mobile := allDigits[2:]
+		if mobileRe.MatchString(mobile) {
+			return "+57" + mobile
 		}
 	}
 
