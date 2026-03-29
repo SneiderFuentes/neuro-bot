@@ -187,14 +187,18 @@ func TestRegisterAll_WhatsAppReminders_Schedule(t *testing.T) {
 			if task.Hour != 7 || task.Minute != 0 {
 				t.Errorf("whatsapp_reminders expected 07:00, got %02d:%02d", task.Hour, task.Minute)
 			}
-			if len(task.Weekdays) != 6 {
-				t.Errorf("whatsapp_reminders expected 6 weekdays, got %d", len(task.Weekdays))
+			if len(task.Weekdays) != 7 {
+				t.Errorf("whatsapp_reminders expected 7 weekdays (every day), got %d", len(task.Weekdays))
 			}
-			// Verify Sunday is NOT included
+			// Verify Sunday IS included (Monday appointments need Sunday reminders)
+			hasSunday := false
 			for _, wd := range task.Weekdays {
 				if wd == time.Sunday {
-					t.Error("whatsapp_reminders should not run on Sunday")
+					hasSunday = true
 				}
+			}
+			if !hasSunday {
+				t.Error("whatsapp_reminders must include Sunday for Monday appointment reminders")
 			}
 			return
 		}
@@ -237,8 +241,8 @@ func TestRegisterAll_VoiceReminders_Schedule(t *testing.T) {
 			if task.Hour != 15 || task.Minute != 0 {
 				t.Errorf("voice_reminders expected 15:00, got %02d:%02d", task.Hour, task.Minute)
 			}
-			if len(task.Weekdays) != 6 {
-				t.Errorf("voice_reminders expected 6 weekdays, got %d", len(task.Weekdays))
+			if len(task.Weekdays) != 7 {
+				t.Errorf("voice_reminders expected 7 weekdays (every day), got %d", len(task.Weekdays))
 			}
 			return
 		}

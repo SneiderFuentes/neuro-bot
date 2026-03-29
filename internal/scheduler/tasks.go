@@ -59,11 +59,12 @@ func (t *Tasks) RegisterAll(s *Scheduler) {
 	})
 
 	// 07:00 — WhatsApp reminders for tomorrow's appointments
+	// Sunday included: Monday appointments need reminders sent on Sunday
 	s.AddTask(ScheduledTask{
 		Name: "whatsapp_reminders",
 		Hour: 7, Minute: 0,
 		Weekdays: []time.Weekday{
-			time.Monday, time.Tuesday, time.Wednesday,
+			time.Sunday, time.Monday, time.Tuesday, time.Wednesday,
 			time.Thursday, time.Friday, time.Saturday,
 		},
 		Fn: t.sendWhatsAppReminders,
@@ -86,11 +87,12 @@ func (t *Tasks) RegisterAll(s *Scheduler) {
 	}
 
 	// 15:00 — IVR calls for non-responders
+	// Sunday included: follows up WA reminders sent earlier that day
 	s.AddTask(ScheduledTask{
 		Name: "voice_reminders",
 		Hour: 15, Minute: 0,
 		Weekdays: []time.Weekday{
-			time.Monday, time.Tuesday, time.Wednesday,
+			time.Sunday, time.Monday, time.Tuesday, time.Wednesday,
 			time.Thursday, time.Friday, time.Saturday,
 		},
 		Fn: t.sendVoiceReminders,
