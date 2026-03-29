@@ -114,13 +114,13 @@ func (t *Tasks) sendWhatsAppReminders(ctx context.Context) error {
 		return fmt.Errorf("fetch tomorrow appointments: %w", err)
 	}
 
-	slog.Info("whatsapp reminders", "date", tomorrow, "appointments", len(appointments))
+	// Group by patient
+	patientGroups := groupAppointmentsByPatient(appointments)
+
+	slog.Info("whatsapp reminders", "date", tomorrow, "slots", len(appointments), "patients", len(patientGroups))
 	if len(appointments) == 0 {
 		return nil
 	}
-
-	// Group by patient
-	patientGroups := groupAppointmentsByPatient(appointments)
 
 	sent := 0
 	skipped := 0
@@ -142,11 +142,15 @@ func (t *Tasks) sendWhatsAppReminders(ctx context.Context) error {
 			continue
 		}
 
-		// Build procedure names
+		// Build unique procedure names (multiple slots for same procedure = 1 entry)
+		seen := make(map[string]bool)
 		var procedures []string
 		for _, appt := range group {
 			cupName := services.GetFirstCupName(appt)
-			procedures = append(procedures, cupName)
+			if !seen[cupName] {
+				seen[cupName] = true
+				procedures = append(procedures, cupName)
+			}
 		}
 		proceduresText := strings.Join(procedures, " y ")
 
