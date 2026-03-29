@@ -10,7 +10,7 @@ import (
 )
 
 func NewLocalDB(cfg *config.Config) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&loc=America%%2FBogota&charset=utf8mb4&collation=utf8mb4_unicode_ci",
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&multiStatements=true&loc=America%%2FBogota&charset=utf8mb4&collation=utf8mb4_unicode_ci",
 		cfg.DBUser, cfg.DBPassword, cfg.DBHost, cfg.DBPort, cfg.DBDatabase)
 
 	db, err := sql.Open("mysql", dsn)
