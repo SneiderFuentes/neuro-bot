@@ -499,21 +499,32 @@ func appointmentExistsHandler() sm.StateHandler {
 	}
 }
 
-// CHECK_PRIOR_CONSULTATION (automático) — verifica consulta previa requerida.
+// CHECK_PRIOR_CONSULTATION (automático) — busca el médico de la última consulta previa
+// y lo guarda como preferred_doctor para el agendamiento. No bloquea: si el paciente
+// tiene una orden médica, ya tuvo la consulta con el especialista.
 func checkPriorConsultHandler(apptSvc *services.AppointmentService) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		cupsCode := sess.GetContext("cups_code")
 		patientID := sess.GetContext("patient_id")
 
-		blocked, message, err := apptSvc.CheckPriorConsultation(ctx, cupsCode, patientID)
-		if err != nil {
-			// No bloquear si falla la verificación
+		consultCups := services.GetConsultCupsFor(cupsCode)
+		if consultCups == nil {
 			return sm.NewResult(sm.StateCheckMRCLimit), nil
 		}
 
-		if blocked {
-			return buildAutoCloseResult(message).
-				WithEvent("prior_consultation_required", map[string]interface{}{"cups_code": cupsCode}), nil
+		if patientID == "" {
+			return sm.NewResult(sm.StateCheckMRCLimit), nil
+		}
+
+		doctor, err := apptSvc.FindLastDoctorForCups(ctx, patientID, consultCups)
+		if err != nil {
+			slog.Warn("prior_consult_doctor_lookup_error", "cups_code", cupsCode, "patient_id", patientID, "error", err)
+			return sm.NewResult(sm.StateCheckMRCLimit), nil
+		}
+
+		if doctor != "" {
+			return sm.NewResult(sm.StateCheckMRCLimit).
+				WithContext("preferred_doctor_doc", doctor), nil
 		}
 
 		return sm.NewResult(sm.StateCheckMRCLimit), nil

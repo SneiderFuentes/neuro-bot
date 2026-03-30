@@ -171,11 +171,12 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 				procedureType = "sedacion"
 			}
 
-			// Bloqueo (053105): set preferred doctor to last doctor who attended this patient
+			// Bloqueo (053105): set preferred doctor from last neurology consultation
+			// (890374/890274) if not already set by checkPriorConsultHandler.
 			if code == "053105" && apptSvc != nil && sess.GetContext("preferred_doctor_doc") == "" {
 				patientID := sess.GetContext("patient_id")
 				if patientID != "" {
-					lastDoc, err := apptSvc.FindLastDoctorForCups(ctx, patientID, []string{code})
+					lastDoc, err := apptSvc.FindLastDoctorForCups(ctx, patientID, []string{"890374", "890274"})
 					if err != nil {
 						slog.Warn("bloqueo_last_doctor_lookup_error", "patient_id", patientID, "error", err)
 					} else if lastDoc != "" {
@@ -220,6 +221,51 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 				successfulCupsCode = code
 				slog.Debug("found_slots_with_alternative_code", "original", cupsCode, "used", code, "slots_found", len(slots))
 				break
+			}
+		}
+
+		// Fallback: if preferred_doctor was set but no slots found, retry without doctor restriction
+		if len(slots) == 0 && sess.GetContext("preferred_doctor_doc") != "" {
+			slog.Debug("slots_preferred_doctor_fallback", "cups_code", cupsCode, "preferred_doctor", sess.GetContext("preferred_doctor_doc"))
+			for _, code := range cupsCodesToTry {
+				var address, procedureType string
+				if procRepo != nil {
+					proc, _ := procRepo.FindByCode(ctx, code)
+					if proc != nil {
+						address = proc.Address
+						procedureType = proc.Type
+					}
+				}
+				if isSedated {
+					procedureType = "sedacion"
+				}
+				query := services.SlotQuery{
+					CupsCode:      code,
+					PatientAge:    age,
+					IsContrasted:  isContrasted,
+					IsSedated:     isSedated,
+					Espacios:      espacios,
+					AfterDate:     sess.GetContext("slots_after_date"),
+					MaxSlots:      5,
+					ClinicAddress: address,
+					ProcedureType: procedureType,
+				}
+				if sess.GetContext("mrc_limit_check") == "1" && apptSvc != nil {
+					entity := sess.GetContext("patient_entity")
+					query.MonthFilter = func(year, month int) (bool, error) {
+						blocked, err := apptSvc.CheckMRCLimitForMonth(ctx, code, entity, year, month)
+						if err != nil {
+							return true, nil
+						}
+						return !blocked, nil
+					}
+				}
+				slots, err = slotSvc.GetAvailableSlots(ctx, query)
+				if err == nil && len(slots) > 0 {
+					successfulCupsCode = code
+					slog.Debug("slots_found_without_preferred_doctor", "cups_code", code, "slots_found", len(slots))
+					break
+				}
 			}
 		}
 

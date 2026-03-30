@@ -211,6 +211,16 @@ var doctorAgeRestrictions = map[string]struct {
 	"7178922":  {MinAge: 18, Reason: "Este doctor solo atiende pacientes mayores de 18 años"},
 }
 
+// GetConsultCupsFor returns the prior-consultation CUPS codes required before the given procedure.
+// Returns nil if no prior consultation is required.
+func GetConsultCupsFor(cupsCode string) []string {
+	codes, ok := cupsRequiresPreviousDoctor[cupsCode]
+	if !ok {
+		return nil
+	}
+	return codes
+}
+
 // CheckPriorConsultation verifica si el CUPS requiere consulta previa con el mismo doctor.
 // Retorna (blocked, message, error).
 func (s *AppointmentService) CheckPriorConsultation(ctx context.Context, cupsCode, patientID string) (bool, string, error) {
