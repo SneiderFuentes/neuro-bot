@@ -221,25 +221,25 @@ func GetConsultCupsFor(cupsCode string) []string {
 	return codes
 }
 
-// CheckPriorConsultation verifica si el CUPS requiere consulta previa con el mismo doctor.
-// Retorna (blocked, message, error).
-func (s *AppointmentService) CheckPriorConsultation(ctx context.Context, cupsCode, patientID string) (bool, string, error) {
-	requiredCups, exists := cupsRequiresPreviousDoctor[cupsCode]
-	if !exists {
-		return false, "", nil
+// CheckPriorConsultation verifica si el CUPS requiere consulta previa y busca el médico
+// de la última consulta pasada del paciente.
+// Retorna (blocked, doctorDoc, message, error).
+func (s *AppointmentService) CheckPriorConsultation(ctx context.Context, cupsCode, patientID string) (bool, string, string, error) {
+	consultCups := GetConsultCupsFor(cupsCode)
+	if consultCups == nil {
+		return false, "", "", nil
 	}
 
-	for _, reqCup := range requiredCups {
-		hasCup, err := s.repo.HasFutureForCup(ctx, patientID, reqCup)
-		if err != nil {
-			return false, "", err
-		}
-		if hasCup {
-			return false, "", nil // Tiene consulta previa → OK
-		}
+	doctor, err := s.repo.FindLastDoctorForCups(ctx, patientID, consultCups)
+	if err != nil {
+		return false, "", "", err
 	}
 
-	return true, "Este procedimiento requiere una *consulta previa* con el especialista. Por favor agenda primero la consulta y luego el examen.", nil
+	if doctor == "" {
+		return true, "", "Este procedimiento requiere una *consulta previa* con el especialista. Por favor agenda primero la consulta y luego el examen.", nil
+	}
+
+	return false, doctor, "", nil
 }
 
 // CheckMRCLimit verifica si el grupo CUPS ha alcanzado el límite mensual (mes actual).

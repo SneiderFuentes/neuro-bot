@@ -803,14 +803,65 @@ func TestCheckPriorConsult_NotBlocked(t *testing.T) {
 
 	sess := testSess(sm.StateCheckPriorConsult)
 	sess.Context["patient_id"] = "PAT001"
-	sess.Context["cups_code"] = "890271" // Not in cupsRequiresPreviousDoctor → not blocked
+	sess.Context["cups_code"] = "890271" // Not in cupsRequiresPreviousDoctor → pass through
 
 	result, err := m.Process(context.Background(), sess, textM(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.NextState != sm.StateCheckMRCLimit {
-		t.Errorf("expected CHECK_SOAT_LIMIT, got %s", result.NextState)
+		t.Errorf("expected CHECK_MRC_LIMIT, got %s", result.NextState)
+	}
+}
+
+func TestCheckPriorConsult_SetsPreferredDoctor(t *testing.T) {
+	repo := &mockApptRepo{
+		findLastDoctorForCupsFn: func(ctx context.Context, pid string, cups []string) (string, error) {
+			return "87654321", nil // Found last neurologist
+		},
+	}
+	apptSvc := services.NewAppointmentService(repo, nil)
+
+	m := sm.NewMachine()
+	m.Register(sm.StateCheckPriorConsult, checkPriorConsultHandler(apptSvc))
+
+	sess := testSess(sm.StateCheckPriorConsult)
+	sess.Context["patient_id"] = "PAT001"
+	sess.Context["cups_code"] = "053105" // Requires prior neurology consultation
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateCheckMRCLimit {
+		t.Errorf("expected CHECK_MRC_LIMIT, got %s", result.NextState)
+	}
+	if result.UpdateCtx == nil || result.UpdateCtx["preferred_doctor_doc"] != "87654321" {
+		t.Error("expected preferred_doctor_doc=87654321 in UpdateCtx")
+	}
+}
+
+func TestCheckPriorConsult_NoPriorDoctor_StillContinues(t *testing.T) {
+	repo := &mockApptRepo{
+		findLastDoctorForCupsFn: func(ctx context.Context, pid string, cups []string) (string, error) {
+			return "", nil // No prior consultation found — but NOT blocked
+		},
+	}
+	apptSvc := services.NewAppointmentService(repo, nil)
+
+	m := sm.NewMachine()
+	m.Register(sm.StateCheckPriorConsult, checkPriorConsultHandler(apptSvc))
+
+	sess := testSess(sm.StateCheckPriorConsult)
+	sess.Context["patient_id"] = "PAT001"
+	sess.Context["cups_code"] = "053105"
+
+	result, err := m.Process(context.Background(), sess, textM(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateCheckMRCLimit {
+		t.Errorf("expected CHECK_MRC_LIMIT, got %s", result.NextState)
 	}
 }
 

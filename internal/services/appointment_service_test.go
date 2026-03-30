@@ -359,12 +359,15 @@ func TestGetDoctorAgeRestriction(t *testing.T) {
 
 func TestCheckPriorConsultation_NotRequired(t *testing.T) {
 	svc := NewAppointmentService(&mockAppointmentRepo{}, nil)
-	blocked, msg, err := svc.CheckPriorConsultation(context.Background(), "890271", "PAT001")
+	blocked, doctor, msg, err := svc.CheckPriorConsultation(context.Background(), "890271", "PAT001")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if blocked {
 		t.Error("890271 should not require prior consultation")
+	}
+	if doctor != "" {
+		t.Errorf("expected no doctor, got %q", doctor)
 	}
 	if msg != "" {
 		t.Errorf("expected empty message, got %q", msg)
@@ -373,33 +376,36 @@ func TestCheckPriorConsultation_NotRequired(t *testing.T) {
 
 func TestCheckPriorConsultation_HasConsultation(t *testing.T) {
 	repo := &mockAppointmentRepo{
-		hasFutureForCupFn: func(ctx context.Context, pid, cup string) (bool, error) {
-			return true, nil // Patient has required prior consultation
+		findLastDoctorForCupsFn: func(ctx context.Context, pid string, cups []string) (string, error) {
+			return "12345678", nil // Found prior neurologist
 		},
 	}
 	svc := NewAppointmentService(repo, nil)
-	blocked, _, err := svc.CheckPriorConsultation(context.Background(), "053105", "PAT001")
+	blocked, doctor, _, err := svc.CheckPriorConsultation(context.Background(), "053105", "PAT001")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if blocked {
 		t.Error("should not be blocked when prior consultation exists")
 	}
+	if doctor != "12345678" {
+		t.Errorf("expected doctor 12345678, got %q", doctor)
+	}
 }
 
 func TestCheckPriorConsultation_Blocked(t *testing.T) {
 	repo := &mockAppointmentRepo{
-		hasFutureForCupFn: func(ctx context.Context, pid, cup string) (bool, error) {
-			return false, nil // No prior consultation
+		findLastDoctorForCupsFn: func(ctx context.Context, pid string, cups []string) (string, error) {
+			return "", nil // No prior consultation found
 		},
 	}
 	svc := NewAppointmentService(repo, nil)
-	blocked, msg, err := svc.CheckPriorConsultation(context.Background(), "053105", "PAT001")
+	blocked, _, msg, err := svc.CheckPriorConsultation(context.Background(), "053105", "PAT001")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !blocked {
-		t.Error("should be blocked when no prior consultation")
+		t.Error("should be blocked when no prior consultation found")
 	}
 	if msg == "" {
 		t.Error("expected blocking message")
