@@ -121,6 +121,13 @@ func (m *Machine) Process(ctx context.Context, sess *session.Session, msg bird.I
 		for k, v := range prevCtx {
 			sess.SetContext(k, v)
 		}
+		// Aplicar borrado pendiente en memoria (evita que contexto del grupo anterior
+		// se filtre al siguiente grupo durante el auto-chain)
+		for _, k := range prevClear {
+			if k != "__all__" {
+				delete(sess.Context, k)
+			}
+		}
 
 		autoResult, err := autoHandler(ctx, sess, msg)
 		if err != nil {

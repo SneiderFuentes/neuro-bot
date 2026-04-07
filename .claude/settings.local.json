@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker exec:*)",
+      "Bash(docker compose:*)",
+      "WebFetch(domain:docs.bird.com)",
+      "WebSearch",
+      "Bash(go build:*)"
+    ]
+  }
+}
