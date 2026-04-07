@@ -318,10 +318,26 @@ func searchSlotsHandler(slotSvc *services.SlotService, apptSvc *services.Appoint
 		}
 		msgText.WriteString("\n💬 Escribe el número de tu opción:")
 
-		return sm.NewResult(sm.StateShowSlots).
+		result := sm.NewResult(sm.StateShowSlots).
 			WithContext("available_slots_json", string(slotsJSON)).
 			WithText(msgText.String()).
-			WithEvent("slots_found", map[string]interface{}{"count": len(slots)}), nil
+			WithEvent("slots_found", map[string]interface{}{"count": len(slots)})
+
+		// Persist procedure metadata so it's available in later turns (confirm/success)
+		if prep := sess.GetContext("cups_preparation"); prep != "" {
+			result.WithContext("cups_preparation", prep)
+		}
+		if videoURL := sess.GetContext("cups_video_url"); videoURL != "" {
+			result.WithContext("cups_video_url", videoURL)
+		}
+		if audioURL := sess.GetContext("cups_audio_url"); audioURL != "" {
+			result.WithContext("cups_audio_url", audioURL)
+		}
+		if procType := sess.GetContext("procedure_type"); procType != "" {
+			result.WithContext("procedure_type", procType)
+		}
+
+		return result, nil
 	}
 }
 
