@@ -260,7 +260,14 @@ func GroupByServiceFromDB(ctx context.Context, cups []CUPSEntry, procRepo reposi
 		totalEspacios := 0
 		for i, ec := range ecs {
 			cupEntries[i] = ec.CUPSEntry
-			totalEspacios += ec.RequiredSpaces * ec.Quantity
+			// Only EMG codes multiply spaces by quantity (EMG count drives slot calculation).
+			// All other codes (NC, dependents, Potenciales Evocados, etc.) always use
+			// RequiredSpaces as-is — quantity is clinical repetitions, not extra slots.
+			if emgCodes[ec.Code] {
+				totalEspacios += ec.RequiredSpaces * ec.Quantity
+			} else {
+				totalEspacios += ec.RequiredSpaces
+			}
 		}
 		if totalEspacios < 1 {
 			totalEspacios = 1
