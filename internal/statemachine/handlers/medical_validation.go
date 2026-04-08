@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
 	"github.com/neuro-bot/neuro-bot/internal/services"
@@ -542,6 +543,26 @@ func checkMRCLimitHandler(apptSvc *services.AppointmentService) sm.StateHandler 
 
 		if entity == "SAN02" {
 			if _, _, found := services.IsMRCGroupCups(cupsCode); found {
+				// Check if current month is already at or over the limit
+				if apptSvc != nil {
+					now := time.Now()
+					blocked, msg, err := apptSvc.CheckMRCLimit(ctx, cupsCode, entity)
+					if err != nil {
+						slog.Warn("mrc_limit_check_error", "cups_code", cupsCode, "entity", entity, "error", err)
+					} else if blocked {
+						slog.Info("mrc_limit_blocked_current_month",
+							"cups_code", cupsCode, "entity", entity,
+							"year", now.Year(), "month", now.Month())
+						return sm.NewResult(sm.StateNoSlotsAvailable).
+							WithEvent("mrc_limit_reached", map[string]interface{}{
+								"cups_code": cupsCode,
+								"entity":    entity,
+								"month":     now.Month(),
+								"year":      now.Year(),
+								"message":   msg,
+							}), nil
+					}
+				}
 				return sm.NewResult(sm.StateCheckAgeRestriction).
 					WithContext("mrc_limit_check", "1"), nil
 			}
