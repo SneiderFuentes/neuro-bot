@@ -424,7 +424,7 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 			// tenga cupo disponible antes de notificar
 			if t.AppointmentSvc != nil && entry.PatientEntity == "SAN02" {
 				if _, _, found := services.IsMRCGroupCups(cupsCode); found {
-					blocked, err := t.AppointmentSvc.CheckMRCLimit(ctx, cupsCode, entry.PatientEntity)
+					blocked, _, err := t.AppointmentSvc.CheckMRCLimit(ctx, cupsCode, entry.PatientEntity)
 					if err != nil {
 						slog.Warn("wl_check: mrc limit error", "cups_code", cupsCode, "entry_id", entry.ID, "error", err)
 					} else if blocked {
