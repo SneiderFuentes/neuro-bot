@@ -70,21 +70,17 @@ func (t *Tasks) RegisterAll(s *Scheduler) {
 		Fn: t.sendWhatsAppReminders,
 	})
 
-	// 08:00 y 14:00 — Waiting list check (mañana y tarde)
-	wlWeekdays := []time.Weekday{
-		time.Monday, time.Tuesday, time.Wednesday,
-		time.Thursday, time.Friday,
-	}
-	for _, hour := range []int{8, 14} {
-		h := hour
-		s.AddTask(ScheduledTask{
-			Name:     fmt.Sprintf("waiting_list_check_%02d", h),
-			Hour:     h,
-			Minute:   0,
-			Weekdays: wlWeekdays,
-			Fn:       t.checkWaitingList,
-		})
-	}
+	// 06:00 — Waiting list check
+	s.AddTask(ScheduledTask{
+		Name:   "waiting_list_check_06",
+		Hour:   6,
+		Minute: 0,
+		Weekdays: []time.Weekday{
+			time.Monday, time.Tuesday, time.Wednesday,
+			time.Thursday, time.Friday,
+		},
+		Fn: t.checkWaitingList,
+	})
 
 	// 15:00 — IVR calls for non-responders
 	// Sunday included: follows up WA reminders sent earlier that day
@@ -422,6 +418,20 @@ func (t *Tasks) checkWaitingList(ctx context.Context) error {
 				t.WaitingListRepo.UpdateStatus(ctx, entry.ID, "duplicate_found")
 				slog.Info("waiting list: duplicate found", "entry_id", entry.ID, "cups_code", cupsCode)
 				continue
+			}
+
+			// 5b. Para pacientes SAN02 con CUPS de grupo MRC, verificar que el mes actual
+			// tenga cupo disponible antes de notificar
+			if t.AppointmentSvc != nil && entry.PatientEntity == "SAN02" {
+				if _, _, found := services.IsMRCGroupCups(cupsCode); found {
+					blocked, err := t.AppointmentSvc.CheckMRCLimit(ctx, cupsCode, entry.PatientEntity)
+					if err != nil {
+						slog.Warn("wl_check: mrc limit error", "cups_code", cupsCode, "entry_id", entry.ID, "error", err)
+					} else if blocked {
+						slog.Info("wl_check: mrc limit reached for patient, skipping", "cups_code", cupsCode, "entry_id", entry.ID)
+						continue
+					}
+				}
 			}
 
 			// 6. Enviar template de disponibilidad
