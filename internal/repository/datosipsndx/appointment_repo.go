@@ -151,7 +151,7 @@ func (r *AppointmentRepo) FindUpcomingByPatient(ctx context.Context, patientID s
 func (r *AppointmentRepo) fetchProcedures(ctx context.Context, appointmentID string) ([]domain.AppointmentProcedure, error) {
 	query := `SELECT px.RegistroNo, COALESCE(px.CUPS, '') AS CUPS,
 	            COALESCE(cp.nombre, px.CUPS, '') AS CupName,
-	            COALESCE(px.Cantidad, 0), COALESCE(px.VrUnitario, 0), COALESCE(px.IdServicio, 0)
+	            COALESCE(px.Cantidad, 0), COALESCE(px.VrUnitario, 0), COALESCE(CAST(TRIM(px.IdServicio) AS SIGNED), 0)
 	          FROM pxcita px
 	          LEFT JOIN cups_procedimientos cp ON cp.codigo_cups = px.CUPS
 	          WHERE px.IdCita = ?`
@@ -188,7 +188,7 @@ func (r *AppointmentRepo) fetchProceduresBatch(ctx context.Context, appointmentI
 
 	query := fmt.Sprintf(`SELECT px.RegistroNo, px.IdCita, COALESCE(px.CUPS, '') AS CUPS,
 	            COALESCE(cp.nombre, px.CUPS, '') AS CupName,
-	            COALESCE(px.Cantidad, 0), COALESCE(px.VrUnitario, 0), COALESCE(px.IdServicio, 0)
+	            COALESCE(px.Cantidad, 0), COALESCE(px.VrUnitario, 0), COALESCE(CAST(TRIM(px.IdServicio) AS SIGNED), 0)
 	          FROM pxcita px
 	          LEFT JOIN cups_procedimientos cp ON cp.codigo_cups = px.CUPS
 	          WHERE px.IdCita IN (%s)`, strings.Join(placeholders, ","))
