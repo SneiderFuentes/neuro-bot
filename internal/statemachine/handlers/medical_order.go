@@ -5,18 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/neuro-bot/neuro-bot/internal/bird"
+	"github.com/neuro-bot/neuro-bot/internal/domain"
 	"github.com/neuro-bot/neuro-bot/internal/repository"
 	"github.com/neuro-bot/neuro-bot/internal/services"
 	"github.com/neuro-bot/neuro-bot/internal/session"
 	sm "github.com/neuro-bot/neuro-bot/internal/statemachine"
+	"github.com/neuro-bot/neuro-bot/internal/utils"
 )
 
 // RegisterMedicalOrderHandlers registra los handlers de Orden Médica y OCR (Fase 8)
-func RegisterMedicalOrderHandlers(m *sm.Machine, ocrSvc *services.OCRService, procedureRepo repository.ProcedureRepository, birdClient *bird.Client) {
-	m.Register(sm.StateAskMedicalOrder, askMedicalOrderHandler())
+func RegisterMedicalOrderHandlers(m *sm.Machine, ocrSvc *services.OCRService, procedureRepo repository.ProcedureRepository, birdClient *bird.Client, wlRepo WaitingListCreator) {
+	m.Register(sm.StateAskMedicalOrder, askMedicalOrderHandler(wlRepo))
 	m.Register(sm.StateUploadMedicalOrder, uploadMedicalOrderHandler(ocrSvc, birdClient))
 	m.Register(sm.StateValidateOCR, validateOCRHandler(procedureRepo))
 	m.Register(sm.StateConfirmOCRResult, confirmOCRResultHandler(procedureRepo, birdClient))
@@ -38,8 +44,76 @@ func ocrRetryButtons(birdClient *bird.Client) []sm.Button {
 }
 
 // ASK_MEDICAL_ORDER (automático) — pide foto de la orden y transiciona a UPLOAD.
-func askMedicalOrderHandler() sm.StateHandler {
+// Para pacientes PARTICULAR: primero pregunta si tienen orden médica.
+// Si sí → sube foto y flujo normal. Si no → escala a agente y registra en lista de espera.
+func askMedicalOrderHandler(wlRepo WaitingListCreator) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		// Pacientes PARTICULAR: preguntar si tienen orden antes de pedir foto
+		if sess.GetContext("entity_category") == "PARTICULAR" {
+			// Primera entrada (auto-chain): mostrar botones y detener la cadena
+			if sess.GetContext("_prompted_has_order") == "" {
+				return sm.NewResult(sess.CurrentState).
+					WithContext("_prompted_has_order", "1").
+					WithButtons("¿Cuentas con una *orden médica* para este procedimiento?",
+						sm.Button{Text: "Sí, tengo orden", Payload: "has_order_yes"},
+						sm.Button{Text: "No tengo orden", Payload: "has_order_no"},
+					), nil
+			}
+
+			result, selected := sm.ValidateButtonResponse(sess, msg, "has_order_yes", "has_order_no")
+			if result != nil {
+				result.Messages = []sm.OutboundMessage{&sm.ButtonMessage{
+					Text: "¿Cuentas con una *orden médica* para este procedimiento?",
+					Buttons: []sm.Button{
+						{Text: "Sí, tengo orden", Payload: "has_order_yes"},
+						{Text: "No tengo orden", Payload: "has_order_no"},
+					},
+				}}
+				return result, nil
+			}
+
+			switch selected {
+			case "has_order_yes":
+				return sm.NewResult(sm.StateUploadMedicalOrder).
+					WithClearCtx("_prompted_has_order").
+					WithText("Envía una *foto clara* o *PDF* de tu orden médica.\n\nAsegúrate de que:\n- Se vean bien los procedimientos\n- La foto no esté borrosa\n- Se lea el texto").
+					WithEvent("order_method_selected", map[string]interface{}{"method": "photo"}).
+					WithEvent("order_photo_requested", nil), nil
+
+			case "has_order_no":
+				// Registrar en lista de espera (sin cups, pendiente de agente)
+				if wlRepo != nil {
+					age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+					entry := &domain.WaitingListEntry{
+						ID:            uuid.New().String(),
+						PhoneNumber:   sess.PhoneNumber,
+						PatientID:     sess.GetContext("patient_id"),
+						PatientDoc:    sess.GetContext("patient_doc"),
+						PatientName:   sess.GetContext("patient_name"),
+						PatientAge:    age,
+						PatientGender: sess.GetContext("patient_gender"),
+						PatientEntity: sess.GetContext("patient_entity"),
+						CupsCode:      "PARTICULAR",
+						CupsName:      "Consulta PARTICULAR - Sin orden médica",
+						Status:        "pending_agent",
+						CreatedAt:     time.Now(),
+						ExpiresAt:     time.Now().AddDate(0, 0, 30),
+					}
+					if err := wlRepo.Create(ctx, entry); err != nil {
+						// No bloquear el flujo si falla el registro
+						slog.Warn("particular_no_order: failed to create wl entry",
+							"phone", utils.MaskPhone(sess.PhoneNumber), "error", err)
+					}
+				}
+
+				return sm.NewResult(sm.StateEscalateToAgent).
+					WithClearCtx("_prompted_has_order").
+					WithText("Entendido. En un momento uno de nuestros asesores se comunicará contigo para brindarte la atención que necesitas.").
+					WithEvent("particular_no_order_escalated", nil), nil
+			}
+		}
+
+		// Resto de entidades: proceder directamente a subir foto
 		return sm.NewResult(sm.StateUploadMedicalOrder).
 			WithText("Envía una *foto clara* o *PDF* de tu orden médica.\n\nAsegúrate de que:\n- Se vean bien los procedimientos\n- La foto no esté borrosa\n- Se lea el texto").
 			WithEvent("order_method_selected", map[string]interface{}{"method": "photo"}).
