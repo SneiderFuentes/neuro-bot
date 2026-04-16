@@ -84,20 +84,26 @@ func askMedicalOrderHandler(wlRepo WaitingListCreator) sm.StateHandler {
 				// Registrar en lista de espera (sin cups, pendiente de agente)
 				if wlRepo != nil {
 					age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+					gender := sess.GetContext("patient_gender")
+					if gender == "" {
+						gender = "M" // default requerido por NOT NULL
+					}
 					entry := &domain.WaitingListEntry{
-						ID:            uuid.New().String(),
-						PhoneNumber:   sess.PhoneNumber,
-						PatientID:     sess.GetContext("patient_id"),
-						PatientDoc:    sess.GetContext("patient_doc"),
-						PatientName:   sess.GetContext("patient_name"),
-						PatientAge:    age,
-						PatientGender: sess.GetContext("patient_gender"),
-						PatientEntity: sess.GetContext("patient_entity"),
-						CupsCode:      "PARTICULAR",
-						CupsName:      "Consulta PARTICULAR - Sin orden médica",
-						Status:        "pending_agent",
-						CreatedAt:     time.Now(),
-						ExpiresAt:     time.Now().AddDate(0, 0, 30),
+						ID:             uuid.New().String(),
+						PhoneNumber:    sess.PhoneNumber,
+						PatientID:      sess.GetContext("patient_id"),
+						PatientDoc:     sess.GetContext("patient_doc"),
+						PatientName:    sess.GetContext("patient_name"),
+						PatientAge:     age,
+						PatientGender:  gender,
+						PatientEntity:  sess.GetContext("patient_entity"),
+						CupsCode:       "PARTICULAR",
+						CupsName:       "Consulta PARTICULAR - Sin orden médica",
+						ProceduresJSON: "[]",
+						Espacios:       1,
+						Status:         "pending_agent",
+						CreatedAt:      time.Now(),
+						ExpiresAt:      time.Now().AddDate(0, 0, 30),
 					}
 					if err := wlRepo.Create(ctx, entry); err != nil {
 						// No bloquear el flujo si falla el registro
