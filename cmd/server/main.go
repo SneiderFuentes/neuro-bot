@@ -390,6 +390,7 @@ func main() {
 		internalMux.HandleFunc("GET /api/internal/kpis/health", internalHandler.HandleHealthKPIs)
 		internalMux.HandleFunc("POST /api/internal/test-alert", internalHandler.HandleTestAlert)
 		internalMux.HandleFunc("POST /api/internal/send-reminders", internalHandler.HandleSendReminders)
+		internalMux.HandleFunc("POST /api/internal/send-agenda-confirmations", internalHandler.HandleSendAgendaConfirmations)
 		internalMux.HandleFunc("POST /api/internal/test-voice-call", internalHandler.HandleTestVoiceCall)
 		internalMux.HandleFunc("GET /api/internal/logs", internalHandler.HandleLogs)
 		internalMux.HandleFunc("GET /api/internal/events", internalHandler.HandleEvents)

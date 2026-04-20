@@ -206,6 +206,131 @@ func (h *InternalHandler) HandleTestVoiceCall(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// --- Send Agenda Confirmations ---
+
+// HandleSendAgendaConfirmations sends WhatsApp confirmation templates to all non-cancelled
+// patients for a specific agenda ID and date.
+// POST /api/internal/send-agenda-confirmations
+// Body: { "agenda_id": 12, "date": "2026-04-25" }
+func (h *InternalHandler) HandleSendAgendaConfirmations(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AgendaID int    `json:"agenda_id"`
+		Date     string `json:"date"` // YYYY-MM-DD
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.AgendaID == 0 || req.Date == "" {
+		http.Error(w, "agenda_id and date are required", http.StatusBadRequest)
+		return
+	}
+	if _, err := time.Parse("2006-01-02", req.Date); err != nil {
+		http.Error(w, "date must be YYYY-MM-DD format", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	appointments, err := h.appointmentRepo.FindByAgendaAndDate(ctx, req.AgendaID, req.Date)
+	if err != nil {
+		slog.Error("send agenda confirmations: find appointments", "agenda_id", req.AgendaID, "date", req.Date, "error", err)
+		http.Error(w, "error finding appointments", http.StatusInternalServerError)
+		return
+	}
+
+	total := len(appointments)
+	slog.Info("send agenda confirmations: dispatching", "agenda_id", req.AgendaID, "date", req.Date, "appointments", total)
+
+	// Respond immediately, send in background
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "ok",
+		"agenda_id":  req.AgendaID,
+		"date":       req.Date,
+		"total_appt": total,
+		"message":    "confirmations dispatched in background",
+	})
+
+	go func() {
+		defer recoverLog("send-agenda-confirmations")
+
+		patients := groupAppointmentsByPatientID(appointments)
+		sent, skipped := 0, 0
+
+		for _, group := range patients {
+			firstAppt := group[0]
+			phone := utils.ParseColombianPhone(firstAppt.PatientPhone)
+			if phone == "" {
+				skipped++
+				slog.Warn("agenda confirmation: invalid phone", "patient_id", firstAppt.PatientID)
+				continue
+			}
+
+			seen := make(map[string]bool)
+			var procedureNames []string
+			for _, appt := range group {
+				name := services.GetFirstCupName(appt)
+				if !seen[name] {
+					seen[name] = true
+					procedureNames = append(procedureNames, name)
+				}
+			}
+			proceduresText := strings.Join(procedureNames, " y ")
+
+			tmpl := bird.TemplateConfig{
+				ProjectID: h.cfg.BirdTemplateConfirmProjectID,
+				VersionID: h.cfg.BirdTemplateConfirmVersionID,
+				Locale:    h.cfg.BirdTemplateConfirmLocale,
+				Params: []bird.TemplateParam{
+					{Type: "string", Key: "patient_name", Value: firstAppt.PatientName},
+					{Type: "string", Key: "clinic_name", Value: h.cfg.CenterName},
+					{Type: "string", Key: "appointment_date", Value: utils.FormatFriendlyDateStr(req.Date)},
+					{Type: "string", Key: "appointment_time", Value: services.FormatTimeSlot(firstAppt.TimeSlot)},
+					{Type: "string", Key: "procedures", Value: proceduresText},
+				},
+			}
+
+			msgID, err := h.birdClient.SendTemplate(phone, tmpl)
+			if err != nil {
+				slog.Error("agenda confirmation: send failed", "phone", utils.MaskPhone(phone), "error", err)
+				skipped++
+				continue
+			}
+
+			convID := h.birdClient.GetCachedConversationID(phone)
+			if convID == "" {
+				convID, _ = h.birdClient.LookupConversationByPhone(phone)
+			}
+
+			h.notifyManager.RegisterPending(notifications.PendingNotification{
+				Type:           "confirmation",
+				Phone:          phone,
+				AppointmentID:  firstAppt.ID,
+				BirdMessageID:  msgID,
+				ConversationID: convID,
+			})
+
+			if h.tracker != nil {
+				h.tracker.LogEvent(context.Background(), "", phone, "notification_sent", map[string]interface{}{
+					"type":            "confirmation",
+					"appointment_id":  firstAppt.ID,
+					"bird_msg_id":     msgID,
+					"conversation_id": convID,
+					"agenda_id":       req.AgendaID,
+				})
+			}
+
+			sent++
+			time.Sleep(2 * time.Second)
+		}
+
+		slog.Info("agenda confirmations complete",
+			"agenda_id", req.AgendaID, "date", req.Date,
+			"sent", sent, "skipped", skipped)
+	}()
+}
+
 // --- Cancel Agenda ---
 
 // CancelAgendaRequest is the request body for cancelling an agenda.
