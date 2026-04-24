@@ -42,15 +42,14 @@ func (e Entity) DisplayName() string {
 	return e.Name
 }
 
-// EntityCategories maps index (1-7) to category name matching CategoriaEntidad ENUM.
+// EntityCategories maps index (1-6) to category name matching CategoriaEntidad ENUM.
 var EntityCategories = map[int]string{
 	1: "PARTICULAR",
 	2: "EPS",
 	3: "EMPRESA DE MEDICINA PREPAGADA",
 	4: "REGIMEN ESPECIAL",
-	5: "SOAT",
-	6: "ARL",
-	7: "POLIZA",
+	5: "ARL",
+	6: "POLIZA",
 }
 
 // EntityCategoryLabels are the user-facing short labels for the WhatsApp list.
@@ -59,9 +58,8 @@ var EntityCategoryLabels = map[int]string{
 	2: "EPS",
 	3: "PREPAGADA",
 	4: "REGIMEN ESPECIAL",
-	5: "SOAT",
-	6: "ARL",
-	7: "POLIZA",
+	5: "ARL",
+	6: "POLIZA",
 }
 
 type Municipality struct {

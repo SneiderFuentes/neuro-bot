@@ -31,12 +31,12 @@ func RegisterEntityManagementHandlers(
 	m.Register(sm.StateChangeEntity, changeEntityHandler(entityRepo, patientRepo))
 }
 
-// ASK_CLIENT_TYPE (interactivo) — selecciona tipo de entidad (7 categorías).
-// Bird V2: list with PARTICULAR, EPS, PREPAGADA, REGIMEN ESPECIAL, SOAT, ARL, POLIZA
+// ASK_CLIENT_TYPE (interactivo) — selecciona tipo de entidad (6 categorías).
+// Bird V2: list with PARTICULAR, EPS, PREPAGADA, REGIMEN ESPECIAL, ARL, POLIZA
 func askClientTypeHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		validPayloads := make([]string, 7)
-		for i := 1; i <= 7; i++ {
+		validPayloads := make([]string, 6)
+		for i := 1; i <= 6; i++ {
 			validPayloads[i-1] = fmt.Sprintf("ct_%d", i)
 		}
 
@@ -69,10 +69,10 @@ func askClientTypeHandler() sm.StateHandler {
 	}
 }
 
-// buildEntityTypeList creates the 7-option list for entity type selection.
+// buildEntityTypeList creates the 6-option list for entity type selection.
 func buildEntityTypeList() *sm.ListMessage {
-	rows := make([]sm.ListRow, 7)
-	for i := 1; i <= 7; i++ {
+	rows := make([]sm.ListRow, 6)
+	for i := 1; i <= 6; i++ {
 		rows[i-1] = sm.ListRow{
 			ID:          fmt.Sprintf("ct_%d", i),
 			Title:       domain.EntityCategoryLabels[i],

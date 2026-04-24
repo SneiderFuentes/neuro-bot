@@ -232,7 +232,7 @@ var regFieldLabels = map[string]string{
 	sm.StateRegEmail:           "correo electronico (o NA)",
 	sm.StateRegOccupation:      "ocupacion",
 	sm.StateRegMunicipality:    "municipio de residencia",
-	sm.StateRegClientType:      "tipo de cliente (PARTICULAR, EPS, SOAT)",
+	sm.StateRegClientType:      "tipo de cliente (PARTICULAR, EPS, ARL, POLIZA, PREPAGADA, REGIMEN ESPECIAL)",
 	sm.StateRegUserType:        "tipo de usuario (CONTRIBUTIVO, SUBSIDIADO, PARTICULAR)",
 	sm.StateRegAffiliationType: "tipo de afiliacion (COTIZANTE, BENEFICIARIO, OTRO)",
 	sm.StateRegEntity:          "nombre de la entidad/EPS",
@@ -332,9 +332,8 @@ func buildAgentCommands(sess *session.Session, cupsCode string) string {
 			"  /bot resume ASK_CLIENT_TYPE ct_2 — EPS\n" +
 			"  /bot resume ASK_CLIENT_TYPE ct_3 — PREPAGADA\n" +
 			"  /bot resume ASK_CLIENT_TYPE ct_4 — REGIMEN ESPECIAL\n" +
-			"  /bot resume ASK_CLIENT_TYPE ct_5 — SOAT\n" +
-			"  /bot resume ASK_CLIENT_TYPE ct_6 — ARL\n" +
-			"  /bot resume ASK_CLIENT_TYPE ct_7 — POLIZA\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_5 — ARL\n" +
+			"  /bot resume ASK_CLIENT_TYPE ct_6 — POLIZA\n" +
 			"  /bot resume ASK_CLIENT_TYPE — Mostrar opciones al paciente de nuevo"
 
 	case sm.StateAskEntityNumber:
