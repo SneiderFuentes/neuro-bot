@@ -550,7 +550,7 @@ func (r *AppointmentRepo) RescheduleDate(ctx context.Context, agendaID int, doct
 	newDateFormatted := strings.ReplaceAll(newDate, "-", "")
 
 	result, err := r.db.ExecContext(ctx,
-		`UPDATE citas SET FeCita = ?, FechaCita = CONCAT(?, RIGHT(FechaCita, 4)),
+		`UPDATE citas SET FeCita = ?, FechaCita = CONCAT(CONVERT(? USING latin1), RIGHT(FechaCita, 4)),
 		        Confirmada = 0, FechaConfirmacion = NULL
 		 WHERE Agenda = ? AND IdMedico = ? AND DATE(FeCita) = ?
 		   AND Cancelada = 0 AND Remonte = 0`,
