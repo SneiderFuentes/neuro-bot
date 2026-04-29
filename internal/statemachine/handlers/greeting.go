@@ -244,10 +244,10 @@ func buildMainMenuList() *sm.ListMessage {
 	}
 }
 
-// buildEntityTypeRows creates list rows for the 7 entity type options.
+// buildEntityTypeRows creates list rows for the 6 entity type options.
 func buildEntityTypeRows() []sm.ListRow {
-	rows := make([]sm.ListRow, 7)
-	for i := 1; i <= 7; i++ {
+	rows := make([]sm.ListRow, 6)
+	for i := 1; i <= 6; i++ {
 		rows[i-1] = sm.ListRow{
 			ID:          fmt.Sprintf("ct_%d", i),
 			Title:       domain.EntityCategoryLabels[i],
