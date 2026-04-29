@@ -552,7 +552,7 @@ func (r *AppointmentRepo) RescheduleDate(ctx context.Context, agendaID int, doct
 	result, err := r.db.ExecContext(ctx,
 		`UPDATE citas SET FeCita = ?, FechaCita = CONCAT(?, RIGHT(FechaCita, 4)),
 		        Confirmada = 0, FechaConfirmacion = NULL
-		 WHERE Agenda = ? AND IdMedico = ? AND FeCita = ?
+		 WHERE Agenda = ? AND IdMedico = ? AND DATE(FeCita) = ?
 		   AND Cancelada = 0 AND Remonte = 0`,
 		newDate, newDateFormatted, agendaID, doctorDoc, oldDate)
 	if err != nil {
