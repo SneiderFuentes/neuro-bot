@@ -28,7 +28,7 @@ func (r *ProcedureRepo) FindByCode(ctx context.Context, code string) (*domain.Pr
 	            COALESCE(p.horario_especifico_id, 0),
 	            COALESCE(p.activo, 1)
 	          FROM cups_procedimientos p
-	          WHERE p.codigo_cups = ? AND p.activo = 1
+	          WHERE p.codigo_cups = ?
 	          LIMIT 1`
 
 	var p domain.Procedure

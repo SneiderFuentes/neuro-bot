@@ -219,7 +219,7 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository) sm.StateHa
 		for _, cup := range cups {
 			if cup.Code != "" {
 				proc, err := procedureRepo.FindByCode(ctx, cup.Code)
-				if err != nil || proc == nil {
+				if err != nil || proc == nil || !proc.IsActive {
 					skipped = append(skipped, cup.Code)
 					continue
 				}

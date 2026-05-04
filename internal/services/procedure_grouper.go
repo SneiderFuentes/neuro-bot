@@ -222,7 +222,7 @@ func GroupByServiceFromDB(ctx context.Context, cups []CUPSEntry, procRepo reposi
 		ec := enrichedCup{CUPSEntry: c, ServiceName: "General", RequiredSpaces: 1}
 		if c.Code != "" {
 			proc, err := procRepo.FindByCode(ctx, c.Code)
-			if err != nil || proc == nil {
+			if err != nil || proc == nil || !proc.IsActive {
 				// Code not found or inactive (activo=0) — skip it
 				continue
 			}
