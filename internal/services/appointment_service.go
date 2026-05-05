@@ -330,9 +330,18 @@ func (s *AppointmentService) CreateWithConsecutive(ctx context.Context, input do
 	dateStr := input.TimeSlot[:8] // YYYYMMDD
 
 	var firstID string
+	var createdIDs []string // track committed IDs so we can cancel on partial failure
+
+	cancelCreated := func(reason string) {
+		if len(createdIDs) > 0 {
+			_ = s.repo.CancelBatch(ctx, createdIDs, reason, "system", "")
+		}
+	}
+
 	for i := 0; i < espacios; i++ {
 		minutes := baseMinutes + (i * durationMinutes)
 		if minutes/60 >= 24 {
+			cancelCreated("consecutive slot exceeds 24h")
 			return "", fmt.Errorf("consecutive slot %d/%d exceeds 24h (minute %d)", i+1, espacios, minutes)
 		}
 		timeSlot := fmt.Sprintf("%s%02d%02d", dateStr, minutes/60, minutes%60)
@@ -347,13 +356,17 @@ func (s *AppointmentService) CreateWithConsecutive(ctx context.Context, input do
 
 		appt, err := s.repo.Create(ctx, consecutiveInput)
 		if err != nil {
+			cancelCreated("slot conflict during consecutive booking")
 			return "", fmt.Errorf("create consecutive %d/%d: %w", i+1, espacios, err)
 		}
+
+		createdIDs = append(createdIDs, appt.ID)
 
 		if i == 0 {
 			firstID = appt.ID
 			// Create pxcita records only for the FIRST appointment
 			if err := s.createPxCitaRecords(ctx, appt.ID, input.Procedures); err != nil {
+				cancelCreated("pxcita creation failed")
 				return "", fmt.Errorf("create pxcita: %w", err)
 			}
 		}
