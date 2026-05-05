@@ -63,6 +63,7 @@ type MockAppointmentRepo struct {
 	CancelFn                func(ctx context.Context, id string, reason, channel, channelID string) error
 	ConfirmBatchFn          func(ctx context.Context, ids []string, channel, channelID string) error
 	CancelBatchFn           func(ctx context.Context, ids []string, reason, channel, channelID string) error
+	DeleteBatchFn           func(ctx context.Context, ids []string) error
 	HasFutureForCupFn       func(ctx context.Context, patientID, cupCode string) (bool, error)
 	FindLastDoctorForCupsFn func(ctx context.Context, patientID string, cups []string) (string, error)
 	CountMonthlyByGroupFn   func(ctx context.Context, cupsCodes []string, year, month int) (int, error)
@@ -134,6 +135,12 @@ func (m *MockAppointmentRepo) CancelBatch(ctx context.Context, ids []string, rea
 		if err := m.Cancel(ctx, id, reason, channel, channelID); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+func (m *MockAppointmentRepo) DeleteBatch(ctx context.Context, ids []string) error {
+	if m.DeleteBatchFn != nil {
+		return m.DeleteBatchFn(ctx, ids)
 	}
 	return nil
 }

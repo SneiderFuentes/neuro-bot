@@ -332,9 +332,9 @@ func (s *AppointmentService) CreateWithConsecutive(ctx context.Context, input do
 	var firstID string
 	var createdIDs []string // track committed IDs so we can cancel on partial failure
 
-	cancelCreated := func(reason string) {
+	cancelCreated := func(_ string) {
 		if len(createdIDs) > 0 {
-			_ = s.repo.CancelBatch(ctx, createdIDs, reason, "system", "")
+			_ = s.repo.DeleteBatch(ctx, createdIDs)
 		}
 	}
 

@@ -289,6 +289,24 @@ func (r *AppointmentRepo) CancelBatch(ctx context.Context, ids []string, reason,
 	return nil
 }
 
+func (r *AppointmentRepo) DeleteBatch(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf(`DELETE FROM citas WHERE IdCita IN (%s)`, strings.Join(placeholders, ","))
+	_, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("delete batch (%d ids): %w", len(ids), err)
+	}
+	return nil
+}
+
 func (r *AppointmentRepo) FindByAgendaAndDate(ctx context.Context, agendaID int, date string) ([]domain.Appointment, error) {
 	query := `SELECT c.IdCita, c.FeCita, c.FechaCita, c.IdMedico,
 	            COALESCE(cm.doctor_nombre_completo, c.IdMedico) AS DoctorName,
