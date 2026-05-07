@@ -1046,6 +1046,16 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 			Procedures:   procedures,
 		}
 
+		// Pre-fetch old block BEFORE creating the new appointment.
+		// FindConsecutiveBlock uses FindByAgendaAndDate, so if the patient rescheduled
+		// to the same day/agenda/doctor the new appointment would appear in the results
+		// and get included in the "old block", causing it to be cancelled alongside the original.
+		rescheduleApptID := sess.GetContext("reschedule_appt_id")
+		var oldBlockToCancel []domain.Appointment
+		if rescheduleApptID != "" && sess.GetContext("reschedule_skip_cancel") != "1" {
+			_, oldBlockToCancel, _ = apptSvc.FindBlockByAppointmentID(ctx, rescheduleApptID)
+		}
+
 		espacios, _ := strconv.Atoi(sess.GetContext("espacios"))
 		apptID, err := apptSvc.CreateWithConsecutive(ctx, input, espacios, slot.Duration)
 		if err != nil {
@@ -1096,21 +1106,19 @@ func createAppointmentHandler(apptSvc *services.AppointmentService, soatRepo rep
 			birdClient.SendInternalText(sess.ConversationID, note)
 		}
 
-		// Cancel old appointment if this is a self-service reschedule
-		rescheduleApptID := sess.GetContext("reschedule_appt_id")
+		// Cancel old appointment if this is a self-service reschedule (block pre-fetched above)
 		if rescheduleApptID != "" && sess.GetContext("reschedule_skip_cancel") != "1" {
-			_, oldBlock, findErr := apptSvc.FindBlockByAppointmentID(ctx, rescheduleApptID)
-			if findErr != nil {
-				slog.Error("reschedule: find old block", "error", findErr, "phone", utils.MaskPhone(msg.Phone), "old_appt_id", rescheduleApptID)
-			} else if len(oldBlock) > 0 {
-				if cancelErr := apptSvc.CancelBlock(ctx, oldBlock, "reprogramada por paciente via bot", "whatsapp_bot", ""); cancelErr != nil {
+			if len(oldBlockToCancel) > 0 {
+				if cancelErr := apptSvc.CancelBlock(ctx, oldBlockToCancel, "reprogramada por paciente via bot", "whatsapp_bot", ""); cancelErr != nil {
 					slog.Error("reschedule: cancel old block", "error", cancelErr, "phone", utils.MaskPhone(msg.Phone), "old_appt_id", rescheduleApptID)
 				} else {
 					slog.Info("reschedule: old appointment cancelled",
 						"old_appt_id", rescheduleApptID,
 						"new_appt_id", apptID,
-						"block_size", len(oldBlock))
+						"block_size", len(oldBlockToCancel))
 				}
+			} else {
+				slog.Warn("reschedule: old block not found", "old_appt_id", rescheduleApptID)
 			}
 		}
 
