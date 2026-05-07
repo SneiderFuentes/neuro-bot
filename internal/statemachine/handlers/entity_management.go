@@ -118,24 +118,23 @@ func showEntityListHandler(entityRepo repository.EntityRepository) sm.StateHandl
 				WithEvent("no_entities_found", map[string]interface{}{"category": category}), nil
 		}
 
-		// Si tanto SAN01 como SAN02 están en la lista, eliminar SAN01 del display.
-		// El submenú de Sanitas (ASK_SANITAS_PLAN) ya distingue entre Premium y regular.
-		// De esta forma el paciente solo ve una entrada "SANITAS" en la lista numerada.
-		hasSAN01, hasSAN02 := false, false
+		// Sanitas deduplication: keep only SAN02 as the canonical "SANITAS" entry.
+		// The ASK_SANITAS_PLAN submenu handles Premium vs regular distinction.
+		// This removes SAN01 and any other DB code that also displays as "SANITAS".
+		hasSAN02 := false
 		for _, e := range entities {
-			if e.Code == "SAN01" {
-				hasSAN01 = true
-			}
 			if e.Code == "SAN02" {
 				hasSAN02 = true
+				break
 			}
 		}
-		if hasSAN01 && hasSAN02 {
+		if hasSAN02 {
 			filtered := entities[:0]
 			for _, e := range entities {
-				if e.Code != "SAN01" {
-					filtered = append(filtered, e)
+				if e.Code != "SAN02" && strings.Contains(strings.ToUpper(e.DisplayName()), "SANITAS") {
+					continue
 				}
+				filtered = append(filtered, e)
 			}
 			entities = filtered
 		}
@@ -206,8 +205,9 @@ func askEntityNumberHandler(entityRepo repository.EntityRepository) sm.StateHand
 			}
 		}
 
-		// Sanitas submenu: distinguish between SAN01 (Premium) and SAN02 (MRC)
-		if entityCode == "SAN01" || entityCode == "SAN02" {
+		// Sanitas submenu: trigger for known codes or any entity whose name contains "SANITAS"
+		if entityCode == "SAN01" || entityCode == "SAN02" ||
+			strings.Contains(strings.ToUpper(entityName), "SANITAS") {
 			return sm.NewResult(sm.StateAskSanitasPlan).
 				WithContext("entity_number", fmt.Sprintf("%d", index)).
 				WithContext("menu_option", "agendar").
