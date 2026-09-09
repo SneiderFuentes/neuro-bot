@@ -209,8 +209,16 @@ REGLAS CAPITAL SALUD (solo si se detecta logo/texto "Capital Salud"):
 - Ignorar datos del pie de página (firmas, "VÁLIDO HASTA", "AUTORIZA", timestamps).
 - EDAD: "xx MES/MESES" → considerar edad 0; "xx AÑO/AÑOS" → xx.
 
+INTERCONSULTAS (solicitudes de remisión):
+- Si la imagen es una SOLICITUD DE INTERCONSULTA o REMISIÓN (no una orden con tabla de CUPS):
+  Busca el servicio solicitado en los campos "Interconsulta a:", "Servicio referente:", "Especialidad:" o similares.
+  Compara ese servicio con la LISTA DE REFERENCIA y asigna el cups_code correspondiente.
+  cups_name = el nombre del servicio tal como aparece en el documento.
+  Si no hay coincidencia en la lista, pon cups_code = "" y cups_name con el servicio leído.
+  NO devuelvas error "no_table_detected" por ser interconsulta — intenta extraer el servicio.
+
 SIN TABLA DE PROCEDIMIENTOS:
-- Si la imagen no es una orden médica o no tiene tabla de procedimientos:
+- Si la imagen no es una orden médica ni una interconsulta, o no tiene ningún procedimiento o servicio identificable:
   Responder: {"cups": [], "error": "no_table_detected"}
 - Si la imagen está borrosa o es ilegible:
   Responder: {"cups": [], "error": "imagen_borrosa"}
