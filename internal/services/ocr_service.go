@@ -214,6 +214,8 @@ INTERCONSULTAS (solicitudes de remisión):
   Busca el servicio solicitado en los campos "Interconsulta a:", "Servicio referente:", "Especialidad:" o similares.
   Compara ese servicio con la LISTA DE REFERENCIA y asigna el cups_code correspondiente.
   cups_name = el nombre del servicio tal como aparece en el documento.
+  Si hay dos CUPS para la misma especialidad (primera vez y control), elige SIEMPRE el de "primera vez" o "1ª vez",
+  ya que las interconsultas son casi siempre consultas iniciales.
   Si no hay coincidencia en la lista, pon cups_code = "" y cups_name con el servicio leído.
   NO devuelvas error "no_table_detected" por ser interconsulta — intenta extraer el servicio.
 
