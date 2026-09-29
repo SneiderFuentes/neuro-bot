@@ -17,8 +17,16 @@ const (
 	StateShowResults        = "SHOW_RESULTS"
 	StateShowLocations      = "SHOW_LOCATIONS"
 	StateShowHelp           = "SHOW_HELP"
-	// Aplicación de medicamentos: servicio del menú inicial que valida SANITAS y escala a agente.
-	StateMedicationCheckSanitas = "MEDICATION_CHECK_SANITAS"
+	// Aplicación de medicamentos: valida contrato, consulta listado, recopila datos clínicos y agenda.
+	StateMedicationCheckSanitas    = "MEDICATION_CHECK_SANITAS"
+	StateMedicationCheckExcel      = "MEDICATION_CHECK_EXCEL"
+	StateMedicationAskLastDate     = "MEDICATION_ASK_LAST_DATE"
+	StateMedicationAskDose         = "MEDICATION_ASK_DOSE"
+	StateMedicationAskFrequency    = "MEDICATION_ASK_FREQUENCY"
+	StateMedicationAskSymptoms     = "MEDICATION_ASK_SYMPTOMS"
+	StateMedicationReceiveHistoria = "MEDICATION_RECEIVE_HISTORIA"
+	StateMedicationReceiveOrden    = "MEDICATION_RECEIVE_ORDEN"
+	StateMedicationPrepareSchedule = "MEDICATION_PREPARE_SCHEDULE"
 )
 
 // === Entity Management ===
@@ -184,7 +192,15 @@ var stateTypes = map[string]StateType{
 	StateShowResults:            StateTypeAutomatic,
 	StateShowLocations:          StateTypeAutomatic,
 	StateShowHelp:               StateTypeAutomatic,
-	StateMedicationCheckSanitas: StateTypeAutomatic,
+	StateMedicationCheckSanitas:    StateTypeAutomatic,
+	StateMedicationCheckExcel:      StateTypeAutomatic,
+	StateMedicationAskLastDate:     StateTypeInteractive,
+	StateMedicationAskDose:         StateTypeInteractive,
+	StateMedicationAskFrequency:    StateTypeInteractive,
+	StateMedicationAskSymptoms:     StateTypeInteractive,
+	StateMedicationReceiveHistoria: StateTypeInteractive,
+	StateMedicationReceiveOrden:    StateTypeInteractive,
+	StateMedicationPrepareSchedule: StateTypeAutomatic,
 
 	// Entity Management
 	StateCheckEntity:         StateTypeAutomatic,

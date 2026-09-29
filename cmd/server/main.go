@@ -204,6 +204,10 @@ func main() {
 		machine.AddInterceptor(handlers.PhotoAppendInterceptor(ocrSvc))
 	}
 
+	// Aplicación de medicamentos: repositorio de listado pendiente (tabla medication_pending).
+	medRepo := localrepo.NewMedicationPendingRepo(localDB)
+	handlers.RegisterMedicationHandlers(machine, medRepo)
+
 	// Fase 5: Saludo e Identificación + Results/Locations
 	handlers.RegisterGreetingHandlers(machine, cfg, locationRepo)
 	handlers.RegisterResultsAndLocationHandlers(machine, cfg, locationRepo)
