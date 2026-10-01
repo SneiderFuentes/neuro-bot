@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
@@ -268,9 +269,32 @@ func medicationCheckSanitasHandler(cfg *config.Config) sm.StateHandler {
 			return r, nil
 		}
 
-		// Contrato válido → verificar si el paciente tiene medicamento en el listado.
-		return sm.NewResult(sm.StateMedicationCheckExcel).
-			WithEvent("medication_sanitas_confirmed", map[string]interface{}{"contract": sess.GetContext("patient_contract")}), nil
+		docs := "Perfecto ✅. Para tu solicitud de *Aplicación de medicamentos* ten a la mano estos documentos:\n\n" +
+			"• Historia clínica\n" +
+			"• Orden médica\n" +
+			"• Autorización vigente\n\n"
+
+		// Canal externo configurado → enviar link wa.me con mensaje prellenado y cerrar.
+		if cfg != nil && cfg.MedicationExternalWANumber != "" {
+			name := sess.GetContext("patient_name")
+			doc := sess.GetContext("patient_doc")
+			prefill := fmt.Sprintf("Hola, soy %s (documento %s). Solicito el servicio de *aplicación de medicamentos*.", name, doc)
+			link := "https://wa.me/" + cfg.MedicationExternalWANumber + "?text=" + url.QueryEscape(prefill)
+			text := docs +
+				"Para continuar, escríbenos por nuestro *canal de aplicación de medicamentos* en este enlace:\n\n" +
+				link + "\n\n" +
+				"Al abrirlo verás un mensaje listo con tus datos; solo pulsa *enviar* y un asesor te atenderá. 😊"
+			return buildAutoCloseResult(text).
+				WithClearCtx("medication_flow").
+				WithEvent("medication_external_channel", map[string]interface{}{"contract": sess.GetContext("patient_contract")}), nil
+		}
+
+		// Sin canal externo → escalar a agente.
+		return sm.NewResult(sm.StateEscalateToAgent).
+			WithText(docs+"En un momento te conecto con un agente que continuará con tu solicitud. 😊").
+			WithClearCtx("medication_flow").
+			WithContext("escalation_reason", "medicamentos").
+			WithEvent("medication_sanitas_confirmed", nil), nil
 	}
 }
 
