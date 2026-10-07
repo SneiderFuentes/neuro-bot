@@ -676,10 +676,40 @@ func checkMRCLimitHandler(apptSvc *services.AppointmentService) sm.StateHandler 
 	}
 }
 
-// CHECK_AGE_RESTRICTION (automático) — registra que pasó todas las validaciones.
-// Las restricciones de edad por doctor se aplican al filtrar slots (Fase 10).
+// CUPS de neurología adultos (solo mayores de 18 años).
+var adultNeurologyCups = map[string]bool{
+	"890274": true, // primera vez adultos
+	"890374": true, // control adultos
+}
+
+// CUPS de neurología pediátrica (solo menores de 18 años).
+var pediatricNeurologyCups = map[string]bool{
+	"890275": true, // primera vez pediátrica
+	"890375": true, // control pediátrico
+}
+
+// CHECK_AGE_RESTRICTION (automático) — bloquea menores en neurología adultos y adultos en neurología pediátrica.
 func checkAgeRestrictionHandler() sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+		cupsCode := sess.GetContext("cups_code")
+		age, _ := strconv.Atoi(sess.GetContext("patient_age"))
+
+		if adultNeurologyCups[cupsCode] && age < 18 {
+			observability.Emit(observability.TraceSession(sess.ID), "agendar", "age_restriction_blocked",
+				observability.EmitOpts{Phone: sess.PhoneNumber, Attrs: map[string]interface{}{"cups": cupsCode, "age": age, "reason": "minor_in_adult_neuro"}})
+			return buildAutoCloseResult(
+				fmt.Sprintf("El servicio de *Neurología* es exclusivo para pacientes mayores de 18 años. Según nuestros registros, tienes %d años.\n\nPara pacientes menores de 18 años contamos con el servicio de *Neurología Pediátrica*. Si deseas agendar en esa especialidad, inicia una nueva solicitud.", age),
+			).WithEvent("age_restriction_blocked", map[string]interface{}{"cups": cupsCode, "age": age, "reason": "minor_in_adult_neuro"}), nil
+		}
+
+		if pediatricNeurologyCups[cupsCode] && age >= 18 {
+			observability.Emit(observability.TraceSession(sess.ID), "agendar", "age_restriction_blocked",
+				observability.EmitOpts{Phone: sess.PhoneNumber, Attrs: map[string]interface{}{"cups": cupsCode, "age": age, "reason": "adult_in_pediatric_neuro"}})
+			return buildAutoCloseResult(
+				fmt.Sprintf("El servicio de *Neurología Pediátrica* es exclusivo para pacientes menores de 18 años. Según nuestros registros, tienes %d años.\n\nPara pacientes adultos contamos con el servicio de *Neurología*. Si deseas agendar en esa especialidad, inicia una nueva solicitud.", age),
+			).WithEvent("age_restriction_blocked", map[string]interface{}{"cups": cupsCode, "age": age, "reason": "adult_in_pediatric_neuro"}), nil
+		}
+
 		return sm.NewResult(sm.StateSearchSlots).
 			WithEvent("validations_complete", nil), nil
 	}
