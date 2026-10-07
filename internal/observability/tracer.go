@@ -178,8 +178,8 @@ var catalog = map[string]stepSpec{
 	"escalacion/escalation_suppressed_resume": {LvOutcome, "blocked", ""},
 	"escalacion/escalation_cap_reached":       {LvOutcome, "blocked", ""},
 	// Restricción de edad en neurología: menor intenta neurología adultos o adulto intenta pediátrica.
-	// Terminal: el paciente es escalado a un agente para que lo oriente a la especialidad correcta.
-	"agendar/age_restriction_blocked": {LvOutcome, "escalated", ""},
+	// Terminal: se regresa al menú principal para que el paciente elija la especialidad correcta.
+	"agendar/age_restriction_blocked": {LvOutcome, "blocked", ""},
 	// H145 (12-ago-2026, reporte de la entidad): tope mensual MRC. Es el CANDADO FINAL disparándose
 	// (create/consolidación) — cada ocurrencia con reason=grupo; si crece sostenido con
 	// from_waiting_list, algún camino upstream sigue entrando sin filtro de búsqueda.

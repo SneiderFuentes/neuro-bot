@@ -697,19 +697,21 @@ func checkAgeRestrictionHandler() sm.StateHandler {
 		if adultNeurologyCups[cupsCode] && age < 18 {
 			observability.Emit(observability.TraceSession(sess.ID), "agendar", "age_restriction_blocked",
 				observability.EmitOpts{Phone: sess.PhoneNumber, Attrs: map[string]interface{}{"cups": cupsCode, "age": age, "reason": "minor_in_adult_neuro"}})
-			return sm.NewResult(sm.StateEscalateToAgent).
-				WithText(fmt.Sprintf("El servicio de *Neurología* es exclusivo para pacientes mayores de 18 años. Según nuestros registros, tienes %d años.\n\nTe voy a conectar con un asesor para que te oriente con el agendamiento en *Neurología Pediátrica*.", age)).
-				WithContext("escalation_reason", "age_restriction_minor_in_adult_neuro").
-				WithEvent("age_restriction_blocked", map[string]interface{}{"cups": cupsCode, "age": age, "reason": "minor_in_adult_neuro"}), nil
+			r := sm.NewResult(sm.StateMainMenu).
+				WithText(fmt.Sprintf("El servicio de *Neurología* es exclusivo para pacientes mayores de 18 años. Según nuestros registros, tienes %d años.\n\nPuedes seleccionar el servicio de *Neurología Pediátrica* desde el menú.", age)).
+				WithEvent("age_restriction_blocked", map[string]interface{}{"cups": cupsCode, "age": age, "reason": "minor_in_adult_neuro"})
+			r.Messages = append(r.Messages, buildMainMenuList())
+			return r, nil
 		}
 
 		if pediatricNeurologyCups[cupsCode] && age >= 18 {
 			observability.Emit(observability.TraceSession(sess.ID), "agendar", "age_restriction_blocked",
 				observability.EmitOpts{Phone: sess.PhoneNumber, Attrs: map[string]interface{}{"cups": cupsCode, "age": age, "reason": "adult_in_pediatric_neuro"}})
-			return sm.NewResult(sm.StateEscalateToAgent).
-				WithText(fmt.Sprintf("El servicio de *Neurología Pediátrica* es exclusivo para pacientes menores de 18 años. Según nuestros registros, tienes %d años.\n\nTe voy a conectar con un asesor para que te oriente con el agendamiento en *Neurología*.", age)).
-				WithContext("escalation_reason", "age_restriction_adult_in_pediatric_neuro").
-				WithEvent("age_restriction_blocked", map[string]interface{}{"cups": cupsCode, "age": age, "reason": "adult_in_pediatric_neuro"}), nil
+			r := sm.NewResult(sm.StateMainMenu).
+				WithText(fmt.Sprintf("El servicio de *Neurología Pediátrica* es exclusivo para pacientes menores de 18 años. Según nuestros registros, tienes %d años.\n\nPuedes seleccionar el servicio de *Neurología* desde el menú.", age)).
+				WithEvent("age_restriction_blocked", map[string]interface{}{"cups": cupsCode, "age": age, "reason": "adult_in_pediatric_neuro"})
+			r.Messages = append(r.Messages, buildMainMenuList())
+			return r, nil
 		}
 
 		return sm.NewResult(sm.StateSearchSlots).
