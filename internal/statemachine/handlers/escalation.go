@@ -22,6 +22,10 @@ import (
 // de ahí se asume lazo (recovery↔escalación, no-show↔re-escalación, etc.) y se corta.
 const escalationSessionCap = 3
 
+// escalateMaxRetries: intentos totales para EscalateToAgent ante errores transitorios de la API.
+// Delays: 0s → 1s → 2s entre intentos; peor caso ~3s extra antes de mostrar el fallback.
+const escalateMaxRetries = 3
+
 // EscalationCreator registra una fila por escalación (tabla escalations). Opcional (nil = no registra).
 type EscalationCreator interface {
 	Create(ctx context.Context, sessionID, phone, fromState, teamID, agentID, agentName string) error
@@ -236,8 +240,23 @@ func escalateHandler(m *sm.Machine, birdClient *bird.Client, cfg *config.Config,
 			}
 		}
 
-		// 5. Try to escalate
-		assignedAgentID, assignedAgentName, err := birdClient.EscalateToAgent(ctx, conversationID, msg.Phone, teamID, teamName, sess.PatientName, cfg.BirdTeamFallback)
+		// 5. Try to escalate — reintentos silenciosos ante errores transitorios de la API de Bird.
+		// El paciente ya recibió "Te voy a conectar…" (o lo recibirá del caller); no se le muestra nada
+		// hasta agotar los intentos. Delays: 0s → 1s → 2s entre intentos (≤3s total de espera extra).
+		var assignedAgentID, assignedAgentName string
+		var err error
+		for attempt := 0; attempt < escalateMaxRetries; attempt++ {
+			if attempt > 0 {
+				slog.Warn("escalation_retry",
+					"attempt", attempt, "prev_error", err,
+					"phone", utils.MaskPhone(msg.Phone), "session_id", sess.ID)
+				time.Sleep(time.Duration(attempt) * time.Second)
+			}
+			assignedAgentID, assignedAgentName, err = birdClient.EscalateToAgent(ctx, conversationID, msg.Phone, teamID, teamName, sess.PatientName, cfg.BirdTeamFallback)
+			if err == nil {
+				break
+			}
+		}
 		if err != nil {
 			// Diagnóstico por-capa (ciclo 98) + directiva de PICKUP MANUAL. El log ERROR va a Telegram
 			// (AlertHandler) con el trace_id: sin canal Bird para el handoff, el agente NO ve el chat en
