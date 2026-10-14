@@ -157,34 +157,31 @@ func (m *NotificationManager) handleConfirmation(phone, action string, pending *
 		}
 
 		// Cerrar sesión activa y abrir una nueva en StateGreeting con post_confirmed=1.
-		// Así, si el paciente responde ("Gracias", etc.), el bot muestra el menú directamente
-		// sin volver a enviar el texto de política de datos (ya fue aceptado antes).
+		// Si el paciente escribe algo (o Bird reintenta el postback), el bot muestra el menú
+		// directamente sin volver a enviar el texto de política de datos (ya fue aceptado antes).
+		// NO se llama EnqueueVirtual: no queremos enviar ningún mensaje extra de forma proactiva.
 		if m.sessionRepo != nil {
 			if err := m.sessionRepo.CompleteActiveByPhone(ctx, phone); err != nil {
 				slog.Error("confirm: close active session", "phone", utils.MaskPhone(phone), "error", err)
 			}
-			if m.workerPool != nil {
-				convID := pending.ConversationID
-				if convID == "" {
-					if cached := m.birdClient.GetCachedConversationID(phone); cached != "" {
-						convID = cached
-					}
+			convID := pending.ConversationID
+			if convID == "" {
+				if cached := m.birdClient.GetCachedConversationID(phone); cached != "" {
+					convID = cached
 				}
-				sess := &session.Session{
-					ID:             uuid.New().String(),
-					PhoneNumber:    phone,
-					CurrentState:   sm.StateGreeting,
-					ConversationID: convID,
-					Status:         session.StatusActive,
-					ExpiresAt:      time.Now().Add(30 * time.Minute),
-				}
-				if err := m.sessionRepo.Create(ctx, sess); err != nil {
-					slog.Warn("confirm: create post-confirm session", "phone", utils.MaskPhone(phone), "error", err)
-				} else if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, map[string]string{"post_confirmed": "1"}); err != nil {
-					slog.Warn("confirm: set post_confirmed context", "phone", utils.MaskPhone(phone), "error", err)
-				} else {
-					m.workerPool.EnqueueVirtual(phone)
-				}
+			}
+			sess := &session.Session{
+				ID:             uuid.New().String(),
+				PhoneNumber:    phone,
+				CurrentState:   sm.StateGreeting,
+				ConversationID: convID,
+				Status:         session.StatusActive,
+				ExpiresAt:      time.Now().Add(30 * time.Minute),
+			}
+			if err := m.sessionRepo.Create(ctx, sess); err != nil {
+				slog.Warn("confirm: create post-confirm session", "phone", utils.MaskPhone(phone), "error", err)
+			} else if err := m.sessionRepo.SetContextBatch(ctx, sess.ID, map[string]string{"post_confirmed": "1"}); err != nil {
+				slog.Warn("confirm: set post_confirmed context", "phone", utils.MaskPhone(phone), "error", err)
 			}
 		}
 
