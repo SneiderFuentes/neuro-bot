@@ -179,21 +179,27 @@ func buildLocationsText(ctx context.Context, locationRepo LocationReader) string
 	return "Actualmente no tenemos sedes configuradas. Comunícate con un agente para más información."
 }
 
-// GREETING (automático) — envía bienvenida + lista del menú (5 opciones Bird V2)
+// GREETING (automático) — envía bienvenida + lista del menú (5 opciones Bird V2).
+// Si la sesión tiene post_confirmed=1 (paciente que acaba de confirmar cita vía notificación),
+// se omite el texto de privacidad y se muestra solo el menú principal.
 func greetingHandler(cfg *config.Config) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
-		welcomeText := fmt.Sprintf("Soy *%s*, tu asistente virtual de *%s*.\n\n"+
-			"Antes de continuar, ten en cuenta que al seguir conversando aceptas "+
-			"el tratamiento de tus datos personales conforme a nuestra Política de "+
-			"Protección de Datos (Ley 1581 de 2012), disponibles en www.neuroelectrodx.com. "+
-			"También podemos usar inteligencia artificial para ayudarte a completar tus datos.\n\n"+
-			"Podrás ejercer tus derechos de acceso, rectificación o supresión en cualquier momento.",
-			cfg.BotName, cfg.CenterName)
-
 		r := sm.NewResult(sm.StateMainMenu).
+			WithClearCtx("post_confirmed").
 			WithEvent("greeting_sent", nil)
 		list := buildMainMenuList()
-		list.Body = welcomeText + "\n\n" + list.Body
+
+		if sess.GetContext("post_confirmed") != "1" {
+			welcomeText := fmt.Sprintf("Soy *%s*, tu asistente virtual de *%s*.\n\n"+
+				"Antes de continuar, ten en cuenta que al seguir conversando aceptas "+
+				"el tratamiento de tus datos personales conforme a nuestra Política de "+
+				"Protección de Datos (Ley 1581 de 2012), disponibles en www.neuroelectrodx.com. "+
+				"También podemos usar inteligencia artificial para ayudarte a completar tus datos.\n\n"+
+				"Podrás ejercer tus derechos de acceso, rectificación o supresión en cualquier momento.",
+				cfg.BotName, cfg.CenterName)
+			list.Body = welcomeText + "\n\n" + list.Body
+		}
+
 		r.Messages = append(r.Messages, list)
 		return r, nil
 	}
