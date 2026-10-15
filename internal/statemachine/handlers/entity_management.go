@@ -296,6 +296,15 @@ func askEntityNumberHandler(entityRepo repository.EntityRepository) sm.StateHand
 				WithEvent("entity_resolution_failed", map[string]interface{}{"index": index, "category": category}), nil
 		}
 
+		// PARTICULAR LIGA (empresa 50001) requiere atención manual → escalar a agente.
+		if entityCode == "50001" {
+			slog.Info("entity_number: PARTICULAR LIGA seleccionada, escalando a agente", "phone", sess.PhoneNumber)
+			return sm.NewResult(sm.StateEscalateToAgent).
+				WithContext("selected_entity_code", entityCode).
+				WithContext("selected_entity_name", entityName).
+				WithEvent("particular_liga_escalated", map[string]interface{}{"code": entityCode, "name": entityName}), nil
+		}
+
 		observability.Emit(observability.TraceSession(sess.ID), "entidad", "entity_selected",
 			observability.EmitOpts{Phone: sess.PhoneNumber})
 		r := sm.NewResult(sm.StateAskDocumentType).
