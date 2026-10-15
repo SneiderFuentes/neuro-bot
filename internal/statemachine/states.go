@@ -26,6 +26,7 @@ const (
 	StateMedicationAskSymptoms     = "MEDICATION_ASK_SYMPTOMS"
 	StateMedicationReceiveHistoria = "MEDICATION_RECEIVE_HISTORIA"
 	StateMedicationReceiveOrden    = "MEDICATION_RECEIVE_ORDEN"
+	StateMedicationConfirmOrden    = "MEDICATION_CONFIRM_ORDEN"
 	StateMedicationPrepareSchedule = "MEDICATION_PREPARE_SCHEDULE"
 )
 
@@ -200,6 +201,7 @@ var stateTypes = map[string]StateType{
 	StateMedicationAskSymptoms:     StateTypeInteractive,
 	StateMedicationReceiveHistoria: StateTypeInteractive,
 	StateMedicationReceiveOrden:    StateTypeInteractive,
+	StateMedicationConfirmOrden:    StateTypeInteractive,
 	StateMedicationPrepareSchedule: StateTypeAutomatic,
 
 	// Entity Management

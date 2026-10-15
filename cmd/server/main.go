@@ -206,7 +206,7 @@ func main() {
 
 	// Aplicación de medicamentos: repositorio de listado pendiente (tabla medication_pending).
 	medRepo := localrepo.NewMedicationPendingRepo(localDB)
-	handlers.RegisterMedicationHandlers(machine, medRepo)
+	handlers.RegisterMedicationHandlers(machine, medRepo, ocrSvc)
 
 	// Fase 5: Saludo e Identificación + Results/Locations
 	handlers.RegisterGreetingHandlers(machine, cfg, locationRepo)

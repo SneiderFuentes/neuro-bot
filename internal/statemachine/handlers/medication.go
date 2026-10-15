@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
@@ -15,7 +16,8 @@ import (
 
 // RegisterMedicationHandlers registra los handlers del flujo de Aplicación de Medicamentos.
 // medRepo puede ser nil (el bot informará que no hay listado disponible).
-func RegisterMedicationHandlers(m *sm.Machine, medRepo *local.MedicationPendingRepo) {
+// ocrSvc puede ser nil (la orden se acepta sin validación de nombre).
+func RegisterMedicationHandlers(m *sm.Machine, medRepo *local.MedicationPendingRepo, ocrSvc *services.OCRService) {
 	m.Register(sm.StateMedicationCheckExcel, medicationCheckExcelHandler(medRepo))
 	m.Register(sm.StateMedicationAskLastDate, medicationAskLastDateHandler())
 	m.Register(sm.StateMedicationAskDose, medicationAskDoseHandler())
@@ -29,7 +31,15 @@ func RegisterMedicationHandlers(m *sm.Machine, medRepo *local.MedicationPendingR
 		Handler: medicationAskSymptomsHandler(),
 	})
 	m.Register(sm.StateMedicationReceiveHistoria, medicationReceiveHistoriaHandler())
-	m.Register(sm.StateMedicationReceiveOrden, medicationReceiveOrdenHandler())
+	m.Register(sm.StateMedicationReceiveOrden, medicationReceiveOrdenHandler(ocrSvc))
+	m.RegisterWithConfig(sm.StateMedicationConfirmOrden, sm.HandlerConfig{
+		InputType: sm.InputButton,
+		Options:   []string{"med_confirm_ok", "med_confirm_retry"},
+		RetryPrompt: func(sess *session.Session, result *sm.StateResult) {
+			result.Messages = append(result.Messages, medicationConfirmOrdenButtons())
+		},
+		Handler: medicationConfirmOrdenHandler(),
+	})
 	m.Register(sm.StateMedicationPrepareSchedule, medicationPrepareScheduleHandler())
 }
 
@@ -71,7 +81,7 @@ func medicationCheckExcelHandler(medRepo *local.MedicationPendingRepo) sm.StateH
 
 func backToMenuNoRecord(sess *session.Session) *sm.StateResult {
 	list := &sm.ListMessage{
-		Body:  "Consultamos nuestro listado de medicamentos y *no encontramos un medicamento pendiente de aplicación* para tu documento.\n\n" +
+		Body: "Consultamos nuestro listado de medicamentos y *no encontramos un medicamento pendiente de aplicación* para tu documento.\n\n" +
 			"Si crees que hay un error, comunícate directamente con la IPS para verificar tu registro.\n\n" +
 			"¿En qué más puedo ayudarte?",
 		Title: "Ver opciones",
@@ -221,16 +231,105 @@ func medicationReceiveHistoriaHandler() sm.StateHandler {
 }
 
 // MEDICATION_RECEIVE_ORDEN (interactivo) — recibe foto/PDF de la orden médica.
-func medicationReceiveOrdenHandler() sm.StateHandler {
-	return func(_ context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
+// Si hay OCR disponible, valida que el medicamento de la orden coincida con el autorizado.
+// Si no hay CUPS en la orden, intenta validar por nombre del medicamento.
+func medicationReceiveOrdenHandler(ocrSvc *services.OCRService) sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		mediaURL := mediaURLFromMessage(msg)
 		if mediaURL == "" {
 			return sm.NewResult(sess.CurrentState).
 				WithText("Por favor envía la *orden médica* como foto o PDF."), nil
 		}
 		sess.SetContext("med_orden_url", mediaURL)
-		return sm.NewResult(sm.StateMedicationPrepareSchedule).
-			WithText("✅ Documentos recibidos. Buscando disponibilidad para tu cita de aplicación... 🔍"), nil
+
+		// Sin OCR disponible: aceptar sin validar.
+		if ocrSvc == nil {
+			return sm.NewResult(sm.StateMedicationPrepareSchedule).
+				WithText("✅ Documentos recibidos. Buscando disponibilidad para tu cita de aplicación... 🔍"), nil
+		}
+
+		// Ejecutar OCR sobre la orden médica.
+		ocrResult, err := ocrSvc.AnalyzeDocument(ctx, mediaURL)
+		if err != nil || ocrResult == nil || !ocrResult.Success {
+			slog.Warn("medication ocr failed, proceeding without validation",
+				"session_id", sess.ID, "error", err)
+			return sm.NewResult(sm.StateMedicationPrepareSchedule).
+				WithText("✅ Documentos recibidos. Buscando disponibilidad para tu cita de aplicación... 🔍").
+				WithEvent("medication_ocr_failed", nil), nil
+		}
+
+		// Extraer nombres de medicamentos del resultado OCR.
+		// Las órdenes de medicamentos generalmente no tienen CUPS, así que el nombre
+		// aparece en cups_name con cups_code vacío (regla 3 del prompt OCR).
+		foundName := extractMedicationNameFromOCR(ocrResult)
+		pendingName := sess.GetContext("med_medicamento")
+		comercialName := sess.GetContext("med_nombre_comercial")
+
+		if foundName == "" {
+			// OCR no encontró ningún medicamento legible: proceder sin bloquear.
+			slog.Info("medication ocr: no medication name found, proceeding",
+				"session_id", sess.ID)
+			return sm.NewResult(sm.StateMedicationPrepareSchedule).
+				WithText("✅ Documentos recibidos. Buscando disponibilidad para tu cita de aplicación... 🔍").
+				WithEvent("medication_ocr_no_name", nil), nil
+		}
+
+		// Validar si el nombre encontrado en la orden coincide con el medicamento autorizado.
+		if medicationNamesMatch(foundName, pendingName) || medicationNamesMatch(foundName, comercialName) {
+			// Coincidencia clara: continuar directamente.
+			return sm.NewResult(sm.StateMedicationPrepareSchedule).
+				WithText(fmt.Sprintf("✅ Orden validada: *%s*\n\nBuscando disponibilidad para tu cita de aplicación... 🔍", foundName)).
+				WithEvent("medication_order_validated", map[string]interface{}{"found": foundName, "method": "name_match"}), nil
+		}
+
+		// No coincide: pedir confirmación antes de continuar.
+		sess.SetContext("med_order_found_name", foundName)
+		confirmText := fmt.Sprintf(
+			"⚠️ El medicamento encontrado en la orden es:\n*%s*\n\n"+
+				"El medicamento registrado en tu autorización es:\n*%s*\n\n"+
+				"¿Deseas continuar de todas formas?",
+			foundName, pendingName,
+		)
+		r := sm.NewResult(sm.StateMedicationConfirmOrden).
+			WithText(confirmText).
+			WithEvent("medication_order_mismatch", map[string]interface{}{"found": foundName, "pending": pendingName})
+		r.Messages = append(r.Messages, medicationConfirmOrdenButtons())
+		return r, nil
+	}
+}
+
+// MEDICATION_CONFIRM_ORDEN (interactivo) — el paciente confirma o rechaza la orden cuando
+// el nombre del medicamento no coincide exactamente con el de su autorización.
+func medicationConfirmOrdenHandler() sm.StateHandler {
+	return func(ctx context.Context, sess *session.Session, _ bird.InboundMessage) (*sm.StateResult, error) {
+		switch sm.ValidatedPayload(ctx) {
+		case "med_confirm_ok":
+			foundName := sess.GetContext("med_order_found_name")
+			return sm.NewResult(sm.StateMedicationPrepareSchedule).
+				WithText("✅ Continuando con tu solicitud. Buscando disponibilidad para tu cita de aplicación... 🔍").
+				WithEvent("medication_order_confirmed_by_patient", map[string]interface{}{"found": foundName}), nil
+
+		case "med_confirm_retry":
+			return sm.NewResult(sm.StateMedicationReceiveOrden).
+				WithClearCtx("med_order_found_name").
+				WithText("Por favor envía nuevamente la *orden médica* correcta (foto o PDF).").
+				WithEvent("medication_order_retry", nil), nil
+
+		default:
+			r := sm.NewResult(sess.CurrentState)
+			r.Messages = append(r.Messages, medicationConfirmOrdenButtons())
+			return r, nil
+		}
+	}
+}
+
+func medicationConfirmOrdenButtons() *sm.ButtonMessage {
+	return &sm.ButtonMessage{
+		Text: "¿Deseas continuar?",
+		Buttons: []sm.Button{
+			{Text: "✅ Sí, continuar", Payload: "med_confirm_ok"},
+			{Text: "📎 Subir otra orden", Payload: "med_confirm_retry"},
+		},
 	}
 }
 
@@ -273,4 +372,73 @@ func mediaURLFromMessage(msg bird.InboundMessage) string {
 		return msg.DocumentURL
 	}
 	return ""
+}
+
+// extractMedicationNameFromOCR extrae el nombre del medicamento del resultado OCR.
+// Busca en las entradas CUPS la primera con nombre no vacío; las órdenes de medicamentos
+// típicamente tienen cups_code vacío y el nombre del medicamento en cups_name.
+func extractMedicationNameFromOCR(result *services.OCRResult) string {
+	if result == nil {
+		return ""
+	}
+	for _, c := range result.Cups {
+		name := strings.TrimSpace(c.Name)
+		if name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+// medicationNamesMatch compara el nombre de un medicamento extraído de la orden con el
+// nombre autorizado. Usa el principio activo (primera palabra alfabética significativa)
+// como clave de comparación, con fallback a substring.
+func medicationNamesMatch(orderName, pendingName string) bool {
+	if orderName == "" || pendingName == "" {
+		return false
+	}
+	norm := func(s string) string {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		s = strings.ReplaceAll(s, ",", ".")
+		return s
+	}
+	o := norm(orderName)
+	p := norm(pendingName)
+
+	// Extraer primer token alfabético de al menos 4 caracteres (principio activo).
+	principalIngredient := func(s string) string {
+		for _, w := range strings.Fields(s) {
+			clean := onlyAlpha(w)
+			if len(clean) >= 4 {
+				return clean
+			}
+		}
+		return ""
+	}
+
+	oPI := principalIngredient(o)
+	pPI := principalIngredient(p)
+
+	// Coincidencia por principio activo (ej: "ADALIMUMAB" == "ADALIMUMAB").
+	if oPI != "" && pPI != "" && oPI == pPI {
+		return true
+	}
+
+	// Fallback: uno contiene al otro completamente (ej: orden abreviada vs nombre completo).
+	if strings.Contains(o, p) || strings.Contains(p, o) {
+		return true
+	}
+
+	return false
+}
+
+// onlyAlpha retorna solo los caracteres A-Z del string.
+func onlyAlpha(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
