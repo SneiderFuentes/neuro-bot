@@ -333,11 +333,13 @@ func medicationConfirmOrdenButtons() *sm.ButtonMessage {
 	}
 }
 
-// MEDICATION_PREPARE_SCHEDULE (automático) — configura cups_code y procedures_json para StateSearchSlots.
+// MEDICATION_PREPARE_SCHEDULE (automático) — determina el CUPS correcto según el medicamento
+// y configura procedures_json para StateSearchSlots. Usar el CUPS adecuado garantiza que la
+// búsqueda de horarios encuentre al médico asignado a ese tipo de medicamento.
 func medicationPrepareScheduleHandler() sm.StateHandler {
 	return func(_ context.Context, sess *session.Session, _ bird.InboundMessage) (*sm.StateResult, error) {
-		const cupsCode = "992990"
-		const cupsName = "INYECCIÓN O INFUSIÓN DE OTRA SUSTANCIA TERAPÉUTICA O PROFILÁCTICA"
+		medName := sess.GetContext("med_medicamento")
+		cupsCode, cupsName := medicationCUPSFromName(medName)
 
 		group := services.CUPSGroup{
 			ServiceType: "Aplicacion Medicamentos",
@@ -359,9 +361,115 @@ func medicationPrepareScheduleHandler() sm.StateHandler {
 			WithContext("current_procedure_idx", "0").
 			WithClearCtx("medication_flow").
 			WithEvent("medication_prepare_schedule", map[string]interface{}{
-				"medicamento": sess.GetContext("med_medicamento"),
+				"medicamento": medName,
+				"cups_code":   cupsCode,
 			}), nil
 	}
+}
+
+// medicationCUPSFromName determina el CUPS apropiado para una aplicación de medicamento
+// según el nombre del principio activo. El catálogo tiene 4 CUPS de aplicación, cada uno
+// asignado a médicos distintos.
+//
+// 992801 — modificadores de respuesta biológica (adalimumab, tocilizumab, etc.)
+// 992201 — sustancias hormonales (insulina, eritropoyetina, factor VIII, etc.)
+// 992102 — antibióticos inyectables (ceftriaxona, vancomicina, meropenem, etc.)
+// 992990 — otras sustancias (hierro sacarato, zoledronato, etc.) — default
+func medicationCUPSFromName(medName string) (code, name string) {
+	upper := strings.ToUpper(medName)
+	switch {
+	case isBiologicModifier(upper):
+		return "992801", "INYECCIÓN O INFUSIÓN DE MODIFICADOR DE RESPUESTA BIOLÓGICA"
+	case isHormonalSubstance(upper):
+		return "992201", "INYECCIÓN O INFUSIÓN DE SUSTANCIA HORMONAL"
+	case isAntibiotic(upper):
+		return "992102", "INYECCIÓN O INFUSIÓN DE ANTIBIÓTICO"
+	default:
+		return "992990", "INYECCIÓN O INFUSIÓN DE OTRA SUSTANCIA TERAPÉUTICA O PROFILÁCTICA"
+	}
+}
+
+// isBiologicModifier detecta modificadores de respuesta biológica por principio activo.
+func isBiologicModifier(upper string) bool {
+	biologics := []string{
+		// TNF inhibidores
+		"ADALIMUMAB", "INFLIXIMAB", "ETANERCEPT", "CERTOLIZUMAB", "GOLIMUMAB",
+		// IL-6 inhibidores
+		"TOCILIZUMAB", "SARILUMAB",
+		// IL-17/23 inhibidores
+		"SECUKINUMAB", "IXEKIZUMAB", "USTEKINUMAB", "RISANKIZUMAB", "GUSELKUMAB",
+		// IL-4/13 inhibidor
+		"DUPILUMAB", "TRALOKINUMAB",
+		// IL-5 inhibidores
+		"MEPOLIZUMAB", "RESLIZUMAB", "BENRALIZUMAB", "TEZEPELUMAB",
+		// IgE inhibidor
+		"OMALIZUMAB",
+		// B-cell
+		"RITUXIMAB", "OBINUTUZUMAB", "BELIMUMAB", "ANIFROLUMAB",
+		// T-cell
+		"ABATACEPT",
+		// Hueso
+		"ROMOSOZUMAB", "DENOSUMAB",
+		// PCSK9 inhibidores
+		"EVOLOCUMAB", "ALIROCUMAB", "INCLISIRAN",
+		// CGRP (migraña)
+		"ERENUMAB", "FREMANEZUMAB", "GALCANEZUMAB", "EPTINEZUMAB",
+		// CD20 / linfomas
+		"OFATUMUMAB", "OCRELIZUMAB",
+		// Otros biologicos
+		"VEDOLIZUMAB", "NATALIZUMAB", "ALEMTUZUMAB",
+		"BIMEKIZUMAB", "SPESOLIMAB",
+	}
+	for _, b := range biologics {
+		if strings.Contains(upper, b) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHormonalSubstance detecta sustancias hormonales e insulinas.
+func isHormonalSubstance(upper string) bool {
+	hormones := []string{
+		"INSULINA", "INSULIN",
+		"TESTOSTERONA", "TESTOSTERONE",
+		"ESTRADIOL", "PROGESTERONA",
+		"SOMATROPINA", "SOMATROPIN",
+		"ERITROPOYETINA", "EPOETINA", "DARBEPOETINA", "DARBEPOETIN",
+		"PEGFILGRASTIM", "FILGRASTIM", "LENOGRASTIM",
+		"TERIPARATIDE", "TERIPARATIDA",
+		"LANREOTIDE", "OCTREOTIDE", "PASIREOTIDE",
+		"FACTOR VIII", "FACTOR VII", "FACTOR IX", "FACTOR X",
+		"ELTROMBOPAG", "ROMIPLOSTIM",
+	}
+	for _, h := range hormones {
+		if strings.Contains(upper, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAntibiotic detecta antibióticos de uso inyectable.
+func isAntibiotic(upper string) bool {
+	antibiotics := []string{
+		"CEFTRIAXONA", "CEFAZOLINA", "CEFUROXIMA", "CEFOTAXIMA", "CEFEPIMA",
+		"VANCOMICINA", "TEICOPLANINA", "DAPTOMICINA",
+		"MEROPENEM", "IMIPENEM", "ERTAPENEM", "DORIPENEM",
+		"PIPERACILINA", "AMPICILINA", "AMOXICILINA",
+		"AZITROMICINA", "CLARITROMICINA",
+		"CIPROFLOXACINA", "LEVOFLOXACINA", "MOXIFLOXACINA",
+		"CLINDAMICINA", "METRONIDAZOL",
+		"COLISTINA", "POLIMIXINA",
+		"LINEZOLID", "TIGECICLINA",
+		"GENTAMICINA", "AMIKACINA", "TOBRAMICINA",
+	}
+	for _, a := range antibiotics {
+		if strings.Contains(upper, a) {
+			return true
+		}
+	}
+	return false
 }
 
 func mediaURLFromMessage(msg bird.InboundMessage) string {
