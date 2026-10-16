@@ -81,9 +81,9 @@ func medicationCheckExcelHandler(medRepo *local.MedicationPendingRepo) sm.StateH
 
 func backToMenuNoRecord(sess *session.Session) *sm.StateResult {
 	list := &sm.ListMessage{
-		Body: "Consultamos nuestro listado de medicamentos y *no encontramos un medicamento pendiente de aplicación* para tu documento.\n\n" +
-			"Si crees que hay un error, comunícate directamente con la IPS para verificar tu registro.\n\n" +
-			"¿En qué más puedo ayudarte?",
+		Body: "Consultamos nuestro listado y *tu medicamento aún no está disponible en la farmacia institucional de Neurodx*.\n\n" +
+			"Para continuar, debes dirigirte a tu entidad responsable o a la farmacia encargada de la dispensación y solicitar que el medicamento sea *enviado a Neurodx* para su posterior aplicación.\n\n" +
+			"Una vez confirmada la disponibilidad, podrás agendar tu cita de aplicación. ¿En qué más puedo ayudarte?",
 		Title: "Ver opciones",
 		Sections: []sm.ListSection{{
 			Title: "Menú principal",
