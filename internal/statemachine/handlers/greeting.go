@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"time"
 
 	"github.com/neuro-bot/neuro-bot/internal/bird"
@@ -260,9 +259,7 @@ func startAgendarFlow(r *sm.StateResult) *sm.StateResult {
 // MEDICATION_CHECK_SANITAS (automático) — se llega tras identificar/crear al paciente (flujo de
 // agendar reutilizado). Valida el contrato permitido (Sanitas 4/5/6/7, Capital Salud 14, FOMAG 21):
 //   - Contrato no permitido → informa y vuelve al menú.
-//   - Contrato permitido → indica los documentos a tener listos y bifurca:
-//     · si hay canal externo (MEDICATION_EXTERNAL_WA_NUMBER) → envía el link wa.me (no escala);
-//     · si no → continúa al flujo automático: MEDICATION_CHECK_EXCEL.
+//   - Contrato permitido → continúa al flujo automático: MEDICATION_CHECK_EXCEL.
 func medicationCheckSanitasHandler(cfg *config.Config) sm.StateHandler {
 	return func(_ context.Context, sess *session.Session, _ bird.InboundMessage) (*sm.StateResult, error) {
 		if !services.IsMedicationAllowedContract(sess.GetContext("patient_contract")) {
@@ -280,22 +277,6 @@ func medicationCheckSanitasHandler(cfg *config.Config) sm.StateHandler {
 			"• Orden médica\n" +
 			"• Autorización vigente\n\n"
 
-		// Canal externo configurado → enviar link wa.me con mensaje prellenado y cerrar.
-		if cfg != nil && cfg.MedicationExternalWANumber != "" {
-			name := sess.GetContext("patient_name")
-			doc := sess.GetContext("patient_doc")
-			prefill := fmt.Sprintf("Hola, soy %s (documento %s). Solicito el servicio de *aplicación de medicamentos*.", name, doc)
-			link := "https://wa.me/" + cfg.MedicationExternalWANumber + "?text=" + url.QueryEscape(prefill)
-			text := docs +
-				"Para continuar, escríbenos por nuestro *canal de aplicación de medicamentos* en este enlace:\n\n" +
-				link + "\n\n" +
-				"Al abrirlo verás un mensaje listo con tus datos; solo pulsa *enviar* y un asesor te atenderá. 😊"
-			return buildAutoCloseResult(text).
-				WithClearCtx("medication_flow").
-				WithEvent("medication_external_channel", map[string]interface{}{"contract": sess.GetContext("patient_contract")}), nil
-		}
-
-		// Sin canal externo → flujo automático: buscar paciente en listado de medicamentos.
 		return sm.NewResult(sm.StateMedicationCheckExcel).
 			WithText(docs+"Vamos a verificar tu medicamento en nuestro listado. Un momento... 🔍").
 			WithEvent("medication_sanitas_confirmed", nil), nil
