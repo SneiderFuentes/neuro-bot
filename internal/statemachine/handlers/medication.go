@@ -355,7 +355,7 @@ func medicationPrepareScheduleHandler() sm.StateHandler {
 				WithContext("escalation_reason", "medicamentos_error"), nil
 		}
 
-		return sm.NewResult(sm.StateSearchSlots).
+		return sm.NewResult(sm.StateCheckExisting).
 			WithContext("cups_code", cupsCode).
 			WithContext("procedures_json", string(procJSON)).
 			WithContext("current_procedure_idx", "0").
