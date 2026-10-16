@@ -24,7 +24,7 @@ func RegisterEntityManagementHandlers(
 	entityRepo repository.EntityRepository,
 	patientRepo repository.PatientRepository,
 ) {
-	m.Register(sm.StateAskClientType, askClientTypeHandler())
+	m.Register(sm.StateAskClientType, askClientTypeHandler(entityRepo))
 	m.Register(sm.StateAskEpsRegimen, askEpsRegimenHandler())
 	m.Register(sm.StateShowEntityList, showEntityListHandler(entityRepo))
 	m.Register(sm.StateAskEntityNumber, askEntityNumberHandler(entityRepo))
@@ -36,7 +36,7 @@ func RegisterEntityManagementHandlers(
 
 // ASK_CLIENT_TYPE (interactivo) — selecciona tipo de entidad (6 categorías).
 // Bird V2: list with PARTICULAR, EPS, PREPAGADA, REGIMEN ESPECIAL, ARL, POLIZA
-func askClientTypeHandler() sm.StateHandler {
+func askClientTypeHandler(entityRepo repository.EntityRepository) sm.StateHandler {
 	return func(ctx context.Context, sess *session.Session, msg bird.InboundMessage) (*sm.StateResult, error) {
 		validPayloads := make([]string, 6)
 		for i := 1; i <= 6; i++ {
@@ -64,16 +64,31 @@ func askClientTypeHandler() sm.StateHandler {
 
 		label := domain.EntityCategoryLabels[index]
 
-		// PARTICULAR is a single option (PART02): skip the entity list and go
-		// straight to the document step. The contract is resolved from the entity.
+		// PARTICULAR: shortcut directo (PART02) solo si no hay entidades especiales en SIESA
+		// con regimen=4. Si hay (ej. PARTICULAR LIGA), se muestra la lista para que el paciente
+		// elija; showEntityListHandler antepone la opción genérica "Particular".
 		if strings.Contains(strings.ToUpper(category), "PARTICULAR") {
-			return sm.NewResult(sm.StateAskDocumentType).
+			hasSpecial := false
+			if entityRepo != nil {
+				if entities, err := entityRepo.FindActiveByCategory(ctx, category); err == nil && len(entities) > 0 {
+					hasSpecial = true
+				}
+			}
+			if !hasSpecial {
+				return sm.NewResult(sm.StateAskDocumentType).
+					WithContext("client_type", label).
+					WithContext("entity_category", category).
+					WithContext("menu_option", "agendar").
+					WithContext("selected_entity_code", particularEntityCode).
+					WithContext("selected_entity_name", "Particular").
+					WithText("Has seleccionado atención *particular*.\n\n"+docTypeMenuText()).
+					WithEvent("client_type_selected", map[string]interface{}{"type": label, "category": category}), nil
+			}
+			// Hay entidades especiales → ir a la lista (con opción genérica incluida).
+			return sm.NewResult(sm.StateShowEntityList).
 				WithContext("client_type", label).
 				WithContext("entity_category", category).
-				WithContext("menu_option", "agendar").
-				WithContext("selected_entity_code", particularEntityCode).
-				WithContext("selected_entity_name", "Particular").
-				WithText("Has seleccionado atención *particular*.\n\n"+docTypeMenuText()).
+				WithContext("entity_type_index", indexStr).
 				WithEvent("client_type_selected", map[string]interface{}{"type": label, "category": category}), nil
 		}
 
@@ -175,6 +190,13 @@ func showEntityListHandler(entityRepo repository.EntityRepository) sm.StateHandl
 			return sm.NewResult(sm.StateEscalateToAgent).
 				WithText("Lo siento, en este momento no pude completar tu solicitud automaticamente. Te voy a comunicar con uno de nuestros agentes para que pueda ayudarte.").
 				WithEvent("no_entities_found", map[string]interface{}{"category": category}), nil
+		}
+
+		// Para PARTICULAR, anteponer la opción genérica "Particular" (PART02) que no
+		// está en SIESA pero siempre debe estar disponible como primera opción.
+		if category == "PARTICULAR" {
+			generic := domain.Entity{Code: particularEntityCode, Name: "Particular"}
+			entities = append([]domain.Entity{generic}, entities...)
 		}
 
 		// Build numbered list and store ordered codes so ASK_ENTITY_NUMBER can resolve
