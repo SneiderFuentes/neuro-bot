@@ -64,16 +64,12 @@ func askClientTypeHandler(entityRepo repository.EntityRepository) sm.StateHandle
 
 		label := domain.EntityCategoryLabels[index]
 
-		// PARTICULAR: shortcut directo (PART02) solo si no hay entidades especiales en SIESA
-		// con regimen=4. Si hay (ej. PARTICULAR LIGA), se muestra la lista para que el paciente
-		// elija; showEntityListHandler antepone la opción genérica "Particular".
+		// PARTICULAR: shortcut directo (PART02) salvo que exista alguna entidad que requiere
+		// manejo especial (ej. PARTICULAR LIGA empresa=50001 → escala a agente).
+		// Solo esas entidades se muestran en la lista; el resto del universo regimen=4 sigue
+		// usando el shortcut y nunca aparece en el menú.
 		if strings.Contains(strings.ToUpper(category), "PARTICULAR") {
-			hasSpecial := false
-			if entityRepo != nil {
-				if entities, err := entityRepo.FindActiveByCategory(ctx, category); err == nil && len(entities) > 0 {
-					hasSpecial = true
-				}
-			}
+			hasSpecial := particularHasSpecialEntities(ctx, entityRepo)
 			if !hasSpecial {
 				return sm.NewResult(sm.StateAskDocumentType).
 					WithContext("client_type", label).
@@ -84,7 +80,7 @@ func askClientTypeHandler(entityRepo repository.EntityRepository) sm.StateHandle
 					WithText("Has seleccionado atención *particular*.\n\n"+docTypeMenuText()).
 					WithEvent("client_type_selected", map[string]interface{}{"type": label, "category": category}), nil
 			}
-			// Hay entidades especiales → ir a la lista (con opción genérica incluida).
+			// Hay entidades especiales → ir a la lista (con opción genérica + especiales).
 			return sm.NewResult(sm.StateShowEntityList).
 				WithContext("client_type", label).
 				WithContext("entity_category", category).
@@ -192,11 +188,27 @@ func showEntityListHandler(entityRepo repository.EntityRepository) sm.StateHandl
 				WithEvent("no_entities_found", map[string]interface{}{"category": category}), nil
 		}
 
-		// Para PARTICULAR, anteponer la opción genérica "Particular" (PART02) que no
-		// está en SIESA pero siempre debe estar disponible como primera opción.
+		// Para PARTICULAR, mostrar solo la opción genérica "Particular" más las entidades
+		// especiales (empresa en particularSpecialCodes). Las demás entidades regimen=4
+		// (ej. "PARTICULAR 10% DESCUENTO") usan el shortcut PART02 y nunca aparecen aquí.
 		if category == "PARTICULAR" {
+			var special []domain.Entity
+			for _, e := range entities {
+				if particularSpecialCodes[e.Code] {
+					special = append(special, e)
+				}
+			}
 			generic := domain.Entity{Code: particularEntityCode, Name: "Particular"}
-			entities = append([]domain.Entity{generic}, entities...)
+			entities = append([]domain.Entity{generic}, special...)
+			if len(entities) == 1 {
+				// Solo está la genérica (las especiales desaparecieron de SIESA): shortcut.
+				return sm.NewResult(sm.StateAskDocumentType).
+					WithContext("menu_option", "agendar").
+					WithContext("selected_entity_code", particularEntityCode).
+					WithContext("selected_entity_name", "Particular").
+					WithText("Has seleccionado atención *particular*.\n\n"+docTypeMenuText()).
+					WithEvent("particular_special_gone", nil), nil
+			}
 		}
 
 		// Build numbered list and store ordered codes so ASK_ENTITY_NUMBER can resolve
@@ -421,6 +433,31 @@ func matchEntityByName(input string, names []string) int {
 		}
 	}
 	return 0
+}
+
+// particularSpecialCodes lista los códigos empresa de entidades con regimen=4 que requieren
+// manejo especial (ej. escalación a agente). Solo estos aparecen en la lista de selección;
+// el resto de entidades PARTICULAR usan el shortcut PART02.
+var particularSpecialCodes = map[string]bool{
+	"50001": true, // PARTICULAR LIGA → escala a agente
+}
+
+// particularHasSpecialEntities consulta SIESA y devuelve true si alguna entidad de
+// regimen=4 está en particularSpecialCodes y sigue activa.
+func particularHasSpecialEntities(ctx context.Context, entityRepo repository.EntityRepository) bool {
+	if entityRepo == nil {
+		return false
+	}
+	entities, err := entityRepo.FindActiveByCategory(ctx, "PARTICULAR")
+	if err != nil {
+		return false
+	}
+	for _, e := range entities {
+		if particularSpecialCodes[e.Code] {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Legacy handlers (kept for existing patient entity check/change flow) ---
