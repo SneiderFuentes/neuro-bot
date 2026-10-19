@@ -189,15 +189,9 @@ func showEntityListHandler(entityRepo repository.EntityRepository) sm.StateHandl
 		}
 
 		// Para PARTICULAR, mostrar solo la opción genérica "Particular" más las entidades
-		// especiales (empresa en particularSpecialCodes). Las demás entidades regimen=4
-		// (ej. "PARTICULAR 10% DESCUENTO") usan el shortcut PART02 y nunca aparecen aquí.
+		// especiales buscadas por código directo (FindActiveByCategory filtra solo PART02).
 		if category == "PARTICULAR" {
-			var special []domain.Entity
-			for _, e := range entities {
-				if particularSpecialCodes[e.Code] {
-					special = append(special, e)
-				}
-			}
+			special := particularSpecialEntities(ctx, entityRepo)
 			generic := domain.Entity{Code: particularEntityCode, Name: "Particular"}
 			entities = append([]domain.Entity{generic}, special...)
 			if len(entities) == 1 {
@@ -435,29 +429,41 @@ func matchEntityByName(input string, names []string) int {
 	return 0
 }
 
-// particularSpecialCodes lista los códigos empresa de entidades con regimen=4 que requieren
+// particularSpecialCodes lista los códigos empresa de entidades PARTICULAR que requieren
 // manejo especial (ej. escalación a agente). Solo estos aparecen en la lista de selección;
 // el resto de entidades PARTICULAR usan el shortcut PART02.
-var particularSpecialCodes = map[string]bool{
-	"50001": true, // PARTICULAR LIGA → escala a agente
+// FindActiveByCategory("PARTICULAR") filtra AND empresa='PART02', así que las entidades
+// especiales se buscan directamente por código con FindByCode.
+var particularSpecialCodes = []string{
+	"50001", // PARTICULAR LIGA → escala a agente
 }
 
-// particularHasSpecialEntities consulta SIESA y devuelve true si alguna entidad de
-// regimen=4 está en particularSpecialCodes y sigue activa.
+// particularHasSpecialEntities devuelve true si alguna entidad de particularSpecialCodes
+// existe y está activa en SIESA.
 func particularHasSpecialEntities(ctx context.Context, entityRepo repository.EntityRepository) bool {
 	if entityRepo == nil {
 		return false
 	}
-	entities, err := entityRepo.FindActiveByCategory(ctx, "PARTICULAR")
-	if err != nil {
-		return false
-	}
-	for _, e := range entities {
-		if particularSpecialCodes[e.Code] {
+	for _, code := range particularSpecialCodes {
+		if e, err := entityRepo.FindByCode(ctx, code); err == nil && e != nil && e.IsActive {
 			return true
 		}
 	}
 	return false
+}
+
+// particularSpecialEntities devuelve las entidades activas de particularSpecialCodes.
+func particularSpecialEntities(ctx context.Context, entityRepo repository.EntityRepository) []domain.Entity {
+	if entityRepo == nil {
+		return nil
+	}
+	var result []domain.Entity
+	for _, code := range particularSpecialCodes {
+		if e, err := entityRepo.FindByCode(ctx, code); err == nil && e != nil && e.IsActive {
+			result = append(result, *e)
+		}
+	}
+	return result
 }
 
 // --- Legacy handlers (kept for existing patient entity check/change flow) ---
