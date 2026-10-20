@@ -429,37 +429,43 @@ func matchEntityByName(input string, names []string) int {
 	return 0
 }
 
-// particularSpecialCodes lista los códigos empresa de entidades PARTICULAR que requieren
-// manejo especial (ej. escalación a agente). Solo estos aparecen en la lista de selección;
-// el resto de entidades PARTICULAR usan el shortcut PART02.
-// FindActiveByCategory("PARTICULAR") filtra AND empresa='PART02', así que las entidades
-// especiales se buscan directamente por código con FindByCode.
-var particularSpecialCodes = []string{
-	"50001", // PARTICULAR LIGA → escala a agente
+// particularSpecialEntry define una entidad PARTICULAR con manejo especial.
+// El nombre se hardcodea porque empresa puede tener varios contratos en SIESA
+// y FindByCode devolvería un nombre arbitrario (ej. "PARTICULAR TARIFA PLENA").
+type particularSpecialEntry struct {
+	Code string // empresa en SIESA
+	Name string // nombre a mostrar al paciente
 }
 
-// particularHasSpecialEntities devuelve true si alguna entidad de particularSpecialCodes
+// particularSpecialList lista las entidades PARTICULAR con manejo especial.
+// Solo estas aparecen en la lista; el resto usa el shortcut PART02.
+var particularSpecialList = []particularSpecialEntry{
+	{Code: "50001", Name: "PARTICULAR LIGA"}, // → escala a agente
+}
+
+// particularHasSpecialEntities devuelve true si alguna entrada de particularSpecialList
 // existe y está activa en SIESA.
 func particularHasSpecialEntities(ctx context.Context, entityRepo repository.EntityRepository) bool {
 	if entityRepo == nil {
 		return false
 	}
-	for _, code := range particularSpecialCodes {
-		if e, err := entityRepo.FindByCode(ctx, code); err == nil && e != nil && e.IsActive {
+	for _, entry := range particularSpecialList {
+		if e, err := entityRepo.FindByCode(ctx, entry.Code); err == nil && e != nil && e.IsActive {
 			return true
 		}
 	}
 	return false
 }
 
-// particularSpecialEntities devuelve las entidades activas de particularSpecialCodes.
+// particularSpecialEntities devuelve las entidades activas con nombre hardcodeado.
 func particularSpecialEntities(ctx context.Context, entityRepo repository.EntityRepository) []domain.Entity {
 	if entityRepo == nil {
 		return nil
 	}
 	var result []domain.Entity
-	for _, code := range particularSpecialCodes {
-		if e, err := entityRepo.FindByCode(ctx, code); err == nil && e != nil && e.IsActive {
+	for _, entry := range particularSpecialList {
+		if e, err := entityRepo.FindByCode(ctx, entry.Code); err == nil && e != nil && e.IsActive {
+			e.Name = entry.Name // usar nombre definido, no el de SIESA
 			result = append(result, *e)
 		}
 	}
