@@ -443,31 +443,19 @@ var particularSpecialList = []particularSpecialEntry{
 	{Code: "50001", Name: "PARTICULAR LIGA"}, // → escala a agente
 }
 
-// particularHasSpecialEntities devuelve true si alguna entrada de particularSpecialList
-// existe y está activa en SIESA.
-func particularHasSpecialEntities(ctx context.Context, entityRepo repository.EntityRepository) bool {
-	if entityRepo == nil {
-		return false
-	}
-	for _, entry := range particularSpecialList {
-		if e, err := entityRepo.FindByCode(ctx, entry.Code); err == nil && e != nil && e.IsActive {
-			return true
-		}
-	}
-	return false
+// particularHasSpecialEntities devuelve true si particularSpecialList tiene entradas.
+// No consulta SIESA: FindByCode("50001") busca por contratos.codigo=50001, que apunta
+// a otro contrato distinto al de PARTICULAR LIGA (codigo=60, empresa=50001).
+func particularHasSpecialEntities(_ context.Context, _ repository.EntityRepository) bool {
+	return len(particularSpecialList) > 0
 }
 
-// particularSpecialEntities devuelve las entidades activas con nombre hardcodeado.
-func particularSpecialEntities(ctx context.Context, entityRepo repository.EntityRepository) []domain.Entity {
-	if entityRepo == nil {
-		return nil
-	}
-	var result []domain.Entity
+// particularSpecialEntities construye los domain.Entity desde particularSpecialList
+// sin consultar SIESA, para evitar confusión entre codigo y empresa.
+func particularSpecialEntities(_ context.Context, _ repository.EntityRepository) []domain.Entity {
+	result := make([]domain.Entity, 0, len(particularSpecialList))
 	for _, entry := range particularSpecialList {
-		if e, err := entityRepo.FindByCode(ctx, entry.Code); err == nil && e != nil && e.IsActive {
-			e.Name = entry.Name // usar nombre definido, no el de SIESA
-			result = append(result, *e)
-		}
+		result = append(result, domain.Entity{Code: entry.Code, Name: entry.Name, IsActive: true})
 	}
 	return result
 }
