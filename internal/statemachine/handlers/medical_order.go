@@ -952,5 +952,20 @@ func ocrSpecialtyMismatch(ocrName, catalogName string) bool {
 			return true
 		}
 	}
+
+	// Términos de sub-procedimiento críticos: si el OCR los menciona pero el catálogo NO,
+	// el código CUPS fue probablemente mal leído (ej: 881436 translucencia → 881431 transabdominal).
+	// Se chequea en ambas direcciones para cubrir OCR correcto con código erróneo.
+	specificKeywords := []string{
+		"TRASLUCENCIA", "TRANSLUCENCIA", // ecografía obstétrica semana 11-14
+		"DETALLE ANATOMICO",             // ecografía semana 22-24
+	}
+	for _, kw := range specificKeywords {
+		ocrHas := strings.Contains(ocr, kw)
+		catHas := strings.Contains(cat, kw)
+		if ocrHas != catHas {
+			return true
+		}
+	}
 	return false
 }
