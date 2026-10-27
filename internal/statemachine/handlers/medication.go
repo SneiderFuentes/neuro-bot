@@ -57,6 +57,38 @@ func medicationCheckExcelHandler(medRepo *local.MedicationPendingRepo) sm.StateH
 			return backToMenuNoRecord(sess), nil
 		}
 
+		// Verificar autorización antes de continuar
+		if !rec.HasAutorizacion() {
+			medDesc := buildMedDescription(rec)
+			list := &sm.ListMessage{
+				Body: fmt.Sprintf(
+					"Encontramos tu medicamento en nuestro listado:\n\n%s\n\n"+
+						"⚠️ *Tu medicamento aún no tiene autorización vigente.*\n\n"+
+						"Para poder agendar la cita de aplicación, debes dirigirte a tu EPS y solicitar la *autorización del medicamento*. "+
+						"Una vez obtenida la autorización, vuelve a contactarnos y con gusto te agendaremos. ¿En qué más puedo ayudarte?",
+					medDesc,
+				),
+				Title: "Ver opciones",
+				Sections: []sm.ListSection{{
+					Title: "Menú principal",
+					Rows: []sm.ListRow{
+						{ID: "agendar", Title: "Agendar cita", Description: "Si tienes una orden médica"},
+						{ID: "consultar", Title: "Citas Programadas", Description: "Consulta, confirma o cancela tus citas"},
+						{ID: "ubicacion", Title: "Ubicación", Description: "Conoce nuestras sedes"},
+						{ID: "ayuda", Title: "Cómo usar el bot", Description: "Guía rápida"},
+					},
+				}},
+			}
+			r := sm.NewResult(sm.StateMainMenu).
+				WithClearCtx("medication_flow").
+				WithEvent("medication_sin_autorizacion", map[string]interface{}{
+					"doc":        sess.GetContext("patient_doc"),
+					"medicamento": rec.Medicamento,
+				})
+			r.Messages = append(r.Messages, list)
+			return r, nil
+		}
+
 		// Guardar datos del medicamento en sesión
 		sess.SetContext("med_medicamento", rec.Medicamento)
 		sess.SetContext("med_nombre_comercial", rec.NombreComercial)
