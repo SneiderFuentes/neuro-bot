@@ -530,35 +530,28 @@ func validateOCRHandler(procedureRepo repository.ProcedureRepository, medRepo *l
 		}
 		cups = valid
 
-		// Bloqueo medicamentos: si la orden contiene un procedimiento de inyección/infusión/infiltración,
-		// el paciente debe tener autorización vigente en medication_pending. Si no la tiene, se bloquea
-		// para evitar que el flujo de orden médica eluda la validación de medicamentos.
+		// Redirección a flujo de medicamentos: si la orden contiene un procedimiento de
+		// inyección/infusión/infiltración, se redirige siempre a StateMedicationCheckExcel.
+		// Ese estado valida la autorización y, si es válida, conduce al paciente por el
+		// cuestionario clínico completo (fecha, dosis, frecuencia, síntomas, historia, orden).
+		// Esto evita que el flujo de orden médica eluda tanto la validación de autorización
+		// como la recopilación de datos clínicos obligatorios.
 		if medRepo != nil {
 			for _, cup := range cups {
 				if isMedicationApplicationProcedure(cup.Name) {
-					doc := sess.GetContext("patient_doc")
-					rec, _ := medRepo.FindByDocument(ctx, doc)
-					if rec == nil || !rec.HasAutorizacion() {
-						observability.Emit(observability.TraceSession(sess.ID), "agendar", "medication_order_blocked",
-							observability.EmitOpts{
-								Phone:  sess.PhoneNumber,
-								Reason: "sin_autorizacion_medicamento",
-								Attrs:  map[string]interface{}{"cups_code": cup.Code, "cups_name": cup.Name, "doc": doc},
-							})
-						return sm.NewResult(sm.StateMainMenu).
-							WithText(
-								"⚠️ Tu orden incluye la *" + cup.Name + "*.\n\n" +
-									"Este procedimiento corresponde a la aplicación de un medicamento, " +
-									"y para agendarlo debes tener primero la *autorización vigente de tu EPS*.\n\n" +
-									"Comunícate con tu EPS para obtener la autorización y luego selecciona " +
-									"*\"Aplicar medicamentos\"* en el menú principal para continuar.").
-							WithEvent("medication_order_blocked", map[string]interface{}{
-								"cups_code": cup.Code,
-								"cups_name": cup.Name,
-								"doc":       doc,
-							}), nil
-					}
-					break
+					observability.Emit(observability.TraceSession(sess.ID), "agendar", "medication_order_redirected",
+						observability.EmitOpts{
+							Phone:  sess.PhoneNumber,
+							Reason: "orden_es_aplicacion_medicamento",
+							Attrs:  map[string]interface{}{"cups_code": cup.Code, "cups_name": cup.Name},
+						})
+					return sm.NewResult(sm.StateMedicationCheckExcel).
+						WithText("🔄 Detectamos que tu orden corresponde a la *aplicación de un medicamento*. " +
+							"Vamos a continuar por el proceso de medicamentos para recopilar la información necesaria.").
+						WithEvent("medication_order_redirected", map[string]interface{}{
+							"cups_code": cup.Code,
+							"cups_name": cup.Name,
+						}), nil
 				}
 			}
 		}
