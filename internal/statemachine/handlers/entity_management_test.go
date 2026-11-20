@@ -60,6 +60,21 @@ func TestAskClientType_Particular_SkipsListToDocument(t *testing.T) {
 	}
 }
 
+func TestAskClientType_Poliza_EscalatesToAgent(t *testing.T) {
+	m := sm.NewMachine()
+	RegisterEntityManagementHandlers(m, &testutil.MockEntityRepo{}, &testutil.MockPatientRepo{})
+
+	sess := testSess(sm.StateAskClientType)
+	// ct_6 = POLIZA category
+	result, err := m.Process(context.Background(), sess, postbackM("ct_6"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NextState != sm.StateEscalateToAgent {
+		t.Errorf("expected ESCALATE_TO_AGENT for POLIZA, got %s", result.NextState)
+	}
+}
+
 func TestAskClientType_InvalidText(t *testing.T) {
 	m := sm.NewMachine()
 	RegisterEntityManagementHandlers(m, &testutil.MockEntityRepo{}, &testutil.MockPatientRepo{})
